@@ -3,7 +3,7 @@ mod ui;
 
 use crossterm::{
     execute,
-    terminal::{enable_raw_mode, disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{enable_raw_mode, disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle},
     event::KeyCode
 };
 use ratatui::{prelude::*, Terminal};
@@ -13,7 +13,7 @@ fn main() -> Result<(), io::Error> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
+    execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide, SetTitle("FireWhal 🔥🐳"))?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?; // ⬅ clear screen before drawing

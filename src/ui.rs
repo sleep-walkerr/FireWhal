@@ -6,8 +6,8 @@ use ratatui::{prelude::*, Frame};
 
 pub fn render(f: &mut Frame, app: &App) {
     match app.screen {
-        AppScreen::Main => main_menu::render(f),
-        AppScreen::Help => splash::render(f),
+        AppScreen::MainMenu => main_menu::render(f),
+        AppScreen::Splash => splash::render(f),
     }
 }
 
