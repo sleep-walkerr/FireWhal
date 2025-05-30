@@ -1,5 +1,5 @@
 use std::fmt;
-
+// *** This is a sample, change me later
 // Example in firewhal-core/src/lib.rs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)] // Added Serialize, Deserialize if needed for config
 // #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

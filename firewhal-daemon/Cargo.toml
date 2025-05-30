@@ -1,6 +1,9 @@
 [package]
 name = "firewhal-daemon"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+firewhal-core = { path = "../firewhal-core" }
+aya = "0.13.1"
+sha3 = "0.10.8"

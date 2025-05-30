@@ -8,4 +8,3 @@ firewhal-core = { path = "../firewhal-core" }
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] } # Or another Discord lib
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 dotenvy = "0.15" # For loading .env file
-# ... other bot specific dependencies
