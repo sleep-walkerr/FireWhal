@@ -1,12 +1,8 @@
-[package]
-name = "FireWhal"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-aya = "0.13.1"
-color-eyre = "0.6.4"
-crossterm = "0.29.0"
-ratatui = "0.29.0"
-sha3 = "0.10.8"
-
+[workspace]
+resolver = "2" # Recommended for new workspaces
+members = [
+    "firewhal-core",
+    "firewhal-tui",
+    "firewhal-daemon",
+    "firewhal-discord-bot",
+]
