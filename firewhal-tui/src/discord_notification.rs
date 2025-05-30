@@ -1,0 +1,6 @@
+/*
+switched to discord bot for notifications
+use serenity to run bot along with daemon in the background
+in final product add option to turn bot on or off when building daemon
+
+*/
