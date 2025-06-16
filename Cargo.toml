@@ -4,5 +4,5 @@ members = [
     "firewhal-core",
     "firewhal-tui",
     "firewhal-daemon",
-    "firewhal-discord-bot",
+    "firewhal-discord-bot", "firewhal-ipc",
 ]

@@ -1,94 +1,68 @@
 use std::env;
+use std::time::Duration;
 
 use serenity::async_trait;
-use serenity::builder::{CreateAttachment, CreateEmbed, CreateEmbedFooter, CreateMessage};
-use serenity::model::channel::Message;
-use serenity::model::gateway::Ready;
+use serenity::model::gateway::{GatewayIntents, Ready};
 use serenity::model::Timestamp;
 use serenity::prelude::*;
+use serenity::model::id::ChannelId; // For ChannelId type
 
 use dotenvy::dotenv;
+use tokio::time::interval; // For the timer
+
 struct Handler;
 
-#[async_trait]
-impl EventHandler for Handler {
-    async fn message(&self, ctx: Context, msg: Message) {
-        // 1. Log every message received to see if the handler is triggered
-        println!(
-            "Message received: Author='{}', Content='{}', Channel='{}'",
-            msg.author.name, msg.content, msg.channel_id
-        );
+async fn periodic_message_sender(ctx: Context) {
+    let mut general_channel_id: Option<ChannelId> = None;
 
-        if msg.author.bot { // Optional: ignore messages from other bots (and self)
-            // println!("Ignoring message from bot: {}", msg.author.name);
-            return;
-        }
+    // Iterate over the guilds the bot is in to find a "general" channel
+    // We need to ensure the bot has GUILDS intent for this to work.
+    if ctx.cache.guilds().is_empty() {
+        println!("Bot is not in any guilds or GUILDS intent might be missing/cache not ready.");
+    }
 
-        if msg.content == "!hello" {
-            println!("'!hello' command detected. Preparing response..."); // 2. Log command detection
-
-            // 3. Robust file handling (example)
-            let attachment_result = CreateAttachment::path("./ferris_eyes.png").await;
-            let attachment_path_for_embed = "attachment://ferris_eyes.png"; // Keep this consistent with filename
-
-            match attachment_result {
-                Ok(attachment_file) => {
-                    println!("Successfully prepared attachment: ferris_eyes.png");
-                    let footer = CreateEmbedFooter::new("This is a footer");
-                    let embed = CreateEmbed::new()
-                        .title("This is a title")
-                        .description("This is a description")
-                        .image(attachment_path_for_embed) // Use the constant string here
-                        .fields(vec![
-                            ("This is the first field", "This is a field body", true),
-                            ("This is the second field", "Both fields are inline", true),
-                        ])
-                        .field("This is the third field", "This is not an inline field", false)
-                        .footer(footer)
-                        .timestamp(Timestamp::now());
-
-                    let builder = CreateMessage::new()
-                        .content("Hello, World!")
-                        .embed(embed)
-                        .add_file(attachment_file); // Use the Ok result
-
-                    println!("Attempting to send message with embed and attachment...");
-                    if let Err(why) = msg.channel_id.send_message(&ctx.http, builder).await {
-                        println!("Error sending message: {why:?}"); // 4. This will now catch send errors
-                    } else {
-                        println!("Message sent successfully!");
+    for guild_id in ctx.cache.guilds() {
+        match guild_id.channels(&ctx.http).await {
+            Ok(channels) => {
+                for (channel_id, guild_channel) in channels {
+                    if guild_channel.name.to_lowercase() == "general" {
+                        general_channel_id = Some(channel_id);
+                        println!("Found 'general' channel: {} in guild {}", channel_id, guild_id);
+                        break; // Found "general" channel in this guild
                     }
                 }
-                Err(e) => {
-                    println!("Failed to create attachment: {e:?}. Sending message without attachment.");
-                    // Optionally, send a message without the attachment if it fails
-                    let footer = CreateEmbedFooter::new("This is a footer (no image)");
-                    let embed = CreateEmbed::new()
-                        .title("This is a title (Image Failed)")
-                        .description("This is a description")
-                        // .image("attachment://ferris_eyes.png") // Omit if file failed
-                        .fields(vec![
-                            ("This is the first field", "This is a field body", true),
-                            ("This is the second field", "Both fields are inline", true),
-                        ])
-                        .field("This is the third field", "This is not an inline field", false)
-                        .footer(footer)
-                        .timestamp(Timestamp::now());
-                    let builder = CreateMessage::new()
-                        .content("Hello, World! (Image attachment failed)")
-                        .embed(embed);
-                     if let Err(why) = msg.channel_id.send_message(&ctx.http, builder).await {
-                        println!("Error sending fallback message: {why:?}");
-                     } else {
-                        println!("Fallback message sent successfully!");
-                     }
-                }
             }
+            Err(why) => {
+                println!("Could not fetch channels for guild {}: {:?}", guild_id, why);
+                continue; // Skip to the next guild
+            }
+        }
+        if general_channel_id.is_some() {
+            break; // Found "general" channel, no need to check other guilds
         }
     }
 
-    async fn ready(&self, _: Context, ready: Ready) {
+    if let Some(channel_id) = general_channel_id {
+        let mut timer = interval(Duration::from_secs(10));
+        loop {
+            timer.tick().await;
+            let message_content = format!("This is an automated message from FireWhal! Current time: {}", Timestamp::now());
+            if let Err(why) = channel_id.say(&ctx.http, &message_content).await {
+                println!("Error sending periodic message to channel {}: {:?}", channel_id, why);
+            } else {
+                println!("Periodic message sent to channel {}.", channel_id);
+            }
+        }
+    } else {
+        println!("Could not find a 'general' channel. Periodic messages will not be sent.");
+    }
+}
+
+#[async_trait]
+impl EventHandler for Handler {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
+        tokio::spawn(periodic_message_sender(ctx.clone())); // ctx.clone() is important here
     }
 }
 
@@ -101,9 +75,12 @@ async fn main() {
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT;
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILDS; // Crucial for fetching guild and channel information
     let mut client =
         Client::builder(&token, intents).event_handler(Handler).await.expect("Err creating client");
+
+
 
     if let Err(why) = client.start().await {
         println!("Client error: {why:?}");
