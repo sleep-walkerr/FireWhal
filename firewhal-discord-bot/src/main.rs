@@ -1,60 +1,87 @@
+use core::time;
 use std::env;
 use std::time::Duration;
+use std::thread::sleep;
 
 use serenity::async_trait;
 use serenity::model::gateway::{GatewayIntents, Ready};
 use serenity::model::Timestamp;
 use serenity::prelude::*;
-use serenity::model::id::ChannelId; // For ChannelId type
+use serenity::model::id::UserId; // For ChannelId type
 
 use dotenvy::dotenv;
+use tokio::task::spawn_blocking;
 use tokio::time::interval; // For the timer
+
+
+use zmq;
 
 struct Handler;
 
-async fn periodic_message_sender(ctx: Context) {
-    let mut general_channel_id: Option<ChannelId> = None;
-
-    // Iterate over the guilds the bot is in to find a "general" channel
-    // We need to ensure the bot has GUILDS intent for this to work.
-    if ctx.cache.guilds().is_empty() {
-        println!("Bot is not in any guilds or GUILDS intent might be missing/cache not ready.");
+async fn zmq_ipc_task() {
+    let subtask_result = spawn_blocking(move || -> Result<(), zmq::Error> {
+        let context = zmq::Context::new();
+        let requester = context.socket(zmq::REQ).unwrap();
+        assert!(requester.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
+        
+        loop{
+            println!("[ZMQ REQ] Sending request: data");
+            requester.send("data", 0)?;
+            
+            // Wait for the reply
+            let mut msg = zmq::Message::new();
+            requester.recv(&mut msg, 0)?;
+            println!("[ZMQ REQ] Received reply: {}", msg.as_str().unwrap_or("<invalid UTF-8>"));
+            sleep(time::Duration::from_secs(3));
+        }
+        
+    }).await;
+    
+    match subtask_result {
+        Ok(Ok(())) => println!("ZMQ monitor broke out of loop."),
+        Ok(Err(e)) => eprintln!("ZMQ monitor handleable error: {}", e),
+        Err(e) => eprintln!("ZMQ panicked or was cancelled: {}", e), // JoinError
     }
+}
 
-    for guild_id in ctx.cache.guilds() {
-        match guild_id.channels(&ctx.http).await {
-            Ok(channels) => {
-                for (channel_id, guild_channel) in channels {
-                    if guild_channel.name.to_lowercase() == "general" {
-                        general_channel_id = Some(channel_id);
-                        println!("Found 'general' channel: {} in guild {}", channel_id, guild_id);
-                        break; // Found "general" channel in this guild
-                    }
+async fn periodic_message_sender(ctx: Context) {
+    // 1. Get TARGET_USER_ID from environment
+    let user_id_str = match env::var("TARGET_USER_ID") {
+        Ok(id) => id,
+        Err(_) => {
+            println!("TARGET_USER_ID environment variable not set. Periodic DMs will not be sent.");
+            return;
+        }
+    };
+
+    // 2. Parse User ID string to u64
+    let user_id_u64 = match user_id_str.parse::<u64>() {
+        Ok(id) => id,
+        Err(_) => {
+            println!("Invalid TARGET_USER_ID: '{}'. Must be a valid u64. Periodic DMs will not be sent.", user_id_str);
+            return;
+        }
+    };
+    let user_id = UserId::new(user_id_u64);
+
+    // 3. Try to create a DM channel with the user
+    match user_id.create_dm_channel(&ctx.http).await {
+        Ok(private_channel) => {
+            println!("Successfully created/retrieved DM channel with user {}", user_id);
+            let mut timer = interval(Duration::from_secs(10)); // Send message every 10 seconds
+            loop {
+                timer.tick().await;
+                let message_content = format!("This is an automated message from FireWhal! Current time: {}", Timestamp::now());
+                if let Err(why) = private_channel.say(&ctx.http, &message_content).await {
+                    println!("Error sending periodic DM to user {}: {:?}", user_id, why);
+                } else {
+                    println!("Periodic DM sent to user {}.", user_id);
                 }
             }
-            Err(why) => {
-                println!("Could not fetch channels for guild {}: {:?}", guild_id, why);
-                continue; // Skip to the next guild
-            }
         }
-        if general_channel_id.is_some() {
-            break; // Found "general" channel, no need to check other guilds
+        Err(why) => {
+            println!("Could not create DM channel with user {}: {:?}. Periodic DMs will not be sent.", user_id, why);
         }
-    }
-
-    if let Some(channel_id) = general_channel_id {
-        let mut timer = interval(Duration::from_secs(10));
-        loop {
-            timer.tick().await;
-            let message_content = format!("This is an automated message from FireWhal! Current time: {}", Timestamp::now());
-            if let Err(why) = channel_id.say(&ctx.http, &message_content).await {
-                println!("Error sending periodic message to channel {}: {:?}", channel_id, why);
-            } else {
-                println!("Periodic message sent to channel {}.", channel_id);
-            }
-        }
-    } else {
-        println!("Could not find a 'general' channel. Periodic messages will not be sent.");
     }
 }
 
@@ -70,6 +97,8 @@ impl EventHandler for Handler {
 async fn main() {
     // Load environment variables from .env file
     dotenv().ok(); // .ok() will ignore if .env is not found, which is fine for production
+    tokio::spawn(zmq_ipc_task());
+
 
     // Configure the client with your Discord bot token in the environment.
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
