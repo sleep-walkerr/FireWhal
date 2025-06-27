@@ -96,11 +96,15 @@ async fn nonblocking_zmq_message_sender(msg: String) {
     // The actual blocking ZMQ work is offloaded to a blocking thread.
     let result = spawn_blocking(move || -> Result<(), zmq::Error> {
         let context = zmq::Context::new();
-        let requester = context.socket(zmq::REQ).unwrap();
-        assert!(requester.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
-        //let mut msg = zmq::Message::new();
+        // Use a DEALER socket to talk to a ROUTER. REQ sockets are for REP sockets.
+        let dealer = context.socket(zmq::DEALER).unwrap();
+        assert!(dealer.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
 
-        requester.send(&msg, 0)?; // Propagate ZMQ errors
+        // It's good practice to give the connection a moment to establish,
+        // especially for a fire-and-forget message.
+        sleep(Duration::from_millis(50));
+
+        dealer.send(&msg, 0)?; // Propagate ZMQ errors
         Ok(()) // Explicitly return Ok on success
     })
     .await; // This outer .await is for the JoinHandle from spawn_blocking.
