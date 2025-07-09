@@ -1,0 +1,1 @@
+Initial daemon test data for hashing.
