@@ -1,2 +1,3 @@
-/target
-/firewhal-discord-bot/.env
+aya-workspace/target
+primary-workspace/target
+primary-workspace/firewhal-discord-bot/.env
