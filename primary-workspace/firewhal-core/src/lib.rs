@@ -96,4 +96,3 @@ impl std::error::Error for FirewhalError {
         }
     }
 }
-// ... and so on for other common errors
