@@ -38,23 +38,23 @@ async fn main() -> Result<(), anyhow::Error> {
         warn!("failed to initialize eBPF logger: {e}");
     }
 
-    // --- Attach XDP Program ---
-    let xdp_prog: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into()?;
-    xdp_prog.load()?;
-    xdp_prog
-        .attach(&opt.iface, XdpFlags::default())
-        .context("failed to attach XDP program")?;
-    info!("Attached XDP filter program to interface {}.", opt.iface);
+    // // --- Attach XDP Program ---
+    // let xdp_prog: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into()?;
+    // xdp_prog.load()?;
+    // xdp_prog
+    //     .attach(&opt.iface, XdpFlags::default())
+    //     .context("failed to attach XDP program")?;
+    // info!("Attached XDP filter program to interface {}.", opt.iface);
 
 
-    // --- Attach Ingress Program ---
-    let ingress_prog: &mut cgroup_skb::CgroupSkb = bpf.program_mut("firewhal_ingress").unwrap().try_into()?;
-    ingress_prog.load()?;
-    let cgroup = File::open(&opt.cgroup_path)?;
-    ingress_prog
-        .attach(cgroup, cgroup_skb::CgroupSkbAttachType::Ingress,CgroupAttachMode::Single)
-        .context("failed to attach ingress program")?;
-    info!("Attached cgroup ingress filter program.");
+    // // --- Attach Ingress Program ---
+    // let ingress_prog: &mut cgroup_skb::CgroupSkb = bpf.program_mut("firewhal_ingress").unwrap().try_into()?;
+    // ingress_prog.load()?;
+    // let cgroup = File::open(&opt.cgroup_path)?;
+    // ingress_prog
+    //     .attach(cgroup, cgroup_skb::CgroupSkbAttachType::Ingress,CgroupAttachMode::Single)
+    //     .context("failed to attach ingress program")?;
+    // info!("Attached cgroup ingress filter program.");
 
     // --- Attach Egress Program ---
     let egress_prog: &mut CgroupSockAddr =
@@ -75,11 +75,11 @@ async fn main() -> Result<(), anyhow::Error> {
     port_blocklist.insert(blocked_port, 1, 0)?;
     info!("[Rule] Blocking incoming TCP/UDP traffic to port {}", blocked_port);
 
-    // Configure ingress ICMP block
-    let mut icmp_block: HashMap<_, u8, u8> =
-        HashMap::try_from(bpf.map_mut("ICMP_BLOCK_ENABLED").unwrap())?;
-    icmp_block.insert(1, 1, 0)?;
-    info!("[Rule] Blocking all incoming ICMP (ping) traffic via XDP.");
+    // // Configure ingress ICMP block
+    // let mut icmp_block: HashMap<_, u8, u8> =
+    //     HashMap::try_from(bpf.map_mut("ICMP_BLOCK_ENABLED").unwrap())?;
+    // icmp_block.insert(1, 1, 0)?;
+    // info!("[Rule] Blocking all incoming ICMP (ping) traffic via XDP.");
 
     // Configure egress IP blocklist
     let mut blocklist: HashMap<_, u32, u32> =
