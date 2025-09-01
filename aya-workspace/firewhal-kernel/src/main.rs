@@ -18,7 +18,7 @@ use tokio::signal;
 struct Opt {
     #[clap(short, long, default_value = "/sys/fs/cgroup")]
     cgroup_path: String,
-    #[clap(short, long, default_value = "enp6s0")]
+    #[clap(short, long, default_value = "eth0")] // FIX LATER This should apply automatically to EVERY interface (except for maybe loopback?)
     iface: String,
 }
 
@@ -69,11 +69,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // --- Configure Maps ---
     // Configure ingress port blocklist
-    let mut port_blocklist: HashMap<_, u16, u8> =
-        HashMap::try_from(bpf.map_mut("PORT_BLOCKLIST").unwrap())?;
-    let blocked_port = 8080u16;
-    port_blocklist.insert(blocked_port, 1, 0)?;
-    info!("[Rule] Blocking incoming TCP/UDP traffic to port {}", blocked_port);
+    // *** FIX THIS
+    // let mut port_blocklist: HashMap<_, u16, u8> =
+    //     HashMap::try_from(bpf.map_mut("PORT_BLOCKLIST").unwrap())?;
+    // let blocked_port = 8080u16;
+    // port_blocklist.insert(blocked_port, 1, 0)?;
+    // info!("[Rule] Blocking incoming TCP/UDP traffic to port {}", blocked_port);
 
     // Configure ingress ICMP block
     let mut icmp_block: HashMap<_, u8, u8> =

@@ -29,7 +29,7 @@ use network_types::{
 static mut BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 
 #[map]
-static mut PORT_BLOCKLIST: HashMap<u16, u8> = HashMap::with_max_entries(1024, 0);
+static mut PORT_BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
 
 #[map]
 static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0);
@@ -99,12 +99,13 @@ pub fn firewhal_ingress(ctx: SkBuffContext) -> i32 {
             );
         }
 
-        // // Check if the destination port is in our blocklist
+        // FIX ME Ports are u32 with skbuff, need to modify blocklist hashmap
+        // Check if the destination port is in our blocklist
         // let port_blocklist_ptr = unsafe { core::ptr::addr_of_mut!(PORT_BLOCKLIST) };
-        // if unsafe { (*port_blocklist_ptr).get(&dest_port).is_some() } {
+        // if unsafe { (*port_blocklist_ptr).get(&ctx.skb.local_port()).is_some() } {
         //     info!(
         //         &ctx,
-        //         "Cgroup Ingress: BLOCKED incoming packet to port {}", dest_port
+        //         "Cgroup Ingress: BLOCKED incoming packet to port {}", u32::from(ctx.skb.local_port())
         //     );
         //     return Ok(0); // Drop the packet *** modified from TC_ACT_SHOT
         // }
