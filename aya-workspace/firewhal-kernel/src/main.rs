@@ -18,7 +18,7 @@ use tokio::signal;
 struct Opt {
     #[clap(short, long, default_value = "/sys/fs/cgroup")]
     cgroup_path: String,
-    #[clap(short, long, default_value = "lo")]
+    #[clap(short, long, default_value = "eth0")]
     iface: String,
 }
 
@@ -47,25 +47,25 @@ async fn main() -> Result<(), anyhow::Error> {
     // info!("Attached XDP filter program to interface {}.", opt.iface);
 
 
-    // // --- Attach Ingress Program ---
-    // let ingress_prog: &mut cgroup_skb::CgroupSkb = bpf.program_mut("firewhal_ingress").unwrap().try_into()?;
-    // ingress_prog.load()?;
-    // let cgroup = File::open(&opt.cgroup_path)?;
-    // ingress_prog
-    //     .attach(cgroup, cgroup_skb::CgroupSkbAttachType::Ingress,CgroupAttachMode::Single)
-    //     .context("failed to attach ingress program")?;
-    // info!("Attached cgroup ingress filter program.");
-
-    // --- Attach Egress Program ---
-    let egress_prog: &mut CgroupSockAddr =
-        bpf.program_mut("firewhal_egress").unwrap().try_into()?;
-    egress_prog.load()?;
-    // We need to re-open the cgroup file to get a new, independent file descriptor.
+    // --- Attach Ingress Program ---
+    let ingress_prog: &mut cgroup_skb::CgroupSkb = bpf.program_mut("firewhal_ingress").unwrap().try_into()?;
+    ingress_prog.load()?;
     let cgroup = File::open(&opt.cgroup_path)?;
-    egress_prog
-        .attach(cgroup, CgroupAttachMode::Single)
-        .context("failed to attach egress program")?;
-    info!("Attached cgroup egress filter program.");
+    ingress_prog
+        .attach(cgroup, cgroup_skb::CgroupSkbAttachType::Ingress,CgroupAttachMode::Single)
+        .context("failed to attach ingress program")?;
+    info!("Attached cgroup ingress filter program.");
+
+    // // --- Attach Egress Program ---
+    // let egress_prog: &mut CgroupSockAddr =
+    //     bpf.program_mut("firewhal_egress").unwrap().try_into()?;
+    // egress_prog.load()?;
+    // // We need to re-open the cgroup file to get a new, independent file descriptor.
+    // let cgroup = File::open(&opt.cgroup_path)?;
+    // egress_prog
+    //     .attach(cgroup, CgroupAttachMode::Single)
+    //     .context("failed to attach egress program")?;
+    // info!("Attached cgroup egress filter program.");
 
     // --- Configure Maps ---
     // Configure ingress port blocklist
@@ -75,11 +75,11 @@ async fn main() -> Result<(), anyhow::Error> {
     port_blocklist.insert(blocked_port, 1, 0)?;
     info!("[Rule] Blocking incoming TCP/UDP traffic to port {}", blocked_port);
 
-    // // Configure ingress ICMP block
-    // let mut icmp_block: HashMap<_, u8, u8> =
-    //     HashMap::try_from(bpf.map_mut("ICMP_BLOCK_ENABLED").unwrap())?;
-    // icmp_block.insert(1, 1, 0)?;
-    // info!("[Rule] Blocking all incoming ICMP (ping) traffic via XDP.");
+    // Configure ingress ICMP block
+    let mut icmp_block: HashMap<_, u8, u8> =
+        HashMap::try_from(bpf.map_mut("ICMP_BLOCK_ENABLED").unwrap())?;
+    icmp_block.insert(1, 1, 0)?;
+    info!("[Rule] Blocking all incoming ICMP (ping) traffic via XDP.");
 
     // Configure egress IP blocklist
     let mut blocklist: HashMap<_, u32, u32> =
