@@ -18,7 +18,7 @@ use tokio::signal;
 struct Opt {
     #[clap(short, long, default_value = "/sys/fs/cgroup")]
     cgroup_path: String,
-    #[clap(short, long, default_value = "eth0")]
+    #[clap(short, long, default_value = "enp6s0")]
     iface: String,
 }
 
@@ -38,13 +38,13 @@ async fn main() -> Result<(), anyhow::Error> {
         warn!("failed to initialize eBPF logger: {e}");
     }
 
-    // // --- Attach XDP Program ---
-    // let xdp_prog: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into()?;
-    // xdp_prog.load()?;
-    // xdp_prog
-    //     .attach(&opt.iface, XdpFlags::default())
-    //     .context("failed to attach XDP program")?;
-    // info!("Attached XDP filter program to interface {}.", opt.iface);
+    // --- Attach XDP Program ---
+    let xdp_prog: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into()?;
+    xdp_prog.load()?;
+    xdp_prog
+        .attach(&opt.iface, XdpFlags::default())
+        .context("failed to attach XDP program")?;
+    info!("Attached XDP filter program to interface {}.", opt.iface);
 
 
     // --- Attach Ingress Program ---
@@ -56,16 +56,16 @@ async fn main() -> Result<(), anyhow::Error> {
         .context("failed to attach ingress program")?;
     info!("Attached cgroup ingress filter program.");
 
-    // // --- Attach Egress Program ---
-    // let egress_prog: &mut CgroupSockAddr =
-    //     bpf.program_mut("firewhal_egress").unwrap().try_into()?;
-    // egress_prog.load()?;
-    // // We need to re-open the cgroup file to get a new, independent file descriptor.
-    // let cgroup = File::open(&opt.cgroup_path)?;
-    // egress_prog
-    //     .attach(cgroup, CgroupAttachMode::Single)
-    //     .context("failed to attach egress program")?;
-    // info!("Attached cgroup egress filter program.");
+    // --- Attach Egress Program ---
+    let egress_prog: &mut CgroupSockAddr =
+        bpf.program_mut("firewhal_egress").unwrap().try_into()?;
+    egress_prog.load()?;
+    // We need to re-open the cgroup file to get a new, independent file descriptor.
+    let cgroup = File::open(&opt.cgroup_path)?;
+    egress_prog
+        .attach(cgroup, CgroupAttachMode::Single)
+        .context("failed to attach egress program")?;
+    info!("Attached cgroup egress filter program.");
 
     // --- Configure Maps ---
     // Configure ingress port blocklist
