@@ -56,9 +56,33 @@ async fn main() -> Result<(), anyhow::Error> {
         .context("failed to attach ingress program")?;
     info!("Attached cgroup ingress filter program.");
 
-    // --- Attach Egress Program ---
+    // --- Attach Egress connect4 Program ---
     let egress_prog: &mut CgroupSockAddr =
-        bpf.program_mut("firewhal_egress").unwrap().try_into()?;
+        bpf.program_mut("firewhal_egress_connect4").unwrap().try_into()?;
+    egress_prog.load()?;
+    // We need to re-open the cgroup file to get a new, independent file descriptor.
+    let cgroup = File::open(&opt.cgroup_path)?;
+    egress_prog
+        .attach(cgroup, CgroupAttachMode::Single)
+        .context("failed to attach egress program")?;
+    info!("Attached cgroup egress filter program.");
+
+
+    // --- Attach Egress bind4 Program ---
+    let egress_prog: &mut CgroupSockAddr =
+        bpf.program_mut("firewhal_egress_bind4").unwrap().try_into()?;
+    egress_prog.load()?;
+    // We need to re-open the cgroup file to get a new, independent file descriptor.
+    let cgroup = File::open(&opt.cgroup_path)?;
+    egress_prog
+        .attach(cgroup, CgroupAttachMode::Single)
+        .context("failed to attach egress program")?;
+    info!("Attached cgroup egress filter program.");
+
+
+    // --- Attach Egress sendmsg4 Program ---
+    let egress_prog: &mut CgroupSockAddr =
+        bpf.program_mut("firewhal_egress_sendmsg4").unwrap().try_into()?;
     egress_prog.load()?;
     // We need to re-open the cgroup file to get a new, independent file descriptor.
     let cgroup = File::open(&opt.cgroup_path)?;

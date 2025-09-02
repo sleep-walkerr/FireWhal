@@ -34,6 +34,12 @@ static mut PORT_BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0)
 #[map]
 static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0);
 
+// INGRESS PROGRAMS
+
+/*
+This programs job is to do basic filtering based on IP addresses and ports. Having the allow\block rules be modified from the cgroup_sock_addr egress programs for stateful packet filtering is ideal.
+Ideally everything goes through XDP as it is the most performant, which is why I will try to follow the model of relying on XDP as much as possible, primarily using the cgroup_sock_addr programs to manage XDP rules. 
+*/
 #[xdp]
 pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
     let result = || -> Result<u32, ()> {
@@ -87,7 +93,12 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
     }
 }
 
-#[cgroup_skb(ingress)]
+/*
+THIS PROGRAM IS BEING REPLACED BY A cgroup_sock_addr(recvmsg4) program due to its inability to process UDP packets
+This program is included for the stateful aspect of the firewall. After applications have been approved via path and hash for outgoing traffic, their incoming traffic is monitored and allowed here and they are no longer handled by the egress program.
+This program will only function properly with TCP connections
+*/
+#[cgroup_skb(ingress)] 
 pub fn firewhal_ingress(ctx: SkBuffContext) -> i32 {
     let result = || -> Result<i32, i64> {
         
@@ -119,8 +130,75 @@ pub fn firewhal_ingress(ctx: SkBuffContext) -> i32 {
     }
 }
 
+/*
+This program is for filtering traffic to specific applications, may be completely unnecessary as a whole. 
+*/
+#[cgroup_sock_addr(recvmsg4)]
+pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
+    let result = || -> Result<i32, i32> {
+        info!(
+            &ctx,
+            "UDP Ingress Processing, Packet Recieved"
+            );
+        Ok(1)
+        }();
+
+    match result {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+// EGRESS PROGRAMS
+
+/*  Monitors connect syscalls for IPv4 traffic, has awareness of the process making the call and will filter based on application hash and trust later. Only works for TCP
+Include the ability to only allow outgoing traffic for specific ports on an application basis. For example, Firefox is only able to send traffic with a destination port of 443
+Basic example:
+sock_addr_program sees that firefox is in the list of trusted applications, its hash hasnt changed and neither has its path. We allow a connect syscall to a remote IP address with a destination address of 443.
+Now, the sock_addr_program adds an allow rule to the rule list used by the XDP program from that remote IP address and from port 443 for incoming traffic either until the connection is closed or until a certain amount of time has passed. 
+This method forgoes interacting with the systems conntrack functionality at all and requires the use of a map in the eBPF program that is potentially more performant to begin with. 
+*/
 #[cgroup_sock_addr(connect4)]
-pub fn firewhal_egress(ctx: SockAddrContext) -> i32 {
+pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
+    let result = || -> Result<i32, i32> {
+        let sockaddr_pointer = ctx.sock_addr;
+        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+        let user_port = unsafe { (*sockaddr_pointer).user_port };
+        // let remote_ip4 = unsafe { (*sockaddr_pointer).msg_src_ip4 };
+
+        //Convert to readable format
+        let user_ip_converted = u32::from_be(user_ip4); // This conversion is correct for the IP.
+        let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
+        //let remote_ip_converted = u32::from_be(remote_ip4);
+        
+        info!(
+            &ctx,
+            "TCP EGRESS Connection Attempt TO: [{:i}, port: {}]",
+            user_ip_converted, user_port_converted//, remote_ip_converted,
+        );
+
+        // The BLOCKLIST map stores keys in network byte order, so we use the original value.
+        let dest_addr = user_ip4;
+        let blocklist_ptr = unsafe { core::ptr::addr_of_mut!(BLOCKLIST) };
+        if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
+            let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+            info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
+            return Ok(0); // Block the connection
+        }
+
+        Ok(1) // Allow the connection
+    }();
+
+    match result {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+
+// Monitors for sendmsg syscalls for IPv4 traffic, same as connect4 program except monitors UDP traffic instead
+#[cgroup_sock_addr(sendmsg4)]
+pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
@@ -129,7 +207,7 @@ pub fn firewhal_egress(ctx: SockAddrContext) -> i32 {
         let dest_port_host = (u32::from_be(user_port) >> 16) as u16;
         info!(
             &ctx,
-            "EGRESS Connection Attempt to: {:i}, port: {}",
+            "UDP EGRESS Connection Attempt to: {:i}, port: {}",
             dest_ip_host, dest_port_host,
         );
 
@@ -152,6 +230,19 @@ pub fn firewhal_egress(ctx: SockAddrContext) -> i32 {
 }
 
 
+// Monitors bind syscalls for IPv4 traffic, this is used in hosting contexts and will be useful in the context of servers
+#[cgroup_sock_addr(bind4)]
+pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
+    let result = || -> Result<i32, i32> {
+        info!(&ctx, "Bind4 Egress Traffic Detected");
+        Ok(1) // Allow the bind
+    }();
+
+    match result {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
 
 #[cfg(not(test))]
 #[panic_handler]
