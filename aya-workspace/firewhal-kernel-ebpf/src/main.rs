@@ -39,6 +39,9 @@ static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0)
 /*
 This programs job is to do basic filtering based on IP addresses and ports. Having the allow\block rules be modified from the cgroup_sock_addr egress programs for stateful packet filtering is ideal.
 Ideally everything goes through XDP as it is the most performant, which is why I will try to follow the model of relying on XDP as much as possible, primarily using the cgroup_sock_addr programs to manage XDP rules. 
+
+Next step: 
+use this program to parse source and destination ip addresses and ports, and maybe mac addresses too
 */
 #[xdp]
 pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
@@ -46,6 +49,9 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
         // To parse packet data in XDP, we work with pointers to the start and
         // end of the packet buffer. This is a robust way to handle packet data
         // that works across aya-ebpf versions.
+
+
+
         let data_end = ctx.data_end();
         let data_start = ctx.data();
 
@@ -77,6 +83,17 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
             *ptr
         };
         let icmp_block_ptr = unsafe { core::ptr::addr_of_mut!(ICMP_BLOCK_ENABLED) };
+        
+        // Add basic print statement for all packets 
+        info!(
+            &ctx,
+            "XDP: Source:[{}], Destination: [{}], Protocol: {}",
+            ipv4_hdr.src_addr(),
+            ipv4_hdr.dst_addr(),
+            ipv4_hdr.proto as u8
+        );
+
+
         if ipv4_hdr.proto == IpProto::Icmp {
             if unsafe { (*icmp_block_ptr).get(&1).is_some() } {
                 info!(&ctx, "XDP: BLOCKED incoming ICMP packet");
@@ -138,7 +155,7 @@ pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
         info!(
             &ctx,
-            "UDP Ingress Processing, Packet Recieved"
+            "Cgroup Ingress Processing, Packet Recieved"
             );
         Ok(1)
         }();
@@ -233,9 +250,28 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 // Monitors bind syscalls for IPv4 traffic, this is used in hosting contexts and will be useful in the context of servers
 #[cgroup_sock_addr(bind4)]
 pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
-    let result = || -> Result<i32, i32> {
-        info!(&ctx, "Bind4 Egress Traffic Detected");
-        Ok(1) // Allow the bind
+let result = || -> Result<i32, i32> {
+        let sockaddr_pointer = ctx.sock_addr;
+        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+        let user_port = unsafe { (*sockaddr_pointer).user_port };
+        let dest_ip_host = u32::from_be(user_ip4); // This conversion is correct for the IP.
+        let dest_port_host = (u32::from_be(user_port) >> 16) as u16;
+        info!(
+            &ctx,
+            "UDP EGRESS Connection Attempt to: {:i}, port: {}",
+            dest_ip_host, dest_port_host,
+        );
+
+        // The BLOCKLIST map stores keys in network byte order, so we use the original value.
+        let dest_addr = user_ip4;
+        let blocklist_ptr = unsafe { core::ptr::addr_of_mut!(BLOCKLIST) };
+        if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
+            let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+            info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
+            return Ok(0); // Block the connection
+        }
+
+        Ok(1) // Allow the connection
     }();
 
     match result {

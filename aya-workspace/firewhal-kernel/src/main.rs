@@ -47,14 +47,14 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("Attached XDP filter program to interface {}.", opt.iface);
 
 
-    // --- Attach Ingress Program ---
-    let ingress_prog: &mut cgroup_skb::CgroupSkb = bpf.program_mut("firewhal_ingress").unwrap().try_into()?;
-    ingress_prog.load()?;
-    let cgroup = File::open(&opt.cgroup_path)?;
-    ingress_prog
-        .attach(cgroup, cgroup_skb::CgroupSkbAttachType::Ingress,CgroupAttachMode::Single)
-        .context("failed to attach ingress program")?;
-    info!("Attached cgroup ingress filter program.");
+    // // --- Attach Ingress Program ---
+    // let ingress_prog: &mut cgroup_skb::CgroupSkb = bpf.program_mut("firewhal_ingress").unwrap().try_into()?;
+    // ingress_prog.load()?;
+    // let cgroup = File::open(&opt.cgroup_path)?;
+    // ingress_prog
+    //     .attach(cgroup, cgroup_skb::CgroupSkbAttachType::Ingress,CgroupAttachMode::Single)
+    //     .context("failed to attach ingress program")?;
+    // info!("Attached cgroup ingress filter program.");
 
     // --- Attach Egress connect4 Program ---
     let egress_prog: &mut CgroupSockAddr =
