@@ -6,10 +6,11 @@ use ratatui::{prelude::*, widgets::*};
 
 pub fn render(f: &mut Frame) {
     let block = Block::default()
-        .title("FireWhal")
+        .title("FireWhal ")
         .borders(Borders::ALL)
         .title_alignment(Alignment::Center)
         .border_type(BorderType::Rounded)
+        .title_style(Style::default().fg(Color::LightBlue))
         ;
 
     let area = f.area();

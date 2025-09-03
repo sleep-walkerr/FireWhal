@@ -6,7 +6,7 @@ pub struct App {
 #[derive(Debug)]
 pub enum AppScreen {
     MainMenu,
-    Splash,
+    //Splash,
 }
 
 impl Default for AppScreen {
@@ -15,11 +15,11 @@ impl Default for AppScreen {
     }
 }
 
-impl App {
-    pub fn next_screen(&mut self) {
-        self.screen = match self.screen {
-            AppScreen::MainMenu => AppScreen::Splash,
-            AppScreen::Splash => AppScreen::MainMenu,
-        };
-    }
-}
+// impl App {
+//     pub fn next_screen(&mut self) {
+//         self.screen = match self.screen {
+//             //AppScreen::MainMenu => AppScreen::Splash
+//             AppScreen::Splash => AppScreen::MainMenu,
+//         };
+//     }
+// }
