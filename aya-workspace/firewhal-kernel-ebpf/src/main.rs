@@ -6,23 +6,20 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 #![no_std]
 #![no_main]
 
-use core::{iter::Cloned, mem};
+use core::mem;
 
 use aya_ebpf::{
-    bindings::{xdp_action, TC_ACT_OK, TC_ACT_SHOT},
-    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel},
-    macros::{cgroup_skb, cgroup_sock_addr, map, xdp},
+    bindings::xdp_action,
+    helpers::bpf_get_current_pid_tgid,
+    macros::{cgroup_sock_addr, map, xdp},
     maps::HashMap,
-    programs::{SkBuffContext, SockAddrContext, XdpContext},
-    EbpfContext,
+    programs::{SockAddrContext, XdpContext}
 };
 use aya_log_ebpf::info;
 
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
-    tcp::TcpHdr,
-    udp::UdpHdr,
 };
 
 #[map]
@@ -46,12 +43,6 @@ use this program to parse source and destination ip addresses and ports, and may
 #[xdp]
 pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
     let result = || -> Result<u32, ()> {
-        // To parse packet data in XDP, we work with pointers to the start and
-        // end of the packet buffer. This is a robust way to handle packet data
-        // that works across aya-ebpf versions.
-
-
-
         let data_end = ctx.data_end();
         let data_start = ctx.data();
 
@@ -82,7 +73,7 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
             }
             *ptr
         };
-        let icmp_block_ptr = unsafe { core::ptr::addr_of_mut!(ICMP_BLOCK_ENABLED) };
+        let icmp_block_ptr = core::ptr::addr_of_mut!(ICMP_BLOCK_ENABLED);
         
         // Add basic print statement for all packets 
         info!(
@@ -107,43 +98,6 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
     match result {
         Ok(ret) => ret,
         Err(_) => xdp_action::XDP_PASS, // On parsing error, better to pass than to drop unexpectedly
-    }
-}
-
-/*
-THIS PROGRAM IS BEING REPLACED BY A cgroup_sock_addr(recvmsg4) program due to its inability to process UDP packets
-This program is included for the stateful aspect of the firewall. After applications have been approved via path and hash for outgoing traffic, their incoming traffic is monitored and allowed here and they are no longer handled by the egress program.
-This program will only function properly with TCP connections
-*/
-#[cgroup_skb(ingress)] 
-pub fn firewhal_ingress(ctx: SkBuffContext) -> i32 {
-    let result = || -> Result<i32, i64> {
-        
-        if u32::from_be(ctx.skb.local_port()) != u32::from_be(22) {
-            info!(
-            &ctx,
-            "Ingress Processing: remote ipv4 {:i}, remote port {}, local ipv4 {:i}, local port {}",
-            u32::from_be(ctx.skb.remote_ipv4()), u32::from_be(ctx.skb.remote_port()), u32::from_be(ctx.skb.local_ipv4()), u32::from(ctx.skb.local_port()) // still not sure about whether I should be casting the port as a u16 but this seems to be working for now
-            );
-        }
-
-        // FIX ME Ports are u32 with skbuff, need to modify blocklist hashmap
-        // Check if the destination port is in our blocklist
-        // let port_blocklist_ptr = unsafe { core::ptr::addr_of_mut!(PORT_BLOCKLIST) };
-        // if unsafe { (*port_blocklist_ptr).get(&ctx.skb.local_port()).is_some() } {
-        //     info!(
-        //         &ctx,
-        //         "Cgroup Ingress: BLOCKED incoming packet to port {}", u32::from(ctx.skb.local_port())
-        //     );
-        //     return Ok(0); // Drop the packet *** modified from TC_ACT_SHOT
-        // }
-
-        Ok(1) // Allow the packet
-    }(); // Immediately execute the closure
-
-    match result {
-        Ok(ret) => ret,
-        Err(_) => 0, // On any parsing error, pass the packet. It's safer.
     }
 }
 
@@ -196,7 +150,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
 
         // The BLOCKLIST map stores keys in network byte order, so we use the original value.
         let dest_addr = user_ip4;
-        let blocklist_ptr = unsafe { core::ptr::addr_of_mut!(BLOCKLIST) };
+        let blocklist_ptr =  core::ptr::addr_of_mut!(BLOCKLIST);
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
             let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
             info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
@@ -230,7 +184,7 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 
         // The BLOCKLIST map stores keys in network byte order, so we use the original value.
         let dest_addr = user_ip4;
-        let blocklist_ptr = unsafe { core::ptr::addr_of_mut!(BLOCKLIST) };
+        let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
             let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
             info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
@@ -264,7 +218,7 @@ let result = || -> Result<i32, i32> {
 
         // The BLOCKLIST map stores keys in network byte order, so we use the original value.
         let dest_addr = user_ip4;
-        let blocklist_ptr = unsafe { core::ptr::addr_of_mut!(BLOCKLIST) };
+        let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
             let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
             info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);

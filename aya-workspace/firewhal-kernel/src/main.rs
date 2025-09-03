@@ -38,6 +38,9 @@ async fn main() -> Result<(), anyhow::Error> {
         warn!("failed to initialize eBPF logger: {e}");
     }
 
+    // ** NEED TO ADD IPv6 Programs later
+    // INGRESS PROGRAMS
+
     // --- Attach XDP Program ---
     let xdp_prog: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into()?;
     xdp_prog.load()?;
@@ -46,47 +49,50 @@ async fn main() -> Result<(), anyhow::Error> {
         .context("failed to attach XDP program")?;
     info!("Attached XDP filter program to interface {}.", opt.iface);
 
+    // --- Attach Ingress recvmsg4 Program ---
+    // This program should be optional to the user as it adds additional overhead that may be unnecessary to their needs
+    let ingress_recvmsg4_prog: &mut CgroupSockAddr = bpf.program_mut("firewhal_ingress_recvmsg4").unwrap().try_into()?;
+    ingress_recvmsg4_prog.load()?;
+    let cgroup = File::open(&opt.cgroup_path)?;
+    ingress_recvmsg4_prog
+        .attach(cgroup, CgroupAttachMode::Single)
+        .context("failed to attach XDP program")?;
+    info!("Attached XDP filter program to interface {}.", opt.iface);
 
-    // // --- Attach Ingress Program ---
-    // let ingress_prog: &mut cgroup_skb::CgroupSkb = bpf.program_mut("firewhal_ingress").unwrap().try_into()?;
-    // ingress_prog.load()?;
-    // let cgroup = File::open(&opt.cgroup_path)?;
-    // ingress_prog
-    //     .attach(cgroup, cgroup_skb::CgroupSkbAttachType::Ingress,CgroupAttachMode::Single)
-    //     .context("failed to attach ingress program")?;
-    // info!("Attached cgroup ingress filter program.");
+
+    //EGRESS PROGRAMS 
 
     // --- Attach Egress connect4 Program ---
-    let egress_prog: &mut CgroupSockAddr =
+    let egress_connect4_prog: &mut CgroupSockAddr =
         bpf.program_mut("firewhal_egress_connect4").unwrap().try_into()?;
-    egress_prog.load()?;
+    egress_connect4_prog.load()?;
     // We need to re-open the cgroup file to get a new, independent file descriptor.
     let cgroup = File::open(&opt.cgroup_path)?;
-    egress_prog
+    egress_connect4_prog
         .attach(cgroup, CgroupAttachMode::Single)
         .context("failed to attach egress program")?;
     info!("Attached cgroup egress filter program.");
 
 
     // --- Attach Egress bind4 Program ---
-    let egress_prog: &mut CgroupSockAddr =
+    let egress_bind4_prog: &mut CgroupSockAddr =
         bpf.program_mut("firewhal_egress_bind4").unwrap().try_into()?;
-    egress_prog.load()?;
+    egress_bind4_prog.load()?;
     // We need to re-open the cgroup file to get a new, independent file descriptor.
     let cgroup = File::open(&opt.cgroup_path)?;
-    egress_prog
+    egress_bind4_prog
         .attach(cgroup, CgroupAttachMode::Single)
         .context("failed to attach egress program")?;
     info!("Attached cgroup egress filter program.");
 
 
     // --- Attach Egress sendmsg4 Program ---
-    let egress_prog: &mut CgroupSockAddr =
+    let egress_sendmsg4_prog: &mut CgroupSockAddr =
         bpf.program_mut("firewhal_egress_sendmsg4").unwrap().try_into()?;
-    egress_prog.load()?;
+    egress_sendmsg4_prog.load()?;
     // We need to re-open the cgroup file to get a new, independent file descriptor.
     let cgroup = File::open(&opt.cgroup_path)?;
-    egress_prog
+    egress_sendmsg4_prog
         .attach(cgroup, CgroupAttachMode::Single)
         .context("failed to attach egress program")?;
     info!("Attached cgroup egress filter program.");
