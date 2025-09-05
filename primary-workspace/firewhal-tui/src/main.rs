@@ -4,7 +4,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, widgets::*};
-use std::{error::Error, io, time::{Duration, Instant}};
+use std::{error::Error,io, ops::{self, RangeBounds, RangeTo}, time::{Duration, Instant}};
 
 /// Holds the application's state
 struct App<'a> {
@@ -35,6 +35,7 @@ impl<'a> App<'a> {
     pub fn update_progress(&mut self) {
         self.progress += (self.progress_direction as f64) * 0.01; // Adjust speed as needed
 
+        // make this random later
         if self.progress >= 1.0 {
             self.progress = 1.0;
             self.progress_direction = -1;
@@ -165,19 +166,26 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(content_block, chunks[1]);
 
 
-    // --- INNER CONTENT LAYOUT (FOR CENTERING) ---
+    // // --- INNER CONTENT LAYOUT (FOR CENTERING) ---
 
-    // 1. Define the fixed size of the status box.
-    const STATUS_BOX_WIDTH: u16 = 25;
-    const STATUS_BOX_HEIGHT: u16 = 5; // 3 lines of text + 2 for top/bottom borders
+    // // 1. Define the fixed size of the status box.
+    // const STATUS_BOX_WIDTH: u16 = 25;
+    // const STATUS_BOX_HEIGHT: u16 = 5; // 3 lines of text + 2 for top/bottom borders
 
-    // 2. Define the fixed size of the usage bar.
-    const GAUGE_WIDTH: u16 = 40;
-    const GAUGE_HEIGHT: u16 = 3; // 1 line for gauge + 2 for top/bottom borders
+    // // 2. Define the fixed size of the usage bar.
+    // const GAUGE_WIDTH: u16 = 40;
+    // const GAUGE_HEIGHT: u16 = 3; // 1 line for gauge + 2 for top/bottom borders
 
-    // Calculate areas for both widgets
-    let status_box_area = centered_rect(content_inner_area, STATUS_BOX_WIDTH, STATUS_BOX_HEIGHT, 0.3); // 30% from top
-    let gauge_area = centered_rect(content_inner_area, GAUGE_WIDTH, GAUGE_HEIGHT, 0.6); // 60% from top
+    // // Calculate areas for both widgets
+    // let status_box_area = centered_rect(content_inner_area, STATUS_BOX_WIDTH, STATUS_BOX_HEIGHT, 0.3); // 30% from top
+    // let gauge_area = centered_rect(content_inner_area, GAUGE_WIDTH, GAUGE_HEIGHT, 0.6); // 60% from top
+
+    //Create a vertical (maybe horizontal too) alignment layout 
+    let main_vertical_content_layout = Layout::vertical([
+        Constraint::Length(25),
+        Constraint::Length(30),
+        Constraint::Min(0)
+    ]).split(chunks[1]);
 
     // --- STATUS PANEL (CENTERED) ---
     let status_box_block = Block::default()
@@ -205,8 +213,27 @@ fn ui(f: &mut Frame, app: &App) {
         .block(status_box_block)
         .alignment(Alignment::Center);
 
-    f.render_widget(status_paragraph, status_box_area);
+    f.render_widget(status_paragraph, main_vertical_content_layout[0]);
 
+
+    //Network Usage One time Position Calculation
+    // This will need a helper function that is called any time the window is resized or moved
+    //This is manual centering, there may be a way to do all of this automatically
+    //clamp function automatically fits a rectangle within another
+    // Using fractional scaling as much as possible
+    let network_usage_position = {
+        let parent_rect = main_vertical_content_layout[1];
+        let width = parent_rect.width / 2;
+        let height = 3;
+        let x = (parent_rect.width / 2) - width / 2;
+        let y = (parent_rect.height / 2) - height / 2;
+        Rect::new(
+        x,
+        y, 
+        width, 
+        height)
+    };
+    // println!("Area testing: {}", f.area().);
 
     // --- NETWORK USAGE BAR (CENTERED BELOW STATUS) ---
     let network_usage_bar = Gauge::default()
@@ -215,7 +242,7 @@ fn ui(f: &mut Frame, app: &App) {
         .percent((app.progress * 100.0) as u16) // Use app.progress
         .label(format!("{:.0}%", app.progress * 100.0)); // Display percentage
 
-    f.render_widget(network_usage_bar, gauge_area);
+    f.render_widget(network_usage_bar,main_vertical_content_layout[1])
 }
 
 /// Helper function to create a centered rect of a fixed size at a specific vertical position.
