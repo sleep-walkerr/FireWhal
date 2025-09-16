@@ -3,7 +3,7 @@ use aya::{
     maps::HashMap,
     programs::{CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags},
     include_bytes_aligned,
-    Bpf,
+    Ebpf,
 };
 use aya_log::EbpfLogger;
 use clap::Parser;
@@ -114,7 +114,7 @@ async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     env_logger::init();
 
     // --- 2. LOAD AND ATTACH EBPF PROGRAMS ---
-    let mut bpf = Bpf::load(include_bytes_aligned!(concat!(
+    let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/firewhal-kernel"
     )))?;
