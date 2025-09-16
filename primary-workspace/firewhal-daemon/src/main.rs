@@ -13,8 +13,12 @@ use zmq;
 use std::{
     fs::{self, File}, // For File and fs::write
     io::{BufReader, Read},
-    path::{Path, PathBuf},
+    path::{Path, PathBuf}
 };
+
+// Daemon Imports
+use daemonize::Daemonize;
+use std::thread;
 
 // Helper function to perform the blocking file read and hash calculation.
 fn calculate_hash_for_file(file_path: &Path) -> Result<Output<Sha3_256>, std::io::Error> {
@@ -118,10 +122,35 @@ async fn nonblocking_zmq_message_sender(msg: String) {
 }
 
 
+fn main(){
+        let stdout = File::create("/tmp/tokio-daemon.out").unwrap();
+    let stderr = File::create("/tmp/tokio-daemon.err").unwrap();
 
+    // 1. Configure the daemon but DON'T start the Tokio runtime yet.
+    let daemonize = Daemonize::new()
+        .pid_file("/tmp/tokio-daemon.pid")
+        .working_directory("/tmp")
+        .user("nobody")
+        .group("nogroup") // Use "nobody" on some systems
+        .stdout(stdout)
+        .stderr(stderr);
+
+    // 2. Start the daemon. The process forks here.
+    match daemonize.start() {
+        Ok(_) => {
+            println!("Daemon started. Running async logic now.");
+            // 3. We are now in the detached daemon process.
+            // It's safe to initialize the Tokio runtime HERE.
+            if let Err(e) = run_async_logic() {
+                eprintln!("Async logic failed: {}", e);
+            }
+        }
+        Err(e) => eprintln!("Error starting daemon: {}", e),
+    }
+}
 
 #[tokio::main]
-async fn main() {
+async fn run_async_logic() -> Result<(), Box<dyn std::error::Error>>{
     // Example: Hash a dummy file
     // Using a local path for the dummy file to avoid permission issues with /var/log/ during dev.
     // You can change this path if your daemon has appropriate permissions for other files.
@@ -149,4 +178,6 @@ async fn main() {
     if let Err(e) = checker_handle.await {
         eprintln!("Periodic hash checker task exited with an error: {:?}", e);
     }
+
+    Ok(())
 }

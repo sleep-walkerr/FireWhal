@@ -16,6 +16,9 @@ fn main() {
     // We'll store its unique ZMQ identity when it connects and tells us who it is.
     let mut discord_bot_identity: Option<Vec<u8>> = None;
 
+    //Keep track of TUI connection
+    let mut TUI_identity: Option<Vec<u8>> = None;
+
     loop {
         // ROUTER sockets receive multipart messages.
         // Frame 1: The identity of the sender.
@@ -33,15 +36,26 @@ fn main() {
                 discord_bot_identity = Some(identity);
                 // We don't need to reply, just register the identity and wait for other messages.
                 continue;
+            }else if  msg_str == "TUI_READY" {
+                TUI_identity = Some(identity);
+                continue;
+
             }
 
             // Check for the trigger message from the other program
             if msg_str == "File hash changed" {
+                if  let Some(tui_id) = &TUI_identity{
+                    //Test send to TUI
+                    println!("Sending to TUI");
+                    router.send(tui_id, zmq::SNDMORE).unwrap();
+                    router.send("Hash has changed",0).unwrap();
+                }
                 if let Some(bot_id) = &discord_bot_identity {
                     println!("[ROUTER] Trigger met. Sending notification to Discord bot.");
                     // Send a multipart message to the bot: [identity, payload]
                     router.send(bot_id, zmq::SNDMORE).unwrap();
                     router.send("Send Notification", 0).unwrap();
+
                 } else {
                     println!("[ROUTER] Trigger met, but Discord bot is not yet identified.");
                 }

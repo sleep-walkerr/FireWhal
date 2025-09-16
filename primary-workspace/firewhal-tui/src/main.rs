@@ -6,6 +6,12 @@ use crossterm::{
 use ratatui::{prelude::*, widgets::*};
 use std::{error::Error,io, ops::{self, RangeBounds, RangeTo}, time::{Duration, Instant}};
 
+use tokio::{
+    task::spawn_blocking,
+    time::sleep,
+};
+use zmq;
+
 /// Holds the application's state
 struct App<'a> {
     titles: Vec<&'a str>,
@@ -46,7 +52,53 @@ impl<'a> App<'a> {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+async fn nonblocking_zmq_message_sender(msg: String) {
+    // The actual blocking ZMQ work is offloaded to a blocking thread.
+    let result = spawn_blocking(move || -> Result<(), zmq::Error> {
+        let context = zmq::Context::new();
+        // Use a DEALER socket to talk to a ROUTER. REQ sockets are for REP sockets.
+        let dealer = context.socket(zmq::DEALER).unwrap();
+        assert!(dealer.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
+
+        // It's good practice to give the connection a moment to establish,
+        // especially for a fire-and-forget message.
+        sleep(Duration::from_millis(50));
+
+        dealer.send(&"TUI_READY".to_string(), 0)?; // Propagate ZMQ errors
+        
+        
+        //monitor for incoming messages and print them out
+        loop{
+            let mut msg = zmq::Message::new();
+            dealer.recv(&mut msg, 0)?;
+            let msg_str = msg.as_str().unwrap_or("");
+            println!("TUI recieved message from router: '{}'", msg_str);
+            if msg_str == "Hash has changed" {
+                dealer.send(&"Hash changed notifiication received by TUI ZMQ".to_string(),0)?;
+            }
+        }
+
+        Ok(()) // Explicitly return Ok on success
+    })
+    .await; // This outer .await is for the JoinHandle from spawn_blocking.
+
+
+    // Handle the result of the blocking task execution.
+    match result {
+        Ok(Ok(())) => println!("ZMQ message sent successfully."),
+        Ok(Err(e)) => eprintln!("ZMQ send error: {}", e),
+        Err(e) => eprintln!("ZMQ panicked or was cancelled: {}", e), // JoinError
+    }
+}
+
+
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    //ZMQ Message Test
+    let message_sender_handle = tokio::spawn(nonblocking_zmq_message_sender("TUI_READY".to_string())); 
+
+
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -70,6 +122,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if let Err(err) = res {
         println!("{err:?}");
+    }
+
+    //ZMQ Message Sender Test
+    if let Err(e) = message_sender_handle.await {
+        eprintln!("Periodic hash checker task exited with an error: {:?}", e);
     }
 
     Ok(())

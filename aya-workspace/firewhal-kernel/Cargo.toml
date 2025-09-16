@@ -8,6 +8,10 @@ license.workspace = true
 [dependencies]
 firewhal-kernel-common = { path = "../firewhal-kernel-common", features = ["user"] }
 
+#new additions 
+zmq = "0.10.0"
+network-interface = "2.0.3"
+
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
 aya-log = { workspace = true }
@@ -16,10 +20,12 @@ libc = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true, features = [
     "macros",
+    "time",
     "rt",
     "rt-multi-thread",
     "net",
     "signal",
+    "sync"
 ] }
 clap = { workspace = true, features = ["derive"] }
 [build-dependencies]
