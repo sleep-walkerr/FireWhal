@@ -4,11 +4,21 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, widgets::*};
-use std::{error::Error,io, ops::{self, RangeBounds, RangeTo}, time::{Duration, Instant}};
+use std::{
+    error::Error,
+    io,
+    ops::{self, RangeBounds, RangeTo},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 use tokio::{
     task::spawn_blocking,
     time::sleep,
+    sync::broadcast
 };
 use zmq;
 
@@ -52,52 +62,82 @@ impl<'a> App<'a> {
     }
 }
 
-async fn nonblocking_zmq_message_sender(msg: String) {
+async fn nonblocking_zmq_message_sender(
+    _msg: String,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    // This flag will be shared between our async task and the blocking ZMQ thread.
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+
     // The actual blocking ZMQ work is offloaded to a blocking thread.
-    let result = spawn_blocking(move || -> Result<(), zmq::Error> {
+    let mut blocking_task = spawn_blocking(move || -> Result<(), zmq::Error> {
         let context = zmq::Context::new();
-        // Use a DEALER socket to talk to a ROUTER. REQ sockets are for REP sockets.
         let dealer = context.socket(zmq::DEALER).unwrap();
+        // Set a timeout on receive so the loop doesn't block forever.
+        dealer.set_rcvtimeo(500)?;
+        // Set linger to 0 to prevent blocking on close.
+        dealer.set_linger(0)?;
         assert!(dealer.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
 
-        // It's good practice to give the connection a moment to establish,
-        // especially for a fire-and-forget message.
-        sleep(Duration::from_millis(50));
+        dealer.send("TUI_READY", 0)?;
 
-        dealer.send(&"TUI_READY".to_string(), 0)?; // Propagate ZMQ errors
-        
-        
-        //monitor for incoming messages and print them out
-        loop{
+        // Loop until the shutdown flag is set.
+        while running_clone.load(Ordering::Relaxed) {
             let mut msg = zmq::Message::new();
-            dealer.recv(&mut msg, 0)?;
-            let msg_str = msg.as_str().unwrap_or("");
-            println!("TUI recieved message from router: '{}'", msg_str);
-            if msg_str == "Hash has changed" {
-                dealer.send(&"Hash changed notifiication received by TUI ZMQ".to_string(),0)?;
+            match dealer.recv(&mut msg, 0) {
+                Ok(_) => {
+                    let msg_str = msg.as_str().unwrap_or("");
+                    // Note: `println!` will mess up the TUI display.
+                    // For debugging, it's better to log to a file.
+                    // e.g., log::info!("TUI received message: '{}'", msg_str);
+                    if msg_str == "Hash has changed" {
+                        let _ = dealer.send("Hash changed notification received by TUI ZMQ", 0);
+                    }
+                }
+                Err(zmq::Error::EAGAIN) => {
+                    // Timeout hit, this is expected. Loop again to check the `running` flag.
+                    continue;
+                }
+                Err(e) => {
+                    // A real error occurred.
+                    eprintln!("ZMQ recv error: {}", e);
+                    break;
+                }
             }
         }
+        Ok(())
+    });
 
-        Ok(()) // Explicitly return Ok on success
-    })
-    .await; // This outer .await is for the JoinHandle from spawn_blocking.
+    // This is our async control loop.
+    tokio::select! {
+        // Wait for the shutdown signal
+        _ = shutdown_rx.recv() => {
+            println!("Shutdown signal received in ZMQ task. Stopping blocking thread.");
+            running.store(false, Ordering::Relaxed);
+        },
+        // Or wait for the blocking task to finish on its own
+        _ = &mut blocking_task => {
+            println!("ZMQ blocking task finished before shutdown signal.");
+        }
+    };
 
-
-    // Handle the result of the blocking task execution.
-    match result {
-        Ok(Ok(())) => println!("ZMQ message sent successfully."),
-        Ok(Err(e)) => eprintln!("ZMQ send error: {}", e),
-        Err(e) => eprintln!("ZMQ panicked or was cancelled: {}", e), // JoinError
+    // After signaling shutdown, we must wait for the blocking task to actually finish.
+    if let Err(e) = blocking_task.await {
+        eprintln!("ZMQ blocking task panicked or was cancelled: {}", e);
+    } else {
+        println!("ZMQ task shut down gracefully.");
     }
 }
 
-
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    //ZMQ Message Test
-    let message_sender_handle = tokio::spawn(nonblocking_zmq_message_sender("TUI_READY".to_string())); 
+    // 1. Setup graceful shutdown channel
+    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
 
+    // 2. Spawn the ZMQ task, giving it a way to listen for the shutdown signal
+    let message_sender_handle =
+        tokio::spawn(nonblocking_zmq_message_sender("TUI_READY".to_string(), shutdown_rx));
 
     // setup terminal
     enable_raw_mode()?;
@@ -107,7 +147,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // create app and run it
-    let app = App::new();
+    let mut app = App::new();
     let tick_rate = Duration::from_millis(100); // Animation update rate
     let res = run_app(&mut terminal, app, tick_rate);
 
@@ -124,9 +164,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("{err:?}");
     }
 
-    //ZMQ Message Sender Test
+    // 3. Send the shutdown signal
+    println!("TUI exited. Sending shutdown signal to ZMQ task...");
+    let _ = shutdown_tx.send(());
+
+    // 4. Wait for the ZMQ task to finish cleanly
     if let Err(e) = message_sender_handle.await {
-        eprintln!("Periodic hash checker task exited with an error: {:?}", e);
+        eprintln!("ZMQ task did not shut down cleanly: {:?}", e);
     }
 
     Ok(())
