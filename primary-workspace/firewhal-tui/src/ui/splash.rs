@@ -3,8 +3,8 @@ Have a Narwhal made of fire slide downwards from a singular line on the screen
 */
 
 use ratatui::{prelude::*, widgets::*};
-
-pub fn render(f: &mut Frame) {
+use crate::app::App;
+pub fn render(f: &mut Frame, app: &App) {
     let block = Block::default()
         .title("FireWhal ")
         .borders(Borders::ALL)
