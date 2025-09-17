@@ -7,12 +7,13 @@ pub struct App<'a> {
     pub progress: f64, // New: Current progress for the gauge (0.0 to 1.0)
     pub progress_direction: i8, // New: 1 for increasing, -1 for decreasing
     pub last_tick: Instant, // New: To control animation speed
+    pub debug_messages: Vec<String>, // To store messages from IPC
 }
 
 #[derive(Debug)]
 pub enum AppScreen {
     MainMenu,
-    Splash,
+    DebugPrint,
 }
 
 impl Default for AppScreen {
@@ -24,10 +25,20 @@ impl Default for AppScreen {
 impl<'a> App<'a> {
     pub fn next_screen(&mut self) {
         self.screen = match self.screen {
-            AppScreen::MainMenu => AppScreen::Splash,
-            AppScreen::Splash => AppScreen::MainMenu,
+            AppScreen::MainMenu => AppScreen::DebugPrint,
+            AppScreen::DebugPrint => AppScreen::MainMenu,
         };
         self.index = (self.index + 1) % self.titles.len();
+    }
+
+    pub fn add_debug_message(&mut self, message: String) {
+        self.debug_messages.push(message);
+        // To prevent the list from growing indefinitely, we can cap its size.
+        const MAX_MESSAGES: usize = 100;
+        if self.debug_messages.len() > MAX_MESSAGES {
+            // Removes the oldest message
+            self.debug_messages.remove(0);
+        }
     }
 
     pub fn update_progress(&mut self) {
@@ -58,6 +69,7 @@ impl Default for App<'_> {
             progress: 0.0,
             progress_direction: 1,
             last_tick: Instant::now(), // Manually initialize `last_tick`
+            debug_messages: Vec::new(),
         }
     }
 }

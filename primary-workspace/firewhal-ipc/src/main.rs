@@ -30,6 +30,14 @@ fn main() {
         if let Ok(msg_str) = str::from_utf8(message_data) {
             println!("[ROUTER] Received message: '{}'", msg_str);
 
+            // Indisciminately send messages to TUI
+            if  let Some(tui_id) = &TUI_identity{
+                    //Test send to TUI
+                    println!("Sending to TUI");
+                    router.send(tui_id, zmq::SNDMORE).unwrap();
+                    router.send(msg_str,0).unwrap();
+                }
+
             // Check for the Discord bot's one-time identification message
             if msg_str == "DISCORD_BOT_READY" {
                 println!("[ROUTER] Discord bot has connected and identified itself.");

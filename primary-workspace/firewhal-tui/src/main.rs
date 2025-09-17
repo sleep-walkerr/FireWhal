@@ -22,7 +22,7 @@ use std::{
 use tokio::{
     task::spawn_blocking,
     time::sleep,
-    sync::broadcast
+    sync::{broadcast, mpsc},
 };
 use zmq;
 
@@ -38,6 +38,7 @@ struct App<> {
 async fn ipc_connection(
     _msg: String,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    msg_tx: mpsc::Sender<String>,
 ) {
     // This flag will be shared between our async task and the blocking ZMQ thread.
     let running = Arc::new(AtomicBool::new(true));
@@ -61,9 +62,12 @@ async fn ipc_connection(
             match dealer.recv(&mut msg, 0) {
                 Ok(_) => {
                     let msg_str = msg.as_str().unwrap_or("");
-                    // Note: `println!` will mess up the TUI display.
-                    // For debugging, it's better to log to a file.
-                    // e.g., log::info!("TUI received message: '{}'", msg_str);
+                    // Send the received message to the main UI thread.
+                    // We use `blocking_send` because we are in a thread spawned by `spawn_blocking`.
+                    if msg_tx.blocking_send(msg_str.to_string()).is_err() {
+                        break; // Stop if the receiver has been dropped (UI closed).
+                    }
+
                     if msg_str == "Hash has changed" {
                         let _ = dealer.send("Hash changed notification received by TUI ZMQ", 0);
                     }
@@ -108,10 +112,15 @@ async fn main() -> Result<(), io::Error> {
     // Connect to IPC
     // 1. Setup graceful shutdown channel
     let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+    // New: Setup channel for IPC messages to UI
+    let (msg_tx, mut msg_rx) = mpsc::channel(100);
 
     // 2. Spawn the ZMQ task, giving it a way to listen for the shutdown signal
-    let message_sender_handle =
-        tokio::spawn(ipc_connection("TUI_READY".to_string(), shutdown_rx));
+    let message_sender_handle = tokio::spawn(ipc_connection(
+        "TUI_READY".to_string(),
+        shutdown_rx,
+        msg_tx,
+    ));
         
     // Setup terminal
     enable_raw_mode()?;
@@ -126,6 +135,11 @@ async fn main() -> Result<(), io::Error> {
 
     loop {
         terminal.draw(|f| ui::render(f, &app))?;
+
+        // Check for IPC messages from the ZMQ task without blocking the UI.
+        if let Ok(msg) = msg_rx.try_recv() {
+            app.add_debug_message(msg);
+        }
 
         let timeout = tick_rate
             .checked_sub(app.last_tick.elapsed())
