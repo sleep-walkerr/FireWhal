@@ -35,7 +35,7 @@ fn main() {
                     //Test send to TUI
                     println!("Sending to TUI");
                     router.send(tui_id, zmq::SNDMORE).unwrap();
-                    router.send(msg_str,0).unwrap();
+                    router.send(&format!("{:?} {}", identity, msg_str),0).unwrap();
                 }
 
             // Check for the Discord bot's one-time identification message

@@ -1,13 +1,13 @@
 use anyhow::Context;
 use aya::{
     maps::HashMap,
-    programs::{CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags},
     include_bytes_aligned,
+    programs::{CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags},
     Ebpf,
 };
 use aya_log::EbpfLogger;
 use clap::Parser;
-use log::{info, warn};
+use log::{info, warn, LevelFilter, Record};
 use std::{
     fs::File,
     net::Ipv4Addr,
@@ -18,10 +18,9 @@ use std::{
 };
 
 use tokio::{
-    signal,
-    sync::broadcast,
+    signal, // Add mpsc to imports
+    sync::{broadcast, mpsc},
     task::spawn_blocking,
-    time::{sleep, Duration},
 };
 use zmq;
 
@@ -33,85 +32,76 @@ struct Opt {
     iface: String,
 }
 
-async fn nonblocking_zmq_message_sender(
-    _msg: String,
+struct ZmqLogger {
+    tx: mpsc::Sender<String>,
+}
+
+impl log::Log for ZmqLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            let msg = format!("[{}] {}", record.level(), record.args());
+            // Use try_send to avoid blocking the logging call.
+            if let Err(e) = self.tx.try_send(msg) {
+                // If the channel is full or closed, print to stderr as a fallback.
+                eprintln!("Fallback log (ZMQ channel error: {}): {}", e, record.args());
+            }
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+async fn zmq_log_forwarder(
+    mut log_rx: mpsc::Receiver<String>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
-    // This flag will be shared between our async task and the blocking ZMQ thread.
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
 
-    // The actual blocking ZMQ work is offloaded to a blocking thread.
     let blocking_task = spawn_blocking(move || -> Result<(), zmq::Error> {
         let context = zmq::Context::new();
         let dealer = context.socket(zmq::DEALER).unwrap();
-        dealer.set_connect_timeout(1000)?;
-        dealer.set_rcvtimeo(500)?; // Set a 500ms timeout on receive
-        // Set linger period to 0 to prevent blocking on close.
         dealer.set_linger(0)?;
         assert!(dealer.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
 
-        dealer.send(&"test from ebpf loader".to_string(), 0)?;
-
-        // Loop until the shutdown flag is set
         while running_clone.load(Ordering::Relaxed) {
-            let mut msg = zmq::Message::new(); // Create a new message for each receive
-            match dealer.recv(&mut msg, 0) {
-                Ok(_) => {
-                    let msg_str = msg.as_str().unwrap_or("invalid utf-8");
-                    println!("TUI received message from router: '{}'", msg_str);
-                    if msg_str == "Hash has changed" {
-                        let _ = dealer.send(&"Hash changed notification received".to_string(), 0);
-                    }
-                }
-                Err(zmq::Error::EAGAIN) => {
-                    // Timeout hit, this is expected. Loop again to check the `running` flag.
-                    continue;
-                }
-                Err(e) => {
-                    // A real error occurred.
-                    eprintln!("ZMQ recv error: {}", e);
-                    break;
-                }
+            // Try to receive a log message from the channel with a timeout.
+            // This allows the loop to periodically check the `running` flag.
+            if let Ok(msg) = log_rx.try_recv() {
+                dealer.send(&msg, 0)?;
             }
         }
-
-        println!("ZMQ blocking loop finished.");
         Ok(())
     });
 
-    // This is our async control loop.
-    let mut blocking_task = blocking_task;
     tokio::select! {
-        // Wait for the shutdown signal
-        res = shutdown_rx.recv() => {
-            if res.is_err() {
-                warn!("ZMQ task shutdown channel closed unexpectedly.");
-            }
-            info!("Shutdown signal received in ZMQ task. Stopping blocking thread.");
+        _ = shutdown_rx.recv() => {
+            info!("Shutdown signal received in ZMQ log forwarder.");
             running.store(false, Ordering::Relaxed);
         },
-        // Or wait for the blocking task to finish on its own
-        _ = &mut blocking_task => { // The handle is consumed here if this branch is taken
-            warn!("ZMQ blocking task finished before shutdown signal.");
+        _ = blocking_task => {
+            warn!("ZMQ log forwarder task finished unexpectedly.");
         }
     };
-
-    // After signaling shutdown, we must wait for the blocking task to actually finish.
-    if let Err(e) = blocking_task.await {
-        eprintln!("ZMQ blocking task panicked or was cancelled: {}", e);
-    }
 }
 
 async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     // --- 1. SETUP GRACEFUL SHUTDOWN ---
-    let (shutdown_tx, _) = broadcast::channel(1);
-    let mut zmq_test_handle = tokio::spawn(nonblocking_zmq_message_sender(
-        "loader program test message".to_string(),
-        shutdown_tx.subscribe(),
-    ));
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
-    env_logger::init();
+    // --- SETUP LOGGING ---
+    let (log_tx, log_rx) = mpsc::channel(1024);
+    let logger = ZmqLogger { tx: log_tx };
+    log::set_boxed_logger(Box::new(logger))
+        .map(|()| log::set_max_level(LevelFilter::Info))
+        .expect("Failed to set logger");
+
+    // --- SPAWN ZMQ LOG FORWARDER ---
+    let mut zmq_log_handle = tokio::spawn(zmq_log_forwarder(log_rx, shutdown_rx));
 
     // --- 2. LOAD AND ATTACH EBPF PROGRAMS ---
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(
@@ -171,14 +161,14 @@ async fn run(opt: Opt) -> Result<(), anyhow::Error> {
             info!("\nCtrl-C received. Sending shutdown signal...");
             let _ = shutdown_tx.send(());
         },
-        _ = &mut zmq_test_handle => { // The handle is consumed here if this branch is taken
-            warn!("ZMQ task exited on its own before shutdown signal.");
+        _ = &mut zmq_log_handle => {
+            warn!("ZMQ log forwarder exited on its own before shutdown signal.");
         }
     };
 
     // --- 5. WAIT FOR TASKS TO SHUT DOWN GRACEFULLY ---
-    if let Err(e) = zmq_test_handle.await {
-        eprintln!("ZMQ task did not shut down cleanly: {}", e);
+    if let Err(e) = zmq_log_handle.await {
+        eprintln!("ZMQ log forwarder did not shut down cleanly: {}", e);
     } else {
         info!("ZMQ task shut down gracefully.");
     }
