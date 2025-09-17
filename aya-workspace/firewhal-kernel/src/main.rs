@@ -10,6 +10,7 @@ use clap::Parser;
 use log::{info, warn, LevelFilter, Record};
 use std::{
     fs::File,
+    time::Duration,
     net::Ipv4Addr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -20,6 +21,7 @@ use std::{
 use tokio::{
     signal, // Add mpsc to imports
     sync::{broadcast, mpsc},
+    sync::mpsc::error::TryRecvError,
     task::spawn_blocking,
 };
 use zmq;
@@ -69,10 +71,24 @@ async fn zmq_log_forwarder(
         assert!(dealer.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
 
         while running_clone.load(Ordering::Relaxed) {
-            // Try to receive a log message from the channel with a timeout.
-            // This allows the loop to periodically check the `running` flag.
-            if let Ok(msg) = log_rx.try_recv() {
-                dealer.send(&msg, 0)?;
+            // Try to receive a message without blocking.
+            match log_rx.try_recv() {
+                Ok(msg) => {
+                    // Message received, send it over ZMQ.
+                    dealer.send(&msg, 0)?;
+                }
+                Err(TryRecvError::Empty) => {
+                    // No message available. Sleep for a short duration to prevent
+                    // busy-looping and yield the CPU. This allows the `running`
+                    // flag to be checked periodically without consuming 100% CPU.
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    // The channel has been closed, so we can exit the loop.
+                    info!("Log channel disconnected, shutting down ZMQ forwarder.");
+                    break;
+                }
             }
         }
         Ok(())
