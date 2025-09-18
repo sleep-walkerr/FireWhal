@@ -106,7 +106,7 @@ async fn nonblocking_zmq_message_sender(msg: String) {
 
         // It's good practice to give the connection a moment to establish,
         // especially for a fire-and-forget message.
-        sleep(Duration::from_millis(50));
+        let _ = sleep(Duration::from_millis(50));
 
         dealer.send(&msg, 0)?; // Propagate ZMQ errors
         Ok(()) // Explicitly return Ok on success
@@ -123,7 +123,7 @@ async fn nonblocking_zmq_message_sender(msg: String) {
 
 
 fn main(){
-        let stdout = File::create("/tmp/tokio-daemon.out").unwrap();
+    let stdout = File::create("/tmp/tokio-daemon.out").unwrap();
     let stderr = File::create("/tmp/tokio-daemon.err").unwrap();
 
     // 1. Configure the daemon but DON'T start the Tokio runtime yet.
@@ -131,7 +131,7 @@ fn main(){
         .pid_file("/tmp/tokio-daemon.pid")
         .working_directory("/tmp")
         .user("nobody")
-        .group("nogroup") // Use "nobody" on some systems
+        .group("nobody") // Use "nobody" on some systems
         .stdout(stdout)
         .stderr(stderr);
 
@@ -167,7 +167,6 @@ async fn run_async_logic() -> Result<(), Box<dyn std::error::Error>>{
     // It will run in the background.
     // The `periodic_hash_checker` function itself returns immediately after spawning the task.
     let checker_handle = tokio::spawn(periodic_hash_checker(file_to_watch.clone(), check_interval));
-
     // Optional: Clean up the dummy file on exit, though for a daemon this might not be typical.
     // std::fs::remove_file(file_to_watch).ok();
 
