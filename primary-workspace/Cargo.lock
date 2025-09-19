@@ -626,6 +626,7 @@ name = "firewhal-ipc"
 version = "0.1.0"
 dependencies = [
  "firewhal-core",
+ "nix",
  "zmq",
 ]
 

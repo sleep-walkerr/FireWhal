@@ -34,14 +34,23 @@ echo "Building primary binaries"
 # Build all binaries in the workspace in release mode
 echo $(cargo build)
 
-echo "Creating /opt/firewhal directory in case it doesn't exist"
+echo "Creating /opt/firewhal/bin directory in case it doesn't exist"
 # Create the destination directory if it doesn't exist
-sudo mkdir -p /opt/firewhal
+sudo mkdir -p /opt/firewhal/bin
 
-echo "Installing primary workspace binaries to /opt/firewhal"
+echo "Installing primary workspace binaries to /opt/firewhal/bin"
 
-sudo cp target/debug/firewhal-ipc /opt/firewhal
-sudo cp target/debug/firewhal-discord-bot /opt/firewhal
+sudo cp target/debug/firewhal-ipc /opt/firewhal/bin
+sudo cp target/debug/firewhal-discord-bot /opt/firewhal/bin
+
+echo "Installing daemon to /usr/local/sbin (the daemon will be started from a systemd unit file and located in /opt/firewhal/bin in the future)"
+sudo cp target/debug/firewhal-daemon /usr/local/sbin
+
+echo "Installing Discord token and user ID"
+sudo cp firewhal-discord-bot/.env /opt/firewhal/bin
+
+echo "Installing TUI to /usr/local/bin"
+sudo cp target/debug/firewhal-tui /usr/local/bin
 
 echo "Changing directory to aya workspace"
 cd ../aya-workspace
@@ -49,10 +58,11 @@ cd ../aya-workspace
 echo "Building aya binaries"
 echo $(cargo build)
 
-echo "Installing aya workspace binaries to /opt/firewhal"
+echo "Installing aya workspace binaries to /opt/firewhal/bin"
+sudo cp target/debug/firewhal-kernel /opt/firewhal/bin
 
 echo "Ensuring proper permissions for access purposes"
-sudo chmod 755 /opt/firewhal/*
+sudo chmod 755 /opt/firewhal/bin/*
 
 echo "Installation complete! Please log out and log back in to update group status"
 

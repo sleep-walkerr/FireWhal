@@ -4,7 +4,7 @@
 //! 1. Starting as root, launching privileged components, then dropping its own privileges to 'nobody'.
 //! 2. Launching, managing, and monitoring all other system components.
 //!    - The eBPF Firewall (as root)
-//!    - The ZMQ IPC Router (as nobody)
+//!    - The ZMQ IPC Router (as root, which then drops its own privileges)
 //!    - The Discord Bot (as nobody)
 //! 3. Reporting status and errors via ZMQ to the IPC router.
 //! 4. Handling graceful shutdown of all components.
@@ -17,6 +17,7 @@ use nix::unistd::{chdir, execv, fork, pipe, setgid, setuid, ForkResult, Pid};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
 use tokio::task;
+use tokio::time::{sleep, Duration};
 use zmq;
 
 // Standard library imports
@@ -31,10 +32,7 @@ use std::sync::Arc;
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
 
 /// Launches a child process as a specific user with an optional working directory.
-///
-/// This is a **synchronous, blocking** function intended to be run inside `tokio::task::spawn_blocking`.
-/// It forks the current process, the child drops privileges, changes its working directory,
-/// and then replaces itself with the new program via `execv`.
+/// (Used for non-privileged processes)
 fn launch_child_process(
     user: &str,
     program: &str,
@@ -48,11 +46,8 @@ fn launch_child_process(
     let target_gid = target_user.gid;
 
     match unsafe { fork() } {
-        Ok(ForkResult::Parent { child }) => {
-            Ok(child.into())
-        }
+        Ok(ForkResult::Parent { child }) => Ok(child.into()),
         Ok(ForkResult::Child) => {
-            // Set group first, then user.
             if let Err(e) = setgid(target_gid) {
                 eprintln!("[Child] Failed to set group ID for {}: {}", program, e);
                 std::process::exit(1);
@@ -61,29 +56,25 @@ fn launch_child_process(
                 eprintln!("[Child] Failed to set user ID for {}: {}", program, e);
                 std::process::exit(1);
             }
-
-            // **NEW**: Change the working directory if one is provided.
             if let Some(dir) = working_dir {
                 if let Err(e) = chdir(dir) {
-                    eprintln!("[Child] Failed to change working directory to '{}' for {}: {}", dir, program, e);
+                    eprintln!(
+                        "[Child] Failed to change working directory to '{}' for {}: {}",
+                        dir, program, e
+                    );
                     std::process::exit(1);
                 }
             }
-
             let c_program = CString::new(program).unwrap();
             let c_args: Vec<CString> = args.iter().map(|&arg| CString::new(arg).unwrap()).collect();
             let c_args_refs: Vec<&CStr> = c_args.iter().map(|c| c.as_c_str()).collect();
-
             let _ = execv(&c_program, &c_args_refs).map_err(|e| {
                 eprintln!("[Child] Failed to exec '{}': {}", program, e);
                 std::process::exit(127);
             });
-
             unreachable!();
         }
-        Err(e) => {
-            Err(format!("Fork failed: {}", e))
-        }
+        Err(e) => Err(format!("Fork failed: {}", e)),
     }
 }
 
@@ -123,25 +114,37 @@ fn main() {
         .stdout(stdout)
         .stderr(stderr)
         .privileged_action(move || {
-            println!("[Privileged] Launching firewall as root...");
-            let firewall_path = "/opt/firewhal/firewhal-kernel"; // Example path
-            let firewall_args = &[firewall_path];
+            // This closure runs as ROOT, before privileges are dropped.
+            println!("[Privileged] Launching root-level processes...");
 
-            match unsafe { fork() } {
-                Ok(ForkResult::Parent { child }) => {
-                    let mut writer = unsafe { File::from_raw_fd(write_fd) };
-                    writer.write_all(&i32::from(child).to_ne_bytes()).unwrap();
-                }
-                Ok(ForkResult::Child) => {
-                    let c_program = CString::new(firewall_path).unwrap();
-                    let c_args: Vec<CString> =
-                        firewall_args.iter().map(|&arg| CString::new(arg).unwrap()).collect();
-                    let c_args_refs: Vec<&CStr> = c_args.iter().map(|c| c.as_c_str()).collect();
-                    let _ = execv(&c_program, &c_args_refs);
-                    std::process::exit(127);
-                }
-                Err(e) => {
-                    eprintln!("[Privileged] Firewall fork failed: {}", e);
+            // Define processes that must start as root.
+            let root_processes = vec![
+                ("/opt/firewhal/bin/firewhal-kernel", vec!["firewhal-kernel"]),
+                ("/opt/firewhal/bin/firewhal-ipc", vec!["firewhal-ipc"]),
+            ];
+
+            let mut writer = unsafe { File::from_raw_fd(write_fd) };
+
+            for (path, args_vec) in root_processes {
+                let args: Vec<&str> = args_vec.iter().map(|s| *s).collect();
+                match unsafe { fork() } {
+                    Ok(ForkResult::Parent { child }) => {
+                        println!("[Privileged] Launched {} with PID {}.", path, child);
+                        // Write the new child's PID to the pipe for the main daemon process.
+                        writer.write_all(&i32::from(child).to_ne_bytes()).unwrap();
+                    }
+                    Ok(ForkResult::Child) => {
+                        // This is the child. It will become the new process.
+                        let c_program = CString::new(path).unwrap();
+                        let c_args: Vec<CString> =
+                            args.iter().map(|&arg| CString::new(arg).unwrap()).collect();
+                        let c_args_refs: Vec<&CStr> = c_args.iter().map(|c| c.as_c_str()).collect();
+                        // execv replaces this process. It does not return on success.
+                        let _ = execv(&c_program, &c_args_refs);
+                        // If execv returns, it's an error.
+                        std::process::exit(127);
+                    }
+                    Err(e) => eprintln!("[Privileged] Fork failed for {}: {}", path, e),
                 }
             }
         });
@@ -158,23 +161,36 @@ fn main() {
 
 /// The main async logic for the supervisor daemon.
 #[tokio::main]
-async fn supervisor_logic(firewall_pid_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
     let children = Arc::new(Mutex::new(HashMap::new()));
     let mut children_guard = children.lock().await;
 
+    let mut reader = unsafe { File::from_raw_fd(root_pids_fd) };
     let mut pid_buffer = [0u8; 4];
-    let mut reader = unsafe { File::from_raw_fd(firewall_pid_fd) };
+
+    // --- Read Root Process PIDs from the pipe ---
+    // Read Firewall PID (first one written)
     reader.read_exact(&mut pid_buffer)?;
     let firewall_pid = i32::from_ne_bytes(pid_buffer);
-    println!("[Supervisor] Received firewall PID {} from privileged action.", firewall_pid);
+    println!("[Supervisor] Received firewall PID {}.", firewall_pid);
     children_guard.insert("firewall".to_string(), firewall_pid);
-    drop(reader);
 
-    // **MODIFIED**: Added a fifth element for the optional working directory.
-    let apps_to_launch = vec![
-        ( "ipc_router", "nobody", "/opt/firewhal/firewhal-ipc", vec!["firewhal-ipc"], None, ),
-        ( "discord_bot", "nobody", "/opt/firewhal/firewhal-discord-bot", vec!["firewhal-discord-bot"], Some("/opt/firewhal"),),
-    ];
+    // Read IPC Router PID (second one written)
+    reader.read_exact(&mut pid_buffer)?;
+    let ipc_router_pid = i32::from_ne_bytes(pid_buffer);
+    println!("[Supervisor] Received IPC router PID {}.", ipc_router_pid);
+    children_guard.insert("ipc_router".to_string(), ipc_router_pid);
+
+    drop(reader); // Close the read end of the pipe.
+
+    // --- Define and launch non-privileged applications ---
+    let apps_to_launch = vec![(
+        "discord_bot",
+        "nobody",
+        "/opt/firewhal/bin/firewhal-discord-bot",
+        vec!["firewhal-discord-bot"],
+        Some("/opt/firewhal"),
+    )];
 
     for (name, user, path, args, workdir) in apps_to_launch {
         let name_str = name.to_string();
@@ -185,16 +201,12 @@ async fn supervisor_logic(firewall_pid_fd: i32) -> Result<(), Box<dyn std::error
 
         let handle = task::spawn_blocking(move || {
             let args_cstr: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
-            // **MODIFIED**: Pass the working directory to the launch function.
             launch_child_process(&user_str, &path_str, &args_cstr, workdir_opt.as_deref())
         });
 
         match handle.await? {
             Ok(pid) => {
-                println!(
-                    "[Supervisor] Launched '{}' as user '{}' with PID {}.",
-                    name, user, pid
-                );
+                println!("[Supervisor] Launched '{}' with PID {}.", name, pid);
                 children_guard.insert(name_str.clone(), pid);
                 tokio::spawn(nonblocking_zmq_message_sender(format!(
                     "Launched {} with PID {}",
@@ -212,6 +224,7 @@ async fn supervisor_logic(firewall_pid_fd: i32) -> Result<(), Box<dyn std::error
     }
     drop(children_guard);
 
+    // --- Concurrent Signal Handling ---
     let shutdown_handler = handle_shutdown_signals(Arc::clone(&children));
     let child_exit_handler = handle_child_exits(Arc::clone(&children));
 
@@ -235,10 +248,20 @@ async fn handle_child_exits(children: ChildProcesses) {
                 Ok(WaitStatus::Exited(pid, status)) => {
                     let mut children_guard = children.lock().await;
                     if let Some(name) = children_guard.iter().find_map(|(name, &p)| {
-                        if p == pid.into() { Some(name.clone()) } else { None }
+                        if p == pid.into() {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
                     }) {
-                        eprintln!("[Monitor] Child '{}' (PID {}) exited with status {}.", name, pid, status);
-                        tokio::spawn(nonblocking_zmq_message_sender(format!("Child {} has exited.", name)));
+                        eprintln!(
+                            "[Monitor] Child '{}' (PID {}) exited with status {}.",
+                            name, pid, status
+                        );
+                        tokio::spawn(nonblocking_zmq_message_sender(format!(
+                            "Child {} has exited.",
+                            name
+                        )));
                         children_guard.remove(&name);
                     }
                 }
@@ -260,10 +283,29 @@ async fn handle_shutdown_signals(children: ChildProcesses) {
     };
 
     println!("[Shutdown] Starting graceful shutdown of child processes...");
-    tokio::spawn(nonblocking_zmq_message_sender("Daemon shutting down.".to_string()));
+    tokio::spawn(nonblocking_zmq_message_sender(
+        "Daemon shutting down.".to_string(),
+    ));
+
     let children_guard = children.lock().await;
     for (name, &pid) in children_guard.iter() {
-        println!("[Shutdown] Sending SIGTERM to '{}' (PID {})...", name, pid);
-        let _ = signal::kill(Pid::from_raw(pid), Signal::SIGTERM);
+        // We can now send SIGTERM to all children, as the daemon (nobody)
+        // is not trying to signal the firewall (root). Instead, the IPC router
+        // (which was root, now nobody) can be signalled directly.
+        // For the firewall, we still need a command.
+        if name == "firewall" {
+            println!("[Shutdown] Sending shutdown command to '{}' via ZMQ...", name);
+            tokio::spawn(nonblocking_zmq_message_sender(
+                "CMD:SHUTDOWN:firewall".to_string(),
+            ));
+        } else {
+            println!("[Shutdown] Sending SIGTERM to '{}' (PID {})...", name, pid);
+            let _ = signal::kill(Pid::from_raw(pid), Signal::SIGTERM);
+        }
     }
+    drop(children_guard);
+
+    sleep(Duration::from_secs(2)).await;
+    println!("[Shutdown] Exiting daemon.");
 }
+
