@@ -1,182 +1,269 @@
-//! Hello World client
+//! Supervisor Daemon for the Firewhal Firewall System
+//!
+//! This daemon is responsible for:
+//! 1. Starting as root, launching privileged components, then dropping its own privileges to 'nobody'.
+//! 2. Launching, managing, and monitoring all other system components.
+//!    - The eBPF Firewall (as root)
+//!    - The ZMQ IPC Router (as nobody)
+//!    - The Discord Bot (as nobody)
+//! 3. Reporting status and errors via ZMQ to the IPC router.
+//! 4. Handling graceful shutdown of all components.
 
 // Crate imports
-use hex;
-use sha3::{digest::Output, Digest, Sha3_256};
-use tokio::{
-    task::spawn_blocking,
-    time::{sleep, Duration},
-};
+use daemonize::Daemonize;
+use nix::sys::signal::{self, Signal};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::{chdir, execv, fork, pipe, setgid, setuid, ForkResult, Pid};
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::Mutex;
+use tokio::task;
 use zmq;
 
 // Standard library imports
-use std::{
-    fs::{self, File}, // For File and fs::write
-    io::{BufReader, Read},
-    path::{Path, PathBuf}
-};
+use std::collections::HashMap;
+use std::ffi::{CStr, CString};
+use std::fs::File;
+use std::io::{Read, Write};
+use std::os::unix::io::{FromRawFd, IntoRawFd};
+use std::sync::Arc;
 
-// Daemon Imports
-use daemonize::Daemonize;
-use std::thread;
+// A type alias for clarity. Maps a component name (String) to its PID (i32).
+type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
 
-// Helper function to perform the blocking file read and hash calculation.
-fn calculate_hash_for_file(file_path: &Path) -> Result<Output<Sha3_256>, std::io::Error> {
-    let input = File::open(file_path)?;
-    let mut reader = BufReader::new(input);
-    let mut hasher = Sha3_256::new();
-    let mut buffer = [0; 1024]; // Standard buffer size for reading
+/// Launches a child process as a specific user with an optional working directory.
+///
+/// This is a **synchronous, blocking** function intended to be run inside `tokio::task::spawn_blocking`.
+/// It forks the current process, the child drops privileges, changes its working directory,
+/// and then replaces itself with the new program via `execv`.
+fn launch_child_process(
+    user: &str,
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&str>,
+) -> Result<i32, String> {
+    let target_user = nix::unistd::User::from_name(user)
+        .map_err(|e| e.to_string())?
+        .ok_or(format!("User '{}' not found", user))?;
+    let target_uid = target_user.uid;
+    let target_gid = target_user.gid;
 
-    loop {
-        let n = reader.read(&mut buffer)?;
-        if n == 0 {
-            break; // End of file
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child }) => {
+            Ok(child.into())
         }
-        hasher.update(&buffer[..n]);
-    }
-    Ok(hasher.finalize())
-}
+        Ok(ForkResult::Child) => {
+            // Set group first, then user.
+            if let Err(e) = setgid(target_gid) {
+                eprintln!("[Child] Failed to set group ID for {}: {}", program, e);
+                std::process::exit(1);
+            }
+            if let Err(e) = setuid(target_uid) {
+                eprintln!("[Child] Failed to set user ID for {}: {}", program, e);
+                std::process::exit(1);
+            }
 
-/// Periodically checks the hash of the specified file and prints a message if it changes.
-/// This function spawns a Tokio task that runs indefinitely.
-async fn periodic_hash_checker(file_to_watch: PathBuf, check_interval: Duration) {
-    println!(
-        "Starting periodic hash checker for '{}' with interval {:?}",
-        file_to_watch.display(),
-        check_interval
-    );
-
-    // This async function will now directly contain the loop,
-    // making it the long-running operation that the caller can await.
-    let mut previous_hash_opt: Option<Output<Sha3_256>> = None;
-
-    loop {
-        // Clone file_path for use in the blocking task. PathBuf cloning is cheap.
-        let file_path_clone = file_to_watch.clone();
-
-        // Offload the blocking file I/O and hashing to a blocking thread.
-        let hash_result = spawn_blocking(move || {
-            calculate_hash_for_file(&file_path_clone)
-        }).await;
-
-        match hash_result {
-            Ok(Ok(current_hash)) => { // Successfully joined and hash calculated
-                match previous_hash_opt.as_ref() {
-                    Some(prev_hash) => {
-                        if *prev_hash != current_hash {
-                            println!("File '{}' hash changed.", file_to_watch.display());
-                            // Spawn ZMQ sender as a fire-and-forget task.
-                            // If sending the message is critical and should block the checker,
-                            // you might await it and handle its result.
-                            tokio::spawn(nonblocking_zmq_message_sender(
-                                "File hash changed".to_string(),
-                            ));
-                            previous_hash_opt = Some(current_hash);
-                        }
-                    }
-                    None => {
-                        println!("Initial hash for {}: {}", file_to_watch.display(), hex::encode(&current_hash));
-                        previous_hash_opt = Some(current_hash);
-                    }
+            // **NEW**: Change the working directory if one is provided.
+            if let Some(dir) = working_dir {
+                if let Err(e) = chdir(dir) {
+                    eprintln!("[Child] Failed to change working directory to '{}' for {}: {}", dir, program, e);
+                    std::process::exit(1);
                 }
             }
-            Ok(Err(io_error)) => { // Successfully joined, but hashing failed with I/O error
-                eprintln!("Error calculating hash for {}: {}. Will retry.", file_to_watch.display(), io_error);
-            }
-            Err(join_error) => { // The blocking task panicked
-                eprintln!("Hashing task panicked for {}: {}. Will retry.", file_to_watch.display(), join_error);
-            }
+
+            let c_program = CString::new(program).unwrap();
+            let c_args: Vec<CString> = args.iter().map(|&arg| CString::new(arg).unwrap()).collect();
+            let c_args_refs: Vec<&CStr> = c_args.iter().map(|c| c.as_c_str()).collect();
+
+            let _ = execv(&c_program, &c_args_refs).map_err(|e| {
+                eprintln!("[Child] Failed to exec '{}': {}", program, e);
+                std::process::exit(127);
+            });
+
+            unreachable!();
         }
-        // Wait for the specified interval before the next check.
-        sleep(check_interval).await;
+        Err(e) => {
+            Err(format!("Fork failed: {}", e))
+        }
     }
-    // This part is unreachable due to the infinite loop.
 }
 
-// Renamed for clarity, as this is a ZMQ REQ (client) socket.
-// This function will run the ZMQ client loop.
-// It's designed to be spawned as a Tokio task.
+/// Sends a message to the ZMQ IPC router in a non-blocking way.
 async fn nonblocking_zmq_message_sender(msg: String) {
-    // The actual blocking ZMQ work is offloaded to a blocking thread.
-    let result = spawn_blocking(move || -> Result<(), zmq::Error> {
+    let result = task::spawn_blocking(move || -> Result<(), zmq::Error> {
         let context = zmq::Context::new();
-        // Use a DEALER socket to talk to a ROUTER. REQ sockets are for REP sockets.
-        let dealer = context.socket(zmq::DEALER).unwrap();
-        assert!(dealer.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
-
-        // It's good practice to give the connection a moment to establish,
-        // especially for a fire-and-forget message.
-        let _ = sleep(Duration::from_millis(50));
-
-        dealer.send(&msg, 0)?; // Propagate ZMQ errors
-        Ok(()) // Explicitly return Ok on success
+        let dealer = context.socket(zmq::DEALER)?;
+        dealer.set_linger(0)?;
+        dealer.connect("ipc:///tmp/firewhal_ipc.sock")?;
+        dealer.send(&msg, 0)?;
+        Ok(())
     })
-    .await; // This outer .await is for the JoinHandle from spawn_blocking.
+    .await;
 
-    // Handle the result of the blocking task execution.
     match result {
-        Ok(Ok(())) => println!("ZMQ message sent successfully."),
-        Ok(Err(e)) => eprintln!("ZMQ send error: {}", e),
-        Err(e) => eprintln!("ZMQ panicked or was cancelled: {}", e), // JoinError
+        Ok(Ok(())) => println!("[ZMQ] Sent status message."),
+        Ok(Err(e)) => eprintln!("[ZMQ] Send error: {}", e),
+        Err(e) => eprintln!("[ZMQ] Task panicked or was cancelled: {}", e),
     }
 }
 
+/// Main entry point for the daemon.
+fn main() {
+    let stdout = File::create("/tmp/firewhal_daemon.out").unwrap();
+    let stderr = File::create("/tmp/firewhal_daemon.err").unwrap();
 
-fn main(){
-    let stdout = File::create("/tmp/tokio-daemon.out").unwrap();
-    let stderr = File::create("/tmp/tokio-daemon.err").unwrap();
+    let (read_fd_owned, write_fd_owned) = pipe().expect("Failed to create pipe");
+    let write_fd = write_fd_owned.into_raw_fd();
+    let read_fd = read_fd_owned.into_raw_fd();
 
-    // 1. Configure the daemon but DON'T start the Tokio runtime yet.
     let daemonize = Daemonize::new()
-        .pid_file("/tmp/tokio-daemon.pid")
+        .pid_file("/var/run/firewhal_daemon.pid")
         .working_directory("/tmp")
         .user("nobody")
-        .group("nobody") // Use "nobody" on some systems
+        .group("nobody")
         .stdout(stdout)
-        .stderr(stderr);
+        .stderr(stderr)
+        .privileged_action(move || {
+            println!("[Privileged] Launching firewall as root...");
+            let firewall_path = "/opt/firewhal/firewhal-kernel"; // Example path
+            let firewall_args = &[firewall_path];
 
-    // 2. Start the daemon. The process forks here.
+            match unsafe { fork() } {
+                Ok(ForkResult::Parent { child }) => {
+                    let mut writer = unsafe { File::from_raw_fd(write_fd) };
+                    writer.write_all(&i32::from(child).to_ne_bytes()).unwrap();
+                }
+                Ok(ForkResult::Child) => {
+                    let c_program = CString::new(firewall_path).unwrap();
+                    let c_args: Vec<CString> =
+                        firewall_args.iter().map(|&arg| CString::new(arg).unwrap()).collect();
+                    let c_args_refs: Vec<&CStr> = c_args.iter().map(|c| c.as_c_str()).collect();
+                    let _ = execv(&c_program, &c_args_refs);
+                    std::process::exit(127);
+                }
+                Err(e) => {
+                    eprintln!("[Privileged] Firewall fork failed: {}", e);
+                }
+            }
+        });
+
     match daemonize.start() {
         Ok(_) => {
-            println!("Daemon started. Running async logic now.");
-            // 3. We are now in the detached daemon process.
-            // It's safe to initialize the Tokio runtime HERE.
-            if let Err(e) = run_async_logic() {
-                eprintln!("Async logic failed: {}", e);
+            if let Err(e) = supervisor_logic(read_fd) {
+                eprintln!("[Daemon] Supervisor logic failed: {}", e);
             }
         }
-        Err(e) => eprintln!("Error starting daemon: {}", e),
+        Err(e) => eprintln!("[Daemon] Error starting daemon: {}", e),
     }
 }
 
+/// The main async logic for the supervisor daemon.
 #[tokio::main]
-async fn run_async_logic() -> Result<(), Box<dyn std::error::Error>>{
-    // Example: Hash a dummy file
-    // Using a local path for the dummy file to avoid permission issues with /var/log/ during dev.
-    // You can change this path if your daemon has appropriate permissions for other files.
-    let file_to_watch = PathBuf::from("example_daemon_hash_input.txt");
-    // Create a dummy file for testing (in a real app, the file would exist)
-    if !file_to_watch.exists() {
-        fs::write(&file_to_watch, "Initial daemon test data for hashing.").expect("Failed to create dummy file for hashing"); // Use imported `fs`
+async fn supervisor_logic(firewall_pid_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+    let children = Arc::new(Mutex::new(HashMap::new()));
+    let mut children_guard = children.lock().await;
+
+    let mut pid_buffer = [0u8; 4];
+    let mut reader = unsafe { File::from_raw_fd(firewall_pid_fd) };
+    reader.read_exact(&mut pid_buffer)?;
+    let firewall_pid = i32::from_ne_bytes(pid_buffer);
+    println!("[Supervisor] Received firewall PID {} from privileged action.", firewall_pid);
+    children_guard.insert("firewall".to_string(), firewall_pid);
+    drop(reader);
+
+    // **MODIFIED**: Added a fifth element for the optional working directory.
+    let apps_to_launch = vec![
+        ( "ipc_router", "nobody", "/opt/firewhal/firewhal-ipc", vec!["firewhal-ipc"], None, ),
+        ( "discord_bot", "nobody", "/opt/firewhal/firewhal-discord-bot", vec!["firewhal-discord-bot"], Some("/opt/firewhal"),),
+    ];
+
+    for (name, user, path, args, workdir) in apps_to_launch {
+        let name_str = name.to_string();
+        let user_str = user.to_string();
+        let path_str = path.to_string();
+        let workdir_opt = workdir.map(|d| d.to_string());
+        let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+        let handle = task::spawn_blocking(move || {
+            let args_cstr: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
+            // **MODIFIED**: Pass the working directory to the launch function.
+            launch_child_process(&user_str, &path_str, &args_cstr, workdir_opt.as_deref())
+        });
+
+        match handle.await? {
+            Ok(pid) => {
+                println!(
+                    "[Supervisor] Launched '{}' as user '{}' with PID {}.",
+                    name, user, pid
+                );
+                children_guard.insert(name_str.clone(), pid);
+                tokio::spawn(nonblocking_zmq_message_sender(format!(
+                    "Launched {} with PID {}",
+                    name_str, pid
+                )));
+            }
+            Err(e) => {
+                eprintln!("[Supervisor] FAILED to launch '{}': {}", name, e);
+                tokio::spawn(nonblocking_zmq_message_sender(format!(
+                    "FAILED to launch {}",
+                    name_str
+                )));
+            }
+        }
     }
+    drop(children_guard);
 
-    // Define the interval for hash checks
-    let check_interval = Duration::from_secs(5);
+    let shutdown_handler = handle_shutdown_signals(Arc::clone(&children));
+    let child_exit_handler = handle_child_exits(Arc::clone(&children));
 
-    // Spawn the periodic hash checker task.
-    // It will run in the background.
-    // The `periodic_hash_checker` function itself returns immediately after spawning the task.
-    let checker_handle = tokio::spawn(periodic_hash_checker(file_to_watch.clone(), check_interval));
-    // Optional: Clean up the dummy file on exit, though for a daemon this might not be typical.
-    // std::fs::remove_file(file_to_watch).ok();
+    println!("[Supervisor] All components launched. Monitoring for signals...");
 
-    // Await the checker_handle. Since periodic_hash_checker now contains an infinite loop,
-    // this will keep main alive indefinitely, allowing the checker to run.
-    // If periodic_hash_checker somehow exits (e.g., due to an unhandled panic not caught by its own error handling),
-    // the error would be propagated here.
-    if let Err(e) = checker_handle.await {
-        eprintln!("Periodic hash checker task exited with an error: {:?}", e);
+    tokio::select! {
+        _ = child_exit_handler => eprintln!("[Supervisor] Child exit handler unexpectedly finished."),
+        _ = shutdown_handler => println!("[Supervisor] Shutdown signal received. Exiting."),
     }
 
     Ok(())
+}
+
+/// An async task that listens for the SIGCHLD signal and cleans up zombie processes.
+async fn handle_child_exits(children: ChildProcesses) {
+    let mut stream = signal(SignalKind::child()).unwrap();
+    loop {
+        stream.recv().await;
+        loop {
+            match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(pid, status)) => {
+                    let mut children_guard = children.lock().await;
+                    if let Some(name) = children_guard.iter().find_map(|(name, &p)| {
+                        if p == pid.into() { Some(name.clone()) } else { None }
+                    }) {
+                        eprintln!("[Monitor] Child '{}' (PID {}) exited with status {}.", name, pid, status);
+                        tokio::spawn(nonblocking_zmq_message_sender(format!("Child {} has exited.", name)));
+                        children_guard.remove(&name);
+                    }
+                }
+                Ok(WaitStatus::StillAlive) | Ok(_) => break,
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+/// An async task that listens for SIGTERM/SIGINT and gracefully shuts down children.
+async fn handle_shutdown_signals(children: ChildProcesses) {
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+    let mut sigint = signal(SignalKind::interrupt()).unwrap();
+
+    tokio::select! {
+        _ = sigterm.recv() => println!("[Shutdown] Received SIGTERM."),
+        _ = sigint.recv() => println!("[Shutdown] Received SIGINT."),
+    };
+
+    println!("[Shutdown] Starting graceful shutdown of child processes...");
+    tokio::spawn(nonblocking_zmq_message_sender("Daemon shutting down.".to_string()));
+    let children_guard = children.lock().await;
+    for (name, &pid) in children_guard.iter() {
+        println!("[Shutdown] Sending SIGTERM to '{}' (PID {})...", name, pid);
+        let _ = signal::kill(Pid::from_raw(pid), Signal::SIGTERM);
+    }
 }

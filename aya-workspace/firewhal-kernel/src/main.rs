@@ -163,9 +163,9 @@ async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     info!("[Rule] Blocking all incoming ICMP (ping) traffic via XDP.");
 
     let mut blocklist: HashMap<_, u32, u32> = HashMap::try_from(bpf.map_mut("BLOCKLIST").unwrap())?;
-    let block_addr: u32 = Ipv4Addr::new(1, 1, 1, 1).into();
+    let block_addr: u32 = Ipv4Addr::new(8, 8, 8, 8).into();
     blocklist.insert(block_addr, 0, 0)?;
-    info!("[Rule] Blocking outgoing connections to 1.1.1.1");
+    info!("[Rule] Blocking outgoing connections to 8.8.8.8");
 
     info!("✅ All eBPF programs attached. Waiting for Ctrl-C to exit.");
     
