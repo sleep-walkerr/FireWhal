@@ -12,82 +12,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = context.socket(zmq::ROUTER)?;
 
     let socket_path_str = "ipc:///tmp/firewhal_ipc.sock";
-    assert!(router.bind(socket_path_str).is_ok());
+    router.bind(socket_path_str)?;
     println!("[ROUTER] IPC router bound to {}", socket_path_str);
 
     // --- PRIVILEGED SETUP (as root) ---
     let fs_path = socket_path_str.replace("ipc://", "");
-    println!("[ROUTER] Setting secure permissions for socket at {}", fs_path);
-
-    // 1. Find the GID of the 'firewhal-admin' group.
     let admin_group = Group::from_name("firewhal-admin")?
         .ok_or("[ROUTER] CRITICAL: 'firewhal-admin' group not found.")?;
-
-    // 2. Change the group ownership of the socket file.
     chown(fs_path.as_str(), None, Some(admin_group.gid))
         .map_err(|e| format!("[ROUTER] CRITICAL: Failed to chown socket: {}", e))?;
-
-    // 3. Set permissions to rwxrwx---.
     fs::set_permissions(&fs_path, fs::Permissions::from_mode(0o770))
         .map_err(|e| format!("[ROUTER] CRITICAL: Failed to set socket permissions: {}", e))?;
-
     println!("[ROUTER] Socket permissions set securely.");
 
     // --- DROP PRIVILEGES ---
     let target_user = User::from_name("nobody")?
         .ok_or("[ROUTER] CRITICAL: 'nobody' user not found.")?;
-
     setgid(target_user.gid).map_err(|e| format!("[ROUTER] CRITICAL: Failed to set gid: {}", e))?;
     setuid(target_user.uid).map_err(|e| format!("[ROUTER] CRITICAL: Failed to set uid: {}", e))?;
-
     println!("[ROUTER] Privileges dropped. Now running as 'nobody'.");
-    // --- END PRIVILEGED OPERATIONS ---
 
     let mut discord_bot_identity: Option<Vec<u8>> = None;
     let mut tui_identity: Option<Vec<u8>> = None;
+    let mut kernel_identity: Option<Vec<u8>> = None;
 
     loop {
         let multipart = router.recv_multipart(0)?;
-        let identity = multipart[0].to_vec();
-        let message_data = &multipart[1];
+        let identity = &multipart[0];
+        // It's possible to receive a message with only an identity (e.g., on disconnect)
+        // so we guard against panics here.
+        // **THE FIX**: Ensure both branches of the if/else return a `&[u8]` slice.
+        let message_data: &[u8] = if multipart.len() > 1 { &multipart[1] } else { b"" };
+
 
         if let Ok(msg_str) = str::from_utf8(message_data) {
-            println!("[ROUTER] Received message: '{}'", msg_str);
+            println!("[ROUTER] Received message: '{}' from {:?}", msg_str, identity);
 
+            // Forward all non-TUI registration messages to the TUI for debugging.
             if let Some(tui_id) = &tui_identity {
                 if msg_str != "TUI_READY" {
-                    println!("[ROUTER] Forwarding message to TUI.");
+                    // This is multipart: [TUI_ID, "", PAYLOAD]
                     router.send(tui_id, zmq::SNDMORE)?;
-                    router.send(&format!("{:?} {}", identity, msg_str), 0)?;
+                    router.send(&[] as &[u8], zmq::SNDMORE)?;
+                    router.send(&format!("[From: {:?}] {}", identity, msg_str), 0)?;
                 }
             }
 
             match msg_str {
-                "DISCORD_BOT_READY" => {
-                    println!("[ROUTER] Discord bot has connected and identified itself.");
-                    discord_bot_identity = Some(identity);
-                }
-                "TUI_READY" => {
-                    println!("[ROUTER] TUI has connected and identified itself.");
-                    tui_identity = Some(identity);
-                }
-                "File hash changed" => {
-                    if let Some(bot_id) = &discord_bot_identity {
-                        println!("[ROUTER] Trigger met. Sending notification to Discord bot.");
-                        router.send(bot_id, zmq::SNDMORE)?;
-                        router.send("Send Notification", 0)?;
-                    } else {
-                        println!("[ROUTER] Trigger met, but Discord bot is not yet identified.");
+                "DISCORD_BOT_READY" => discord_bot_identity = Some(identity.to_vec()),
+                "TUI_READY" => tui_identity = Some(identity.to_vec()),
+                "KERNEL_READY" => kernel_identity = Some(identity.to_vec()),
+                "CMD:SHUTDOWN:firewall" => {
+                    if let Some(kernel_id) = &kernel_identity {
+                        println!("[ROUTER] Forwarding shutdown command to firewall kernel.");
+                        // Also need the delimiter here for the kernel's DEALER socket.
+                        router.send(kernel_id, zmq::SNDMORE)?;
+                        router.send(&[] as &[u8], zmq::SNDMORE)?;
+                        router.send("CMD:SHUTDOWN:firewall", 0)?;
                     }
                 }
-                "CMD:SHUTDOWN:firewall" => {
-                    println!("[ROUTER] Received shutdown command for firewall.");
-                    // In a real implementation, you'd need the firewall's ZMQ ID to forward this.
-                }
-                _ => {}
+                _ => {} // Ignore other messages for now
             }
-        } else {
-            println!("[ROUTER] Received a non-UTF8 message.");
         }
     }
 }
+

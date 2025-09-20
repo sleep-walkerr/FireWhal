@@ -76,13 +76,13 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
         let icmp_block_ptr = core::ptr::addr_of_mut!(ICMP_BLOCK_ENABLED);
         
         // Add basic print statement for all packets 
-        info!(
-            &ctx,
-            "XDP: Source:[{}], Destination: [{}], Protocol: {}",
-            ipv4_hdr.src_addr(),
-            ipv4_hdr.dst_addr(),
-            ipv4_hdr.proto as u8
-        );
+        // info!(
+        //     &ctx,
+        //     "XDP: Source:[{}], Destination: [{}], Protocol: {}",
+        //     ipv4_hdr.src_addr(),
+        //     ipv4_hdr.dst_addr(),
+        //     ipv4_hdr.proto as u8
+        // );
 
 
         if ipv4_hdr.proto == IpProto::Icmp {

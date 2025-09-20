@@ -15,7 +15,7 @@ use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{chdir, execv, fork, pipe, setgid, setuid, ForkResult, Pid};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task;
 use tokio::time::{sleep, Duration};
 use zmq;
@@ -78,24 +78,28 @@ fn launch_child_process(
     }
 }
 
-/// Sends a message to the ZMQ IPC router in a non-blocking way.
-async fn nonblocking_zmq_message_sender(msg: String) {
-    let result = task::spawn_blocking(move || -> Result<(), zmq::Error> {
+/// An async task that manages a single, persistent ZMQ client connection.
+/// It receives messages from other parts of the daemon via an MPSC channel
+/// and sends them reliably over the DEALER socket.
+async fn zmq_client_task(mut rx: mpsc::Receiver<String>) {
+    task::spawn_blocking(move || {
         let context = zmq::Context::new();
-        let dealer = context.socket(zmq::DEALER)?;
-        dealer.set_linger(0)?;
-        dealer.connect("ipc:///tmp/firewhal_ipc.sock")?;
-        dealer.send(&msg, 0)?;
-        Ok(())
-    })
-    .await;
+        let dealer = context.socket(zmq::DEALER).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        dealer.connect("ipc:///tmp/firewhal_ipc.sock").unwrap();
 
-    match result {
-        Ok(Ok(())) => println!("[ZMQ] Sent status message."),
-        Ok(Err(e)) => eprintln!("[ZMQ] Send error: {}", e),
-        Err(e) => eprintln!("[ZMQ] Task panicked or was cancelled: {}", e),
-    }
+        while let Some(msg) = rx.blocking_recv() {
+            if dealer.send(&msg, 0).is_err() {
+                eprintln!("[ZMQ-Client] Failed to send message: '{}'. Router may be down.", msg);
+                break;
+            } else {
+                println!("[ZMQ-Client] Sent message: '{}'", msg);
+            }
+        }
+        println!("[ZMQ-Client] Channel closed. Shutting down task.");
+    }).await.unwrap();
 }
+
 
 /// Main entry point for the daemon.
 fn main() {
@@ -109,39 +113,28 @@ fn main() {
     let daemonize = Daemonize::new()
         .pid_file("/var/run/firewhal_daemon.pid")
         .working_directory("/tmp")
-        .user("nobody")
-        .group("nobody")
         .stdout(stdout)
         .stderr(stderr)
         .privileged_action(move || {
-            // This closure runs as ROOT, before privileges are dropped.
             println!("[Privileged] Launching root-level processes...");
-
-            // Define processes that must start as root.
             let root_processes = vec![
                 ("/opt/firewhal/bin/firewhal-kernel", vec!["firewhal-kernel"]),
                 ("/opt/firewhal/bin/firewhal-ipc", vec!["firewhal-ipc"]),
             ];
-
             let mut writer = unsafe { File::from_raw_fd(write_fd) };
-
             for (path, args_vec) in root_processes {
                 let args: Vec<&str> = args_vec.iter().map(|s| *s).collect();
                 match unsafe { fork() } {
                     Ok(ForkResult::Parent { child }) => {
                         println!("[Privileged] Launched {} with PID {}.", path, child);
-                        // Write the new child's PID to the pipe for the main daemon process.
                         writer.write_all(&i32::from(child).to_ne_bytes()).unwrap();
                     }
                     Ok(ForkResult::Child) => {
-                        // This is the child. It will become the new process.
                         let c_program = CString::new(path).unwrap();
                         let c_args: Vec<CString> =
                             args.iter().map(|&arg| CString::new(arg).unwrap()).collect();
                         let c_args_refs: Vec<&CStr> = c_args.iter().map(|c| c.as_c_str()).collect();
-                        // execv replaces this process. It does not return on success.
                         let _ = execv(&c_program, &c_args_refs);
-                        // If execv returns, it's an error.
                         std::process::exit(127);
                     }
                     Err(e) => eprintln!("[Privileged] Fork failed for {}: {}", path, e),
@@ -163,27 +156,28 @@ fn main() {
 #[tokio::main]
 async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
     let children = Arc::new(Mutex::new(HashMap::new()));
-    let mut children_guard = children.lock().await;
+    let (zmq_tx, zmq_rx) = mpsc::channel(128);
+    let zmq_task_handle = tokio::spawn(zmq_client_task(zmq_rx));
 
+    // ---- START: MODIFICATION ----
+    // 1. Create a broadcast channel for shutdown signals.
+    let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
+    // ---- END: MODIFICATION ----
+
+
+    let mut children_guard = children.lock().await;
     let mut reader = unsafe { File::from_raw_fd(root_pids_fd) };
     let mut pid_buffer = [0u8; 4];
 
-    // --- Read Root Process PIDs from the pipe ---
-    // Read Firewall PID (first one written)
     reader.read_exact(&mut pid_buffer)?;
     let firewall_pid = i32::from_ne_bytes(pid_buffer);
-    println!("[Supervisor] Received firewall PID {}.", firewall_pid);
     children_guard.insert("firewall".to_string(), firewall_pid);
 
-    // Read IPC Router PID (second one written)
     reader.read_exact(&mut pid_buffer)?;
     let ipc_router_pid = i32::from_ne_bytes(pid_buffer);
-    println!("[Supervisor] Received IPC router PID {}.", ipc_router_pid);
     children_guard.insert("ipc_router".to_string(), ipc_router_pid);
+    drop(reader);
 
-    drop(reader); // Close the read end of the pipe.
-
-    // --- Define and launch non-privileged applications ---
     let apps_to_launch = vec![(
         "discord_bot",
         "nobody",
@@ -194,86 +188,108 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
 
     for (name, user, path, args, workdir) in apps_to_launch {
         let name_str = name.to_string();
-        let user_str = user.to_string();
-        let path_str = path.to_string();
-        let workdir_opt = workdir.map(|d| d.to_string());
-        let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-
         let handle = task::spawn_blocking(move || {
-            let args_cstr: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
-            launch_child_process(&user_str, &path_str, &args_cstr, workdir_opt.as_deref())
+            let args_cstr: Vec<&str> = args.iter().map(|s| *s).collect();
+            launch_child_process(user, path, &args_cstr, workdir)
         });
-
         match handle.await? {
             Ok(pid) => {
                 println!("[Supervisor] Launched '{}' with PID {}.", name, pid);
                 children_guard.insert(name_str.clone(), pid);
-                tokio::spawn(nonblocking_zmq_message_sender(format!(
-                    "Launched {} with PID {}",
-                    name_str, pid
-                )));
+                zmq_tx.send(format!("Launched {} with PID {}", name_str, pid)).await.ok();
             }
             Err(e) => {
                 eprintln!("[Supervisor] FAILED to launch '{}': {}", name, e);
-                tokio::spawn(nonblocking_zmq_message_sender(format!(
-                    "FAILED to launch {}",
-                    name_str
-                )));
+                zmq_tx.send(format!("FAILED to launch {}", name_str)).await.ok();
             }
         }
     }
     drop(children_guard);
 
-    // --- Concurrent Signal Handling ---
-    let shutdown_handler = handle_shutdown_signals(Arc::clone(&children));
-    let child_exit_handler = handle_child_exits(Arc::clone(&children));
+    // ---- START: MODIFICATION ----
+    // 2. Pass the broadcast sender/receiver to the tasks.
+    let shutdown_handler = handle_shutdown_signals(Arc::clone(&children), zmq_tx.clone(), shutdown_tx.clone());
+    let child_exit_handler = handle_child_exits(Arc::clone(&children), zmq_tx.clone(), shutdown_tx.subscribe());
+    // ---- END: MODIFICATION ----
 
     println!("[Supervisor] All components launched. Monitoring for signals...");
 
+    // Wait for a shutdown signal to be handled, or for the child monitor to exit.
     tokio::select! {
         _ = child_exit_handler => eprintln!("[Supervisor] Child exit handler unexpectedly finished."),
-        _ = shutdown_handler => println!("[Supervisor] Shutdown signal received. Exiting."),
+        _ = shutdown_handler => println!("[Supervisor] OS signal handler finished."),
     }
 
+    // After shutdown is triggered, wait for the ZMQ client to finish its work.
+    drop(zmq_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), zmq_task_handle).await;
+    println!("[Supervisor] Exiting daemon.");
     Ok(())
 }
-
 /// An async task that listens for the SIGCHLD signal and cleans up zombie processes.
-async fn handle_child_exits(children: ChildProcesses) {
+async fn handle_child_exits(
+    children: ChildProcesses,
+    zmq_tx: mpsc::Sender<String>,
+    mut shutdown_rx: broadcast::Receiver<()>, // 4. Receive shutdown signal
+) {
     let mut stream = signal(SignalKind::child()).unwrap();
     loop {
-        stream.recv().await;
-        loop {
-            match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::Exited(pid, status)) => {
-                    let mut children_guard = children.lock().await;
-                    if let Some(name) = children_guard.iter().find_map(|(name, &p)| {
-                        if p == pid.into() {
-                            Some(name.clone())
-                        } else {
-                            None
+        // ---- START: MODIFICATION ----
+        // Select between child signals and the shutdown broadcast.
+        tokio::select! {
+            Ok(_) = shutdown_rx.recv() => {
+                println!("[Monitor] Received shutdown. Will exit after reaping remaining children.");
+                break; // Exit the infinite loop
+            },
+            _ = stream.recv() => {
+                loop {
+                    match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+                        Ok(WaitStatus::Exited(pid, status)) => {
+                            let mut children_guard = children.lock().await;
+                            if let Some(name) = children_guard.iter().find_map(|(name, &p)| {
+                                if p == pid.into() { Some(name.clone()) } else { None }
+                            }) {
+                                eprintln!("[Monitor] Child '{}' (PID {}) exited with status {}.", name, pid, status);
+                                zmq_tx.send(format!("Child {} has exited.", name)).await.ok();
+                                children_guard.remove(&name);
+                            }
                         }
-                    }) {
-                        eprintln!(
-                            "[Monitor] Child '{}' (PID {}) exited with status {}.",
-                            name, pid, status
-                        );
-                        tokio::spawn(nonblocking_zmq_message_sender(format!(
-                            "Child {} has exited.",
-                            name
-                        )));
-                        children_guard.remove(&name);
+                        Ok(WaitStatus::StillAlive) | Ok(_) => break,
+                        Err(_) => break,
                     }
                 }
-                Ok(WaitStatus::StillAlive) | Ok(_) => break,
-                Err(_) => break,
             }
         }
+        // ---- END: MODIFICATION ----
     }
+
+    // After shutdown is signaled, continue reaping any remaining children that exit.
+    println!("[Monitor] Shutdown mode: Reaping any stragglers.");
+    loop {
+        match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(pid, _)) | Ok(WaitStatus::Signaled(pid, _, _)) => {
+                let mut children_guard = children.lock().await;
+                if let Some(name) = children_guard.iter().find_map(|(name, &p)| if p == pid.into() { Some(name.clone()) } else { None }) {
+                    eprintln!("[Monitor] Reaped final child '{}' (PID {}).", name, pid);
+                    children_guard.remove(&name);
+                }
+            }
+            Ok(WaitStatus::StillAlive) | Ok(_) => {
+                if children.lock().await.is_empty() { break; }
+                sleep(Duration::from_millis(50)).await;
+            }
+            Err(_) => break, // ECHILD, no more children to wait for.
+        }
+    }
+    println!("[Monitor] Child monitor task finished.");
 }
 
 /// An async task that listens for SIGTERM/SIGINT and gracefully shuts down children.
-async fn handle_shutdown_signals(children: ChildProcesses) {
+async fn handle_shutdown_signals(
+    children: ChildProcesses,
+    zmq_tx: mpsc::Sender<String>,
+    shutdown_tx: broadcast::Sender<()>, // 6. Get the shutdown sender
+) {
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
     let mut sigint = signal(SignalKind::interrupt()).unwrap();
 
@@ -281,31 +297,36 @@ async fn handle_shutdown_signals(children: ChildProcesses) {
         _ = sigterm.recv() => println!("[Shutdown] Received SIGTERM."),
         _ = sigint.recv() => println!("[Shutdown] Received SIGINT."),
     };
+    
+    // ---- START: MODIFICATION ----
+    // 7. Notify all other tasks to shut down.
+    if shutdown_tx.send(()).is_err() {
+        eprintln!("[Shutdown] Failed to broadcast shutdown signal to other tasks.");
+    }
+    // ---- END: MODIFICATION ----
 
     println!("[Shutdown] Starting graceful shutdown of child processes...");
-    tokio::spawn(nonblocking_zmq_message_sender(
-        "Daemon shutting down.".to_string(),
-    ));
+    zmq_tx.send("Daemon shutting down.".to_string()).await.ok();
 
     let children_guard = children.lock().await;
+    let pids_to_reap: Vec<_> = children_guard.values().cloned().collect();
     for (name, &pid) in children_guard.iter() {
-        // We can now send SIGTERM to all children, as the daemon (nobody)
-        // is not trying to signal the firewall (root). Instead, the IPC router
-        // (which was root, now nobody) can be signalled directly.
-        // For the firewall, we still need a command.
-        if name == "firewall" {
-            println!("[Shutdown] Sending shutdown command to '{}' via ZMQ...", name);
-            tokio::spawn(nonblocking_zmq_message_sender(
-                "CMD:SHUTDOWN:firewall".to_string(),
-            ));
-        } else {
-            println!("[Shutdown] Sending SIGTERM to '{}' (PID {})...", name, pid);
-            let _ = signal::kill(Pid::from_raw(pid), Signal::SIGTERM);
-        }
+        println!("[Shutdown] Sending SIGTERM to '{}' (PID {})...", name, pid);
+        let _ = signal::kill(Pid::from_raw(pid), Signal::SIGTERM);
     }
     drop(children_guard);
 
-    sleep(Duration::from_secs(2)).await;
-    println!("[Shutdown] Exiting daemon.");
+    // Wait for the child monitor to reap all processes.
+    let wait_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if children.lock().await.is_empty() {
+            println!("[Shutdown] All children have exited.");
+            break;
+        }
+        if tokio::time::Instant::now() > wait_deadline {
+            eprintln!("[Shutdown] Timeout waiting for children to exit. Some processes may remain.");
+            break;
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
 }
-

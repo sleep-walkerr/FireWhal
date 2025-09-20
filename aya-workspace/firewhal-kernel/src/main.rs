@@ -7,24 +7,16 @@ use aya::{
 };
 use aya_log::EbpfLogger;
 use clap::Parser;
-use log::{info, warn, LevelFilter, Record};
+use log::{info, warn, LevelFilter, Record, SetLoggerError};
+use simple_logging;
 use std::{
-    fs::File,
-    time::Duration,
     net::Ipv4Addr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    str,
+    thread,
+    time::Duration,
+    fs::{File, OpenOptions},
 };
-
-use tokio::{
-    signal, // Add mpsc to imports
-    sync::{broadcast, mpsc},
-    sync::mpsc::error::TryRecvError,
-    task::spawn_blocking,
-};
-use zmq;
+use tokio::{signal, sync::{mpsc, watch}};
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -34,6 +26,7 @@ struct Opt {
     iface: String,
 }
 
+/// A custom logger that forwards log messages over a Tokio MPSC channel.
 struct ZmqLogger {
     tx: mpsc::Sender<String>,
 }
@@ -42,100 +35,106 @@ impl log::Log for ZmqLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         metadata.level() <= log::Level::Info
     }
-
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            let msg = format!("[{}] {}", record.level(), record.args());
-            // Use try_send to avoid blocking the logging call.
-            if let Err(e) = self.tx.try_send(msg) {
-                // If the channel is full or closed, print to stderr as a fallback.
-                eprintln!("Fallback log (ZMQ channel error: {}): {}", e, record.args());
+            let msg = format!("[Kernel] [{}] {}", record.level(), record.args());
+            if self.tx.try_send(msg).is_err() {
+                // Log is dropped if channel is full to prevent deadlock.
             }
         }
     }
-
     fn flush(&self) {}
 }
 
-async fn zmq_log_forwarder(
-    mut log_rx: mpsc::Receiver<String>,
-    mut shutdown_rx: broadcast::Receiver<()>,
-) {
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-
-    let blocking_task = spawn_blocking(move || -> Result<(), zmq::Error> {
-        let context = zmq::Context::new();
-        let dealer = context.socket(zmq::DEALER).unwrap();
-        dealer.set_linger(0)?;
-        assert!(dealer.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
-
-        while running_clone.load(Ordering::Relaxed) {
-            // Try to receive a message without blocking.
-            match log_rx.try_recv() {
-                Ok(msg) => {
-                    // Message received, send it over ZMQ.
-                    dealer.send(&msg, 0)?;
-                }
-                Err(TryRecvError::Empty) => {
-                    // No message available. Sleep for a short duration to prevent
-                    // busy-looping and yield the CPU. This allows the `running`
-                    // flag to be checked periodically without consuming 100% CPU.
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    // The channel has been closed, so we can exit the loop.
-                    info!("Log channel disconnected, shutting down ZMQ forwarder.");
-                    break;
-                }
-            }
-        }
-        Ok(())
-    });
-
-    tokio::select! {
-        _ = shutdown_rx.recv() => {
-            info!("Shutdown signal received in ZMQ log forwarder.");
-            running.store(false, Ordering::Relaxed);
-        },
-        _ = blocking_task => {
-            warn!("ZMQ log forwarder task finished unexpectedly.");
-        }
-    };
-}
-
-async fn run(opt: Opt) -> Result<(), anyhow::Error> {
-    // --- 1. SETUP GRACEFUL SHUTDOWN ---
-    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-
-    // --- SETUP LOGGING ---
-    let (log_tx, log_rx) = mpsc::channel(1024);
+/// Sets the global logger to our ZMQ logger.
+fn set_zmq_logger(log_tx: mpsc::Sender<String>) -> Result<(), SetLoggerError> {
     let logger = ZmqLogger { tx: log_tx };
     log::set_boxed_logger(Box::new(logger))
         .map(|()| log::set_max_level(LevelFilter::Info))
-        .expect("Failed to set logger");
+}
 
-    // --- SPAWN ZMQ LOG FORWARDER ---
-    let mut zmq_log_handle = tokio::spawn(zmq_log_forwarder(log_rx, shutdown_rx));
 
-    // --- 2. LOAD AND ATTACH EBPF PROGRAMS ---
+/// Runs in a separate thread. It forwards logs and listens for the shutdown command.
+fn zmq_comms_thread(mut log_rx: mpsc::Receiver<String>, shutdown_tx: watch::Sender<()>) {
+    let context = zmq::Context::new();
+    let dealer = context.socket(zmq::DEALER).unwrap();
+    
+    thread::sleep(Duration::from_millis(500));
+    
+    if let Err(e) = dealer.connect("ipc:///tmp/firewhal_ipc.sock") {
+        warn!("[ZMQ-Thread] Failed to connect to IPC router: {}. Shutting down.", e);
+        return;
+    }
+    if let Err(e) = dealer.send("KERNEL_READY", 0) {
+        warn!("[ZMQ-Thread] Failed to send KERNEL_READY: {}. Shutting down.", e);
+        return;
+    }
+    info!("[ZMQ-Thread] Registered with IPC router.");
+
+    let mut poll_items = [dealer.as_poll_item(zmq::POLLIN)];
+    loop {
+        while let Ok(msg) = log_rx.try_recv() {
+            if dealer.send(&msg, zmq::DONTWAIT).is_err() {
+                // Drop log if buffer full.
+            }
+        }
+
+        match zmq::poll(&mut poll_items, 100) {
+            Ok(count) if count > 0 && poll_items[0].is_readable() => {
+                if let Ok(multipart) = dealer.recv_multipart(0) {
+                    if multipart.len() >= 2 {
+                        if let Ok(msg) = str::from_utf8(&multipart[1]) {
+                            if msg == "CMD:SHUTDOWN:firewall" {
+                                info!("[ZMQ-Thread] Shutdown command received.");
+                                let _ = shutdown_tx.send(());
+                                break;
+                            }
+                        }
+                    }
+                } else { break; }
+            }
+            Ok(_) => {} // Poll timed out.
+            Err(_) => break, // Poll error.
+        }
+
+        if shutdown_tx.is_closed() { break; }
+        thread::sleep(Duration::from_millis(10));
+    }
+    info!("[ZMQ-Thread] Listener thread is shutting down.");
+}
+
+
+// firewhal-kernel.rs
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let opt = Opt::parse();
+
+    // --- SETUP DEDICATED LOG FILE ---
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/var/log/firewhal-kernel.log")?;
+    simple_logging::log_to(log_file, LevelFilter::Info);
+
+    info!("--- Firewhal Kernel Starting Up ---");
+    info!("Loading and attaching eBPF programs...");
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/firewhal-kernel"
     )))?;
     if let Err(e) = EbpfLogger::init(&mut bpf) {
-        warn!("failed to initialize eBPF logger: {e}");
+        warn!("Failed to initialize eBPF logger: {}", e);
     }
-
-    // Attach the XDP program and let the returned Link object manage its lifetime.
+    
+    // ... all your bpf.program_mut() and attach() calls remain the same ...
+    
     let xdp_prog: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into()?;
     xdp_prog.load()?;
     let _xdp_link = xdp_prog.attach(&opt.iface, XdpFlags::default())
         .context("failed to attach XDP program")?;
     info!("Attached XDP filter program to interface {}.", opt.iface);
-
-    // Attach cgroup programs and let their Link objects manage their lifetimes.
+    
     let cgroup_file = File::open(&opt.cgroup_path)?;
     let ingress_prog: &mut CgroupSockAddr = bpf.program_mut("firewhal_ingress_recvmsg4").unwrap().try_into()?;
     ingress_prog.load()?;
@@ -157,48 +156,53 @@ async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     let _egress_send_link = egress_send_prog.attach(cgroup_file, CgroupAttachMode::Single)?;
     info!("Attached cgroup egress sendmsg4 program.");
 
-    // --- 3. CONFIGURE EBPF MAPS ---
+
     let mut icmp_block: HashMap<_, u8, u8> = HashMap::try_from(bpf.map_mut("ICMP_BLOCK_ENABLED").unwrap())?;
     icmp_block.insert(1, 1, 0)?;
     info!("[Rule] Blocking all incoming ICMP (ping) traffic via XDP.");
 
     let mut blocklist: HashMap<_, u32, u32> = HashMap::try_from(bpf.map_mut("BLOCKLIST").unwrap())?;
-    let block_addr: u32 = Ipv4Addr::new(8, 8, 8, 8).into();
+    let block_addr: u32 = Ipv4Addr::new(9, 9, 9, 9).into();
     blocklist.insert(block_addr, 0, 0)?;
-    info!("[Rule] Blocking outgoing connections to 8.8.8.8");
+    info!("[Rule] Blocking outgoing connections to 9.9.9.9");
 
-    info!("✅ All eBPF programs attached. Waiting for Ctrl-C to exit.");
-    
-    // --- 4. RUN APPLICATION AND WAIT FOR SHUTDOWN SIGNAL ---
-    tokio::select! {
-        biased; // Prioritize the ctrl_c branch
+    // The ZMQ Comms thread is not strictly needed for shutdown anymore,
+    // but we can leave it for logging and future commands.
+    // The ZMQ logic does not need to change.
+    let (log_tx, log_rx) = mpsc::channel(1024);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
-        _ = signal::ctrl_c() => { // This branch is now prioritized
-            info!("\nCtrl-C received. Sending shutdown signal...");
-            let _ = shutdown_tx.send(());
-        },
-        _ = &mut zmq_log_handle => {
-            warn!("ZMQ log forwarder exited on its own before shutdown signal.");
-        }
-    };
+    thread::spawn(move || {
+        zmq_comms_thread(log_rx, shutdown_tx);
+    });
 
-    // --- 5. WAIT FOR TASKS TO SHUT DOWN GRACEFULLY ---
-    if let Err(e) = zmq_log_handle.await {
-        eprintln!("ZMQ log forwarder did not shut down cleanly: {}", e);
-    } else {
-        info!("ZMQ task shut down gracefully.");
+    if set_zmq_logger(log_tx).is_err() {
+        warn!("Failed to set ZMQ logger. Logs will continue to file.");
     }
 
-    // --- 6. CLEANUP ---
-    // The eBPF programs will be automatically detached when the `_..._link`
-    // variables go out of scope here.
-    info!("🧹 Detaching eBPF programs and exiting...");
-    info!("Program exited.");
-    Ok(())
-}
+    info!("✅ Firewall is active. Waiting for shutdown signal...");
 
-#[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
-    let opt = Opt::parse();
-    run(opt).await
+    // ---- START: MODIFICATION ----
+    // Set up a SIGTERM listener
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    tokio::select! {
+        _ = signal::ctrl_c() => {
+            info!("\nCtrl-C (SIGINT) received. Shutting down.");
+        },
+        _ = sigterm.recv() => {
+            info!("SIGTERM received. Shutting down.");
+        },
+        _ = shutdown_rx.changed() => {
+            // This branch remains as a backup or for other ZMQ-based commands
+            info!("Shutdown signal received from ZMQ listener thread.");
+        }
+    };
+    // ---- END: MODIFICATION ----
+
+    // Give a moment for shutdown signals to propagate and for drop handlers to run.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    info!("🧹 Detaching eBPF programs and exiting...");
+    Ok(())
 }
