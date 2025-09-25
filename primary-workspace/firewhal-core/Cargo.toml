@@ -2,3 +2,9 @@
 name = "firewhal-core"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+bincode = "2.0.1"
+serde = "1.0.226"
+tokio = "1.47.1"
+zmq = "0.10.0"

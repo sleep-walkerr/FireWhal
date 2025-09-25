@@ -8,3 +8,5 @@ firewhal-core = { path = "../firewhal-core" } # Depends on the shared library
 color-eyre = "0.6.4"
 crossterm = "0.29.0"
 ratatui = "0.29.0"
+zmq = "0.10.0"
+tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time", "sync"] }
