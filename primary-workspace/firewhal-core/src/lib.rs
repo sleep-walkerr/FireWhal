@@ -33,7 +33,7 @@ impl std::error::Error for IpcError {}
 // ZMQ dealer client to be used by IPC clients
 // One function instead of have a separate implementation inside of each subprogram
 /// A task that handles two-way ZMQ communication.
-async fn zmq_bidi_client_task(
+pub async fn zmq_client_connection(
     // For sending messages TO the ZMQ router
     mut outgoing_rx: mpsc::Receiver<FireWhalMessage>,
     // For sending messages FROM the ZMQ router back to our app
@@ -104,7 +104,6 @@ pub fn send_message(socket: &zmq::Socket, message: &FireWhalMessage) -> Result<(
     // 2. Encode the message directly into a Vec<u8>.
     let bytes = bincode::encode_to_vec(message, config)
         .expect("Failed to encode AppMessage");
-
     socket.send(&bytes, 0)
 }
 
@@ -125,42 +124,41 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
     Ok(message)
 }
 
-
-
-
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
-pub enum FireWhalMessage { // Have one single enum type that all structs fit into (for type safety)
+#[derive(Encode, Decode, Debug, Clone)]
+pub enum FireWhalMessage {
     CommandShutdown(ShutdownCommand),
     RuleAddBlock(BlockAddressRule),
     Status(StatusUpdate),
-    Debug(DebugMessage)
+    Debug(DebugMessage),
+    // You can remove Ident(IdentityMessage) if Status handles registration
+}
+
+// ... other structs like ShutdownCommand and BlockAddressRule are fine ...
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct StatusUpdate {
+    pub component: String,
+    pub is_healthy: bool,
+    pub message: String, // e.g., "Ready", "Shutting down", "Error state"
 }
 
 
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct DebugMessage {
+    pub source: String, // Changed from `component` for consistency
+    pub content: String, // Changed from `message` for clarity
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
 pub struct ShutdownCommand {
     pub target: String,
     pub delay_ms: u64,
 }
 
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone)]
 pub struct BlockAddressRule {
     pub source: String,
     pub address: String,
-}
-
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
-pub struct StatusUpdate {
-    pub component: String,
-    pub is_healthy: bool,
-    pub message: String,
-}
-
-
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
-pub struct DebugMessage {
-    pub component: String,
-    pub message: String,
 }
 
 // *** This is a sample, change me later
