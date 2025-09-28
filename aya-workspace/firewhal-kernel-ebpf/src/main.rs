@@ -5,14 +5,14 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 #![no_std]
 #![no_main]
 
-use core::mem;
+use core::{mem, net::Ipv4Addr};
 
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_get_current_pid_tgid,
     macros::{cgroup_sock_addr, map, xdp},
     maps::{HashMap, RingBuf}, // <-- NEW: Import RingBuf
-    programs::{SockAddrContext, XdpContext},
+    programs::{SockAddrContext, XdpContext}, EbpfContext,
 };
 use aya_log_ebpf::info;
 
@@ -84,7 +84,6 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
                     dest_port: 0,
                 };
                 unsafe { EVENTS.output(&event, 0) };
-                info!(&ctx, "XDP: BLOCKED incoming ICMP packet");
                 return Ok(xdp_action::XDP_DROP);
             }
         }
@@ -101,10 +100,14 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
 #[cgroup_sock_addr(recvmsg4)]
 pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
-        info!(
-            &ctx,
-            "Cgroup Ingress Processing, Packet Recieved"
-            );
+        let sockaddr_pointer = ctx.sock_addr;
+        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+        let user_port = unsafe { (*sockaddr_pointer).user_port };
+
+        // Convert to readable format
+        let user_ip_converted = u32::from_be(user_ip4);
+        let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
+
         Ok(1)
         }();
 
@@ -126,17 +129,17 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
         let user_ip_converted = u32::from_be(user_ip4);
         let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
         
-        info!(
-            &ctx,
-            "TCP EGRESS Connection Attempt TO: [{}, port: {}]",
-            user_ip_converted, user_port_converted
-        );
-
         let dest_addr = user_ip4;
         let blocklist_ptr =  core::ptr::addr_of_mut!(BLOCKLIST);
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
             let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-            info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
+            let block_report_event = BlockEvent {
+                reason: BlockReason::IpBlockedEgressUdp,
+                pid: ctx.pid(),
+                dest_addr:Ipv4Addr::from(dest_addr),
+                dest_port: user_port_converted,
+            };
+            unsafe { EVENTS.output(&block_report_event, 0) };
             return Ok(0); // Block the connection
         }
 
@@ -158,17 +161,24 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
         let user_port = unsafe { (*sockaddr_pointer).user_port };
         let dest_ip_host = u32::from_be(user_ip4);
         let dest_port_host = (u32::from_be(user_port) >> 16) as u16;
-        info!(
-            &ctx,
-            "UDP EGRESS Connection Attempt to: {}, port: {}",
-            dest_ip_host, dest_port_host,
-        );
+        // info!(
+        //     &ctx,
+        //     "UDP EGRESS Connection Attempt to: {}, port: {}",
+        //     dest_ip_host, dest_port_host,
+        // );
 
         let dest_addr = user_ip4;
         let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
             let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-            info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
+            let block_report_event = BlockEvent {
+                reason: BlockReason::IpBlockedEgressUdp,
+                pid: ctx.pid(),
+                dest_addr:Ipv4Addr::from(dest_addr),
+                dest_port: dest_port_host,
+            };
+            unsafe { EVENTS.output(&block_report_event, 0) };
+            // info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
             return Ok(0); // Block the connection
         }
 
@@ -190,16 +200,25 @@ let result = || -> Result<i32, i32> {
         let user_port = unsafe { (*sockaddr_pointer).user_port };
         let dest_ip_host = u32::from_be(user_ip4);
         let dest_port_host = (u32::from_be(user_port) >> 16) as u16;
-        info!(
-            &ctx,
-            "UDP EGRESS Connection Attempt to: {}, port: {}",
-            dest_ip_host, dest_port_host,
-        );
+        // info!(
+        //     &ctx,
+        //     "UDP EGRESS Connection Attempt to: {}, port: {}",
+        //     dest_ip_host, dest_port_host,
+        // );
 
         let dest_addr = user_ip4;
         let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
             let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+
+            let block_event_message = BlockEvent {
+                reason : BlockReason::BindBlocked,
+                pid: ctx.pid(),
+                dest_addr:Ipv4Addr::from(dest_addr),
+                dest_port: dest_port_host,
+            };
+            unsafe { EVENTS.output(&block_event_message, 0) };
+
             info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
             return Ok(0); // Block the connection
         }

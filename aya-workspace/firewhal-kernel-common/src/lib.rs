@@ -21,6 +21,7 @@ pub enum BlockReason {
     IcmpBlocked = 1,
     IpBlockedEgressTcp = 2,
     IpBlockedEgressUdp = 3,
+    BindBlocked = 4,
 }
 
 // Implement Debug manually because `aya-ebpf` doesn't support derive macros easily.
@@ -30,6 +31,7 @@ impl Debug for BlockReason {
             BlockReason::IcmpBlocked => write!(f, "IcmpBlocked"),
             BlockReason::IpBlockedEgressTcp => write!(f, "IpBlockedEgressTcp"),
             BlockReason::IpBlockedEgressUdp => write!(f, "IpBlockedEgressUdp"),
+            BlockReason::BindBlocked => write!(f, "BindBlocked"),
         }
     }
 }
