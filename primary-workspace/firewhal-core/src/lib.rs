@@ -43,7 +43,7 @@ pub async fn zmq_client_connection(
         let context = zmq::Context::new();
         let dealer = context.socket(zmq::DEALER)?;
         dealer.connect("ipc:///tmp/firewhal_ipc.sock")?;
-        println!("[ZMQ-Bidi-Client] Successfully connected to IPC router.");
+        //println!("[ZMQ-Bidi-Client] Successfully connected to IPC router.");
 
         // 1. Set up poll item for the ZMQ socket to listen for incoming messages.
         let mut poll_items = [dealer.as_poll_item(zmq::POLLIN)];
@@ -52,7 +52,7 @@ pub async fn zmq_client_connection(
             // 2. Handle outgoing messages first (non-blocking).
             // This drains any queued messages before we wait.
             while let Ok(msg) = outgoing_rx.try_recv() {
-                println!("[ZMQ-Bidi-Client] Sending message: {:?}", msg);
+                //println!("[ZMQ-Bidi-Client] Sending message: {:?}", msg);
                 if let Err(e) = send_message(&dealer, &msg) {
                     eprintln!("[ZMQ-Bidi-Client] Failed to send message: {}", e);
                     return Err(e.into()); // Exit on error
@@ -68,7 +68,7 @@ pub async fn zmq_client_connection(
                     // 4. If a message is ready, receive it.
                     match recv_message(&dealer) {
                         Ok(msg) => {
-                            println!("[ZMQ-Bidi-Client] Received message: {:?}", msg);
+                            //println!("[ZMQ-Bidi-Client] Received message: {:?}", msg);
                             // 5. Send it back to the main app via the incoming channel.
                             if incoming_tx.blocking_send(msg).is_err() {
                                 // Main app has shut down the receiver, so we can exit.
@@ -119,7 +119,7 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
 
     // The `decode_from_slice` function also returns the number of bytes read.
     // You can use `len` to confirm the entire message was consumed, if needed.
-    println!("Decoded {} bytes.", len);
+    //println!("Decoded {} bytes.", len);
 
     Ok(message)
 }

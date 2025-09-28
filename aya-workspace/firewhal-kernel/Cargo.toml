@@ -34,6 +34,7 @@ path = "src/main.rs"
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true, features = ["async_tokio"] }
 aya-log = { workspace = true }
+aya-log-ebpf = { workspace = true }
 bytes = "1"
 clap = { workspace = true, features = ["derive"] }
 env_logger = { workspace = true }

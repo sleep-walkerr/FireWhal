@@ -485,6 +485,7 @@ dependencies = [
  "aya",
  "aya-build",
  "aya-log",
+ "aya-log-ebpf",
  "bytes",
  "clap",
  "env_logger",

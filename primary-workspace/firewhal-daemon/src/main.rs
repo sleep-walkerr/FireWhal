@@ -83,20 +83,20 @@ fn launch_child_process(
 
 /// Main entry point for the daemon.
 fn main() {
-    let stdout = File::create("/tmp/firewhal_daemon.out").unwrap();
-    let stderr = File::create("/tmp/firewhal_daemon.err").unwrap();
+    let stdout = File::create("/tmp/firewhal-daemon.out").unwrap();
+    let stderr = File::create("/tmp/firewhal-daemon.err").unwrap();
 
     let (read_fd_owned, write_fd_owned) = pipe().expect("Failed to create pipe");
     let write_fd = write_fd_owned.into_raw_fd();
     let read_fd = read_fd_owned.into_raw_fd();
 
     let daemonize = Daemonize::new()
-        .pid_file("/var/run/firewhal_daemon.pid")
+        .pid_file("/var/run/firewhal-daemon.pid")
         .working_directory("/tmp")
         .stdout(stdout)
         .stderr(stderr)
         .privileged_action(move || {
-            println!("[Privileged] Launching root-level processes...");
+            // This code runs as root before privileges are dropped.
             let root_processes = vec![
                 ("/opt/firewhal/bin/firewhal-kernel", vec!["firewhal-kernel"]),
                 ("/opt/firewhal/bin/firewhal-ipc", vec!["firewhal-ipc"]),
@@ -106,7 +106,6 @@ fn main() {
                 let args: Vec<&str> = args_vec.iter().map(|s| *s).collect();
                 match unsafe { fork() } {
                     Ok(ForkResult::Parent { child }) => {
-                        println!("[Privileged] Launched {} with PID {}.", path, child);
                         writer.write_all(&i32::from(child).to_ne_bytes()).unwrap();
                     }
                     Ok(ForkResult::Child) => {
@@ -120,6 +119,7 @@ fn main() {
                     Err(e) => eprintln!("[Privileged] Fork failed for {}: {}", path, e),
                 }
             }
+            // Privileges are dropped after this closure returns.
         });
 
     match daemonize.start() {
