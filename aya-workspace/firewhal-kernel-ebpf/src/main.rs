@@ -16,7 +16,6 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::info;
 
-// NEW: Import your new shared structs
 use firewhal_kernel_common::{BlockEvent, BlockReason};
 
 use network_types::{
@@ -232,8 +231,8 @@ let result = || -> Result<i32, i32> {
     }
 }
 
-#[cfg(not(test))]
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
-}
+// #[cfg(not(test))]
+// #[panic_handler]
+// fn panic(_info: &core::panic::PanicInfo) -> ! {
+//     loop {}
+// }
