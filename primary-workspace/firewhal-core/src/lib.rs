@@ -33,7 +33,7 @@ impl std::error::Error for IpcError {}
 // ZMQ dealer client to be used by IPC clients
 // One function instead of have a separate implementation inside of each subprogram
 /// A task that handles two-way ZMQ communication.
-async fn zmq_bidi_client_task(
+pub async fn zmq_client_connection(
     // For sending messages TO the ZMQ router
     mut outgoing_rx: mpsc::Receiver<FireWhalMessage>,
     // For sending messages FROM the ZMQ router back to our app
@@ -43,7 +43,7 @@ async fn zmq_bidi_client_task(
         let context = zmq::Context::new();
         let dealer = context.socket(zmq::DEALER)?;
         dealer.connect("ipc:///tmp/firewhal_ipc.sock")?;
-        println!("[ZMQ-Bidi-Client] Successfully connected to IPC router.");
+        //println!("[ZMQ-Bidi-Client] Successfully connected to IPC router.");
 
         // 1. Set up poll item for the ZMQ socket to listen for incoming messages.
         let mut poll_items = [dealer.as_poll_item(zmq::POLLIN)];
@@ -52,7 +52,7 @@ async fn zmq_bidi_client_task(
             // 2. Handle outgoing messages first (non-blocking).
             // This drains any queued messages before we wait.
             while let Ok(msg) = outgoing_rx.try_recv() {
-                println!("[ZMQ-Bidi-Client] Sending message: {:?}", msg);
+                //println!("[ZMQ-Bidi-Client] Sending message: {:?}", msg);
                 if let Err(e) = send_message(&dealer, &msg) {
                     eprintln!("[ZMQ-Bidi-Client] Failed to send message: {}", e);
                     return Err(e.into()); // Exit on error
@@ -68,7 +68,7 @@ async fn zmq_bidi_client_task(
                     // 4. If a message is ready, receive it.
                     match recv_message(&dealer) {
                         Ok(msg) => {
-                            println!("[ZMQ-Bidi-Client] Received message: {:?}", msg);
+                            //println!("[ZMQ-Bidi-Client] Received message: {:?}", msg);
                             // 5. Send it back to the main app via the incoming channel.
                             if incoming_tx.blocking_send(msg).is_err() {
                                 // Main app has shut down the receiver, so we can exit.
@@ -104,7 +104,6 @@ pub fn send_message(socket: &zmq::Socket, message: &FireWhalMessage) -> Result<(
     // 2. Encode the message directly into a Vec<u8>.
     let bytes = bincode::encode_to_vec(message, config)
         .expect("Failed to encode AppMessage");
-
     socket.send(&bytes, 0)
 }
 
@@ -120,47 +119,46 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
 
     // The `decode_from_slice` function also returns the number of bytes read.
     // You can use `len` to confirm the entire message was consumed, if needed.
-    println!("Decoded {} bytes.", len);
+    //println!("Decoded {} bytes.", len);
 
     Ok(message)
 }
 
-
-
-
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
-pub enum FireWhalMessage { // Have one single enum type that all structs fit into (for type safety)
+#[derive(Encode, Decode, Debug, Clone)]
+pub enum FireWhalMessage {
     CommandShutdown(ShutdownCommand),
     RuleAddBlock(BlockAddressRule),
     Status(StatusUpdate),
-    Debug(DebugMessage)
+    Debug(DebugMessage),
+    // You can remove Ident(IdentityMessage) if Status handles registration
+}
+
+// ... other structs like ShutdownCommand and BlockAddressRule are fine ...
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct StatusUpdate {
+    pub component: String,
+    pub is_healthy: bool,
+    pub message: String, // e.g., "Ready", "Shutting down", "Error state"
 }
 
 
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct DebugMessage {
+    pub source: String, // Changed from `component` for consistency
+    pub content: String, // Changed from `message` for clarity
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
 pub struct ShutdownCommand {
     pub target: String,
     pub delay_ms: u64,
 }
 
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone)]
 pub struct BlockAddressRule {
     pub source: String,
     pub address: String,
-}
-
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
-pub struct StatusUpdate {
-    pub component: String,
-    pub is_healthy: bool,
-    pub message: String,
-}
-
-
-#[derive(Serialize, Deserialize, Encode, Decode, Debug, Clone)]
-pub struct DebugMessage {
-    pub component: String,
-    pub message: String,
 }
 
 // *** This is a sample, change me later

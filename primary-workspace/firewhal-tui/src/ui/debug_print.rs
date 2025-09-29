@@ -19,16 +19,32 @@ pub fn render(f: &mut Frame, app: &App) {
     let messages: Vec<ListItem> = app
         .debug_messages
         .iter()
-        .rev() // Show the most recent messages at the top
+        .rev() // Show the most recent messages at the bottom of the view (top of the list)
         .map(|msg| {
-            let content = Line::from(Span::raw(msg.clone()));
-            ListItem::new(content)
+            // Style the message based on its source component
+            let (source, content) = msg.split_once(": ").unwrap_or(("System", msg));
+            let source_style = match source {
+                "[Daemon]" => Style::default().fg(Color::Cyan),
+                "[Firewall]" => Style::default().fg(Color::Red),
+                "[Discord]" => Style::default().fg(Color::Blue),
+                _ => Style::default().fg(Color::Yellow),
+            };
+
+            let line = Line::from(vec![
+                Span::styled(source, source_style.bold()),
+                Span::raw(": "),
+                Span::styled(content, Style::default().fg(Color::White)),
+            ]);
+
+            ListItem::new(line)
         })
         .collect();
 
     // Create a List widget
-    let messages_list =
-        List::new(messages).block(Block::default().borders(Borders::NONE));
+    let messages_list = List::new(messages)
+        .block(Block::default().borders(Borders::NONE))
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .highlight_symbol(">> ");
 
     f.render_widget(messages_list, inner_area);
 }

@@ -25,6 +25,8 @@ use tokio::{
     sync::{broadcast, mpsc},
 };
 use zmq;
+use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate};
+use tokio::sync::mpsc::error::TryRecvError;
 
 /// Holds the application's state
 struct App<> {
@@ -35,93 +37,29 @@ struct App<> {
     last_tick: Instant, // New: To control animation speed
 }
 
-async fn ipc_connection(
-    _msg: String,
-    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-    msg_tx: mpsc::Sender<String>,
-) {
-    // This flag will be shared between our async task and the blocking ZMQ thread.
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-
-    // The actual blocking ZMQ work is offloaded to a blocking thread.
-    let mut blocking_task = spawn_blocking(move || -> Result<(), zmq::Error> {
-        let context = zmq::Context::new();
-        let dealer = context.socket(zmq::DEALER).unwrap();
-        // Set a timeout on receive so the loop doesn't block forever.
-        dealer.set_rcvtimeo(500)?;
-        // Set linger to 0 to prevent blocking on close.
-        dealer.set_linger(0)?;
-        assert!(dealer.connect("ipc:///tmp/firewhal_ipc.sock").is_ok());
-
-        dealer.send("TUI_READY", 0)?;
-
-        // Loop until the shutdown flag is set.
-        while running_clone.load(Ordering::Relaxed) {
-            let mut msg = zmq::Message::new();
-            match dealer.recv(&mut msg, 0) {
-                Ok(_) => {
-                    let msg_str = msg.as_str().unwrap_or("");
-                    // Send the received message to the main UI thread.
-                    // We use `blocking_send` because we are in a thread spawned by `spawn_blocking`.
-                    if msg_tx.blocking_send(msg_str.to_string()).is_err() {
-                        break; // Stop if the receiver has been dropped (UI closed).
-                    }
-
-                    if msg_str == "Hash has changed" {
-                        let _ = dealer.send("Hash changed notification received by TUI ZMQ", 0);
-                    }
-                }
-                Err(zmq::Error::EAGAIN) => {
-                    // Timeout hit, this is expected. Loop again to check the `running` flag.
-                    continue;
-                }
-                Err(e) => {
-                    // A real error occurred.
-                    eprintln!("ZMQ recv error: {}", e);
-                    break;
-                }
-            }
-        }
-        Ok(())
-    });
-
-    // This is our async control loop.
-    tokio::select! {
-        // Wait for the shutdown signal
-        _ = shutdown_rx.recv() => {
-            println!("Shutdown signal received in ZMQ task. Stopping blocking thread.");
-            running.store(false, Ordering::Relaxed);
-        },
-        // Or wait for the blocking task to finish on its own
-        _ = &mut blocking_task => {
-            println!("ZMQ blocking task finished before shutdown signal.");
-        }
-    };
-
-    // After signaling shutdown, we must wait for the blocking task to actually finish.
-    if let Err(e) = blocking_task.await {
-        eprintln!("ZMQ blocking task panicked or was cancelled: {}", e);
-    } else {
-        println!("ZMQ task shut down gracefully.");
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
     // Connect to IPC
-    // 1. Setup graceful shutdown channel
-    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
-    // New: Setup channel for IPC messages to UI
-    let (msg_tx, mut msg_rx) = mpsc::channel(100);
+    // `to_zmq_tx` is for the TUI to send messages TO the ZMQ task.
+    // `from_zmq_rx` is for the TUI to receive messages FROM the ZMQ task.
+    let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
+    let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
 
-    // 2. Spawn the ZMQ task, giving it a way to listen for the shutdown signal
-    let message_sender_handle = tokio::spawn(ipc_connection(
-        "TUI_READY".to_string(),
-        shutdown_rx,
-        msg_tx,
-    ));
-        
+    // Spawn the ZMQ task.
+    // `to_zmq_rx` is the `outgoing_rx` for the ZMQ task.
+    // `from_zmq_tx` is the `incoming_tx` for the ZMQ task.
+    let ipc_connection = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx));
+
+    let ident_message = FireWhalMessage::Status(StatusUpdate {
+        component: "TUI".to_string(),
+        is_healthy: true,
+        message: "Ready".to_string(),
+    }
+    );
+    
+    // Unhandled error, needs to be fixed later
+    _ = to_zmq_tx.send(ident_message).await;
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -135,11 +73,6 @@ async fn main() -> Result<(), io::Error> {
 
     loop {
         terminal.draw(|f| ui::render(f, &app))?;
-
-        // Check for IPC messages from the ZMQ task without blocking the UI.
-        if let Ok(msg) = msg_rx.try_recv() {
-            app.add_debug_message(msg);
-        }
 
         let timeout = tick_rate
             .checked_sub(app.last_tick.elapsed())
@@ -158,6 +91,26 @@ async fn main() -> Result<(), io::Error> {
             app.update_progress();
             app.last_tick = Instant::now();
         }
+
+        // Process all pending messages from the ZMQ task.
+        loop {
+            match from_zmq_rx.try_recv() {
+                Ok(FireWhalMessage::Debug(msg)) => {
+                    // Add the formatted message to the app's state.
+                    let formatted_msg = format!("[{}]: {}", msg.source, msg.content);
+                    app.debug_messages.push(formatted_msg);
+                }
+                Ok(_) => { /* Ignore other message types for now */ }
+                Err(TryRecvError::Empty) => {
+                    // No more messages in the queue.
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    // The ZMQ task has shut down, so we should exit.
+                    break;
+                }
+            }
+        }
     }
 
     // Restore terminal
@@ -166,11 +119,11 @@ async fn main() -> Result<(), io::Error> {
     terminal.show_cursor()?; // optional: make sure cursor reappears
 
     // 3. Send the shutdown signal
-    println!("TUI exited. Sending shutdown signal to ZMQ task...");
-    let _ = shutdown_tx.send(());
+    println!("TUI exited. Shutting down ZMQ task...");
+    drop(to_zmq_tx); // This will cause the zmq_client_connection to exit its loop.
 
     // 4. Wait for the ZMQ task to finish cleanly
-    if let Err(e) = message_sender_handle.await {
+    if let Err(e) = ipc_connection.await {
         eprintln!("ZMQ task did not shut down cleanly: {:?}", e);
     }
 

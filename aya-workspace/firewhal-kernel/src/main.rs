@@ -1,22 +1,31 @@
+use aya::maps::RingBuf;
+use firewhal_kernel_common::{BlockEvent, BlockReason};
 use anyhow::Context;
 use aya::{
-    maps::HashMap,
+    maps::{HashMap as AyaHashMap, perf::AsyncPerfEventArray},
     include_bytes_aligned,
     programs::{CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags},
-    Ebpf,
+    Ebpf, 
+    util::online_cpus,
 };
 use aya_log::EbpfLogger;
+use bytes::BytesMut;
 use clap::Parser;
-use log::{info, warn, LevelFilter, Record, SetLoggerError};
-use simple_logging;
+use log::{info, warn, LevelFilter};
 use std::{
+    fs::File,
     net::Ipv4Addr,
-    str,
-    thread,
-    time::Duration,
-    fs::{File, OpenOptions},
+    sync::Arc,
 };
-use tokio::{signal, sync::{mpsc, watch}};
+use tokio::{
+    signal,
+    sync::{mpsc, Mutex},
+};
+
+use firewhal_core::{
+    BlockAddressRule, DebugMessage, FireWhalMessage, StatusUpdate,
+};
+use firewhal_kernel_common::LogRecord;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -26,183 +35,204 @@ struct Opt {
     iface: String,
 }
 
-/// A custom logger that forwards log messages over a Tokio MPSC channel.
-struct ZmqLogger {
-    tx: mpsc::Sender<String>,
-}
-
-impl log::Log for ZmqLogger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Info
-    }
-    fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            let msg = format!("[Kernel] [{}] {}", record.level(), record.args());
-            if self.tx.try_send(msg).is_err() {
-                // Log is dropped if channel is full to prevent deadlock.
-            }
-        }
-    }
-    fn flush(&self) {}
-}
-
-/// Sets the global logger to our ZMQ logger.
-fn set_zmq_logger(log_tx: mpsc::Sender<String>) -> Result<(), SetLoggerError> {
-    let logger = ZmqLogger { tx: log_tx };
-    log::set_boxed_logger(Box::new(logger))
-        .map(|()| log::set_max_level(LevelFilter::Info))
-}
-
-
-/// Runs in a separate thread. It forwards logs and listens for the shutdown command.
-fn zmq_comms_thread(mut log_rx: mpsc::Receiver<String>, shutdown_tx: watch::Sender<()>) {
-    let context = zmq::Context::new();
-    let dealer = context.socket(zmq::DEALER).unwrap();
-    
-    thread::sleep(Duration::from_millis(500));
-    
-    if let Err(e) = dealer.connect("ipc:///tmp/firewhal_ipc.sock") {
-        warn!("[ZMQ-Thread] Failed to connect to IPC router: {}. Shutting down.", e);
-        return;
-    }
-    if let Err(e) = dealer.send("KERNEL_READY", 0) {
-        warn!("[ZMQ-Thread] Failed to send KERNEL_READY: {}. Shutting down.", e);
-        return;
-    }
-    info!("[ZMQ-Thread] Registered with IPC router.");
-
-    let mut poll_items = [dealer.as_poll_item(zmq::POLLIN)];
-    loop {
-        while let Ok(msg) = log_rx.try_recv() {
-            if dealer.send(&msg, zmq::DONTWAIT).is_err() {
-                // Drop log if buffer full.
-            }
-        }
-
-        match zmq::poll(&mut poll_items, 100) {
-            Ok(count) if count > 0 && poll_items[0].is_readable() => {
-                if let Ok(multipart) = dealer.recv_multipart(0) {
-                    if multipart.len() >= 2 {
-                        if let Ok(msg) = str::from_utf8(&multipart[1]) {
-                            if msg == "CMD:SHUTDOWN:firewall" {
-                                info!("[ZMQ-Thread] Shutdown command received.");
-                                let _ = shutdown_tx.send(());
-                                break;
-                            }
-                        }
-                    }
-                } else { break; }
-            }
-            Ok(_) => {} // Poll timed out.
-            Err(_) => break, // Poll error.
-        }
-
-        if shutdown_tx.is_closed() { break; }
-        thread::sleep(Duration::from_millis(10));
-    }
-    info!("[ZMQ-Thread] Listener thread is shutting down.");
-}
-
-
-// firewhal-kernel.rs
-
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
 
-    // --- SETUP DEDICATED LOG FILE ---
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/var/log/firewhal-kernel.log")?;
-    simple_logging::log_to(log_file, LevelFilter::Info);
+    env_logger::Builder::new()
+        .filter_level(LevelFilter::Info)
+        .init();
 
-    info!("--- Firewhal Kernel Starting Up ---");
-    info!("Loading and attaching eBPF programs...");
-    let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(
+    // --- ZMQ IPC Setup ---
+    let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
+    let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
+    let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone()));
+
+    let ident_msg = FireWhalMessage::Status(StatusUpdate {
+        component: "Firewall".to_string(),
+        is_healthy: true,
+        message: "Ready".to_string(),
+    });
+    to_zmq_tx.send(ident_msg).await?;
+
+    // --- eBPF Setup ---
+    info!("[Kernel] Loading and attaching eBPF programs...");
+    let bpf = Arc::new(Mutex::new(Ebpf::load(include_bytes_aligned!(concat!( // <-- CHANGED
         env!("OUT_DIR"),
         "/firewhal-kernel"
-    )))?;
-    if let Err(e) = EbpfLogger::init(&mut bpf) {
-        warn!("Failed to initialize eBPF logger: {}", e);
+    )))?));
+
+    if let Err(e) = EbpfLogger::init(&mut *bpf.lock().await) { // <-- THE FIX IS HERE
+        warn!("[Kernel] Failed to initialize eBPF logger: {}", e);
     }
+
+    // --- Attach eBPF Programs ---
+    {
+        let mut bpf_guard = bpf.lock().await;
+        let prog: &mut Xdp = bpf_guard.program_mut("firewhal_xdp").unwrap().try_into()?;
+        prog.load()?;
+        prog.attach(&opt.iface, XdpFlags::default())
+            .context("failed to attach XDP program")?;
+    }
+    info!("[Kernel] Attached XDP filter program to interface {}.", opt.iface);
+
+    {
+        let cgroup_file = File::open(&opt.cgroup_path)?;
+        let mut bpf_guard = bpf.lock().await;
+        let prog: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_ingress_recvmsg4").unwrap().try_into()?;
+        prog.load()?;
+        prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
+    }
+    info!("[Kernel] Attached cgroup ingress recvmsg4 program.");
+
+    {
+        let cgroup_file = File::open(&opt.cgroup_path)?;
+        let mut bpf_guard = bpf.lock().await;
+        let prog: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_egress_connect4").unwrap().try_into()?;
+        prog.load()?;
+        prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
+    }
+    info!("[Kernel] Attached cgroup egress connect4 program.");
+
+    {
+        let cgroup_file = File::open(&opt.cgroup_path)?;
+        let mut bpf_guard = bpf.lock().await;
+        let prog: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_egress_bind4").unwrap().try_into()?;
+        prog.load()?;
+        prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
+    }
+    info!("[Kernel] Attached cgroup egress bind4 program.");
     
-    // ... all your bpf.program_mut() and attach() calls remain the same ...
-    
-    let xdp_prog: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into()?;
-    xdp_prog.load()?;
-    let _xdp_link = xdp_prog.attach(&opt.iface, XdpFlags::default())
-        .context("failed to attach XDP program")?;
-    info!("Attached XDP filter program to interface {}.", opt.iface);
-    
-    let cgroup_file = File::open(&opt.cgroup_path)?;
-    let ingress_prog: &mut CgroupSockAddr = bpf.program_mut("firewhal_ingress_recvmsg4").unwrap().try_into()?;
-    ingress_prog.load()?;
-    let _ingress_link = ingress_prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
-    info!("Attached cgroup ingress recvmsg4 program.");
-
-    let egress_connect_prog: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_connect4").unwrap().try_into()?;
-    egress_connect_prog.load()?;
-    let _egress_connect_link = egress_connect_prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
-    info!("Attached cgroup egress connect4 program.");
-
-    let egress_bind_prog: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_bind4").unwrap().try_into()?;
-    egress_bind_prog.load()?;
-    let _egress_bind_link = egress_bind_prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
-    info!("Attached cgroup egress bind4 program.");
-
-    let egress_send_prog: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_sendmsg4").unwrap().try_into()?;
-    egress_send_prog.load()?;
-    let _egress_send_link = egress_send_prog.attach(cgroup_file, CgroupAttachMode::Single)?;
-    info!("Attached cgroup egress sendmsg4 program.");
+    {
+        let cgroup_file = File::open(&opt.cgroup_path)?;
+        let mut bpf_guard = bpf.lock().await;
+        let prog: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_egress_sendmsg4").unwrap().try_into()?;
+        prog.load()?;
+        prog.attach(cgroup_file, CgroupAttachMode::Single)?;
+    }
+    info!("[Kernel] Attached cgroup egress sendmsg4 program.");
 
 
-    let mut icmp_block: HashMap<_, u8, u8> = HashMap::try_from(bpf.map_mut("ICMP_BLOCK_ENABLED").unwrap())?;
-    icmp_block.insert(1, 1, 0)?;
-    info!("[Rule] Blocking all incoming ICMP (ping) traffic via XDP.");
+    // --- Initial Rule Setup ---
+    {
+        let mut bpf_guard = bpf.lock().await;
+        let icmp_map = bpf_guard.map_mut("ICMP_BLOCK_ENABLED").unwrap();
+        let mut icmp_block: AyaHashMap<_, u8, u8> = AyaHashMap::try_from(icmp_map)?;
+        icmp_block.insert(1, 1, 0)?;
+        info!("[Kernel] [Rule] Blocking all incoming ICMP traffic via XDP.");
 
-    let mut blocklist: HashMap<_, u32, u32> = HashMap::try_from(bpf.map_mut("BLOCKLIST").unwrap())?;
-    let block_addr: u32 = Ipv4Addr::new(9, 9, 9, 9).into();
-    blocklist.insert(block_addr, 0, 0)?;
-    info!("[Rule] Blocking outgoing connections to 9.9.9.9");
+        let blocklist_map = bpf_guard.map_mut("BLOCKLIST").unwrap();
+        let mut blocklist: AyaHashMap<_, u32, u32> = AyaHashMap::try_from(blocklist_map)?;
+        let block_addr: u32 = Ipv4Addr::new(9, 9, 9, 9).into();
+        blocklist.insert(block_addr, 0, 0)?;
+        info!("[Kernel] [Rule] Blocking outgoing connections to 9.9.9.9");
+    }
 
-    // The ZMQ Comms thread is not strictly needed for shutdown anymore,
-    // but we can leave it for logging and future commands.
-    // The ZMQ logic does not need to change.
-    let (log_tx, log_rx) = mpsc::channel(1024);
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+    // --- ADD THIS NEW BLOCK ---
+    // --- Block Event Handling ---
+    let bpf_clone = Arc::clone(&bpf);
+    let zmq_tx_clone = to_zmq_tx.clone();
 
-    thread::spawn(move || {
-        zmq_comms_thread(log_rx, shutdown_tx);
+    tokio::spawn(async move {
+        // We need to keep the BPF guard alive to access the map.
+        let mut bpf_guard = bpf_clone.lock().await;
+
+        // Get a handle to the EVENTS RingBuf map.
+        let mut events_map = bpf_guard.map_mut("EVENTS").unwrap();
+        let mut events = RingBuf::try_from(events_map).unwrap();
+
+        info!("[Events] Started listening for block events from the kernel.");
+        loop {
+            // Wait for an event from the RingBuf
+            if let Some(buf) = events.next() {
+                // The buffer contains the raw bytes of our BlockEvent struct.
+                // We read it directly from the pointer.
+                let ptr = buf.as_ptr() as *const BlockEvent;
+                let event = unsafe { ptr.read_unaligned() };
+
+                // Convert the data into a human-readable format.
+                let dest_ip = event.dest_addr;
+                let dest_port = u16::from_be(event.dest_port);
+
+                let content = format!(
+                    "Blocked {:?} -> PID: {}, Dest: {}:{}",
+                    event.reason,
+                    event.pid,
+                    dest_ip,
+                    dest_port,
+                );
+
+                info!("[Events] {}", content);
+
+                // Create a message and send it over ZMQ to your UI.
+                // You might want to create a new `FireWhalMessage` variant for this
+                // instead of using `Debug`, but this works for now.
+                let ipc_msg = FireWhalMessage::Debug(DebugMessage {
+                    source: "FirewallEvent".to_string(),
+                    content,
+                });
+
+                if zmq_tx_clone.send(ipc_msg).await.is_err() {
+                    warn!("[Events] ZMQ channel closed, cannot send block event. Exiting task.");
+                    break; // Exit the loop and the task.
+                }
+            } else {
+                // If there are no events, yield to the scheduler briefly.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
     });
 
-    if set_zmq_logger(log_tx).is_err() {
-        warn!("Failed to set ZMQ logger. Logs will continue to file.");
+    info!("[Kernel] ✅ Firewall is active. Waiting for shutdown signal...");
+
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+
+    // --- Main Event Loop ---
+    loop {
+        tokio::select! {
+            // Handle incoming commands from TUI/Discord/etc.
+            Some(message) = from_zmq_rx.recv() => {
+                match message {
+                    FireWhalMessage::RuleAddBlock(BlockAddressRule { address, .. }) => {
+                        info!("[Kernel] Received command to block address: {}", address);
+                        match address.parse::<Ipv4Addr>() {
+                            Ok(ip) => {
+                                let mut bpf_guard = bpf.lock().await;
+                                let blocklist_map = bpf_guard.map_mut("BLOCKLIST").unwrap();
+                                let mut blocklist: AyaHashMap<_, u32, u32> = AyaHashMap::try_from(blocklist_map).unwrap();
+                                
+                                let ip_u32: u32 = ip.into();
+                                if let Err(e) = blocklist.insert(ip_u32, 1, 0) {
+                                    warn!("[Kernel] Failed to update BLOCKLIST map: {}", e);
+                                } else {
+                                    info!("[Kernel] Successfully blocked {}", ip);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("[Kernel] Could not parse IP address '{}': {}", address, e);
+                            }
+                        }
+                    }
+                    _ => { /* Ignore other message types for now. */ }
+                }
+            }
+
+            // Handle shutdown signals
+            _ = signal::ctrl_c() => {
+                info!("[Kernel] Ctrl-C (SIGINT) received. Shutting down.");
+                break;
+            },
+            _ = sigterm.recv() => {
+                info!("[Kernel] SIGTERM received. Shutting down.");
+                break;
+            },
+        };
     }
 
-    info!("✅ Firewall is active. Waiting for shutdown signal...");
+    // --- Shutdown ---
+    info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
+    drop(to_zmq_tx);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), zmq_handle).await;
 
-    // ---- START: MODIFICATION ----
-    // Set up a SIGTERM listener
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-
-    tokio::select! {
-        _ = signal::ctrl_c() => {
-            info!("\nCtrl-C (SIGINT) received. Shutting down.");
-        },
-        _ = sigterm.recv() => {
-            info!("SIGTERM received. Shutting down.");
-        },
-        _ = shutdown_rx.changed() => {
-            // This branch remains as a backup or for other ZMQ-based commands
-            info!("Shutdown signal received from ZMQ listener thread.");
-        }
-    };
-    // ---- END: MODIFICATION ----
-
-    // Give a moment for shutdown signals to propagate and for drop handlers to run.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    info!("🧹 Detaching eBPF programs and exiting...");
     Ok(())
 }

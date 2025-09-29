@@ -1,13 +1,17 @@
-//! ZMQ IPC Router for Firewhal
-//! Binds a ROUTER socket to an IPC endpoint and sets secure permissions.
-//! This application must be started as root. It will drop privileges after setup.
+//! ZMQ IPC Router for Firewhal (Updated for AppMessage)
+//! Binds a ROUTER socket, sets permissions, drops privileges,
+//! and forwards debug messages to the TUI.
 
 use nix::unistd::{chown, setgid, setuid, Group, User};
+use std::collections::HashMap;
+use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::str;
+// Import the necessary items from your common library
+use firewhal_core::{FireWhalMessage, DebugMessage, StatusUpdate};
+use bincode;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let context = zmq::Context::new();
     let router = context.socket(zmq::ROUTER)?;
 
@@ -16,64 +20,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[ROUTER] IPC router bound to {}", socket_path_str);
 
     // --- PRIVILEGED SETUP (as root) ---
+    // This entire section remains the same as it's already using best practices.
     let fs_path = socket_path_str.replace("ipc://", "");
     let admin_group = Group::from_name("firewhal-admin")?
-        .ok_or("[ROUTER] CRITICAL: 'firewhal-admin' group not found.")?;
-    chown(fs_path.as_str(), None, Some(admin_group.gid))
-        .map_err(|e| format!("[ROUTER] CRITICAL: Failed to chown socket: {}", e))?;
-    fs::set_permissions(&fs_path, fs::Permissions::from_mode(0o770))
-        .map_err(|e| format!("[ROUTER] CRITICAL: Failed to set socket permissions: {}", e))?;
+        .ok_or("CRITICAL: 'firewhal-admin' group not found.")?;
+    chown(fs_path.as_str(), None, Some(admin_group.gid))?;
+    fs::set_permissions(&fs_path, fs::Permissions::from_mode(0o770))?;
     println!("[ROUTER] Socket permissions set securely.");
 
     // --- DROP PRIVILEGES ---
     let target_user = User::from_name("nobody")?
-        .ok_or("[ROUTER] CRITICAL: 'nobody' user not found.")?;
-    setgid(target_user.gid).map_err(|e| format!("[ROUTER] CRITICAL: Failed to set gid: {}", e))?;
-    setuid(target_user.uid).map_err(|e| format!("[ROUTER] CRITICAL: Failed to set uid: {}", e))?;
+        .ok_or("CRITICAL: 'nobody' user not found.")?;
+    setgid(target_user.gid)?;
+    setuid(target_user.uid)?;
     println!("[ROUTER] Privileges dropped. Now running as 'nobody'.");
 
-    let mut discord_bot_identity: Option<Vec<u8>> = None;
-    let mut tui_identity: Option<Vec<u8>> = None;
-    let mut kernel_identity: Option<Vec<u8>> = None;
+    // Use a HashMap to store client identities for scalability.
+    let mut clients: HashMap<String, Vec<u8>> = HashMap::new();
+    let bincode_config = bincode::config::standard();
 
+    println!("[ROUTER] Waiting for clients to connect...");
     loop {
+        // A ROUTER socket receives multipart messages: [identity, payload]
         let multipart = router.recv_multipart(0)?;
-        let identity = &multipart[0];
-        // It's possible to receive a message with only an identity (e.g., on disconnect)
-        // so we guard against panics here.
-        // **THE FIX**: Ensure both branches of the if/else return a `&[u8]` slice.
-        let message_data: &[u8] = if multipart.len() > 1 { &multipart[1] } else { b"" };
+        if multipart.len() < 2 {
+            // This could be a client disconnecting, just ignore it.
+            continue;
+        }
 
+        let identity = multipart[0].clone();
+        let payload = &multipart[1];
 
-        if let Ok(msg_str) = str::from_utf8(message_data) {
-            println!("[ROUTER] Received message: '{}' from {:?}", msg_str, identity);
+        // Attempt to decode the payload into our AppMessage enum.
+        let Ok((message, _)) = bincode::decode_from_slice::<FireWhalMessage, _>(payload, bincode_config) else {
+            eprintln!("[ROUTER] Received malformed message from {:?}, skipping.", identity);
+            continue;
+        };
 
-            // Forward all non-TUI registration messages to the TUI for debugging.
-            if let Some(tui_id) = &tui_identity {
-                if msg_str != "TUI_READY" {
-                    // This is multipart: [TUI_ID, "", PAYLOAD]
-                    router.send(tui_id, zmq::SNDMORE)?;
-                    router.send(&[] as &[u8], zmq::SNDMORE)?;
-                    router.send(&format!("[From: {:?}] {}", identity, msg_str), 0)?;
-                }
+        let mut source_component = "Unknown".to_string();
+
+        // --- CLIENT IDENTIFICATION & MESSAGE HANDLING ---
+        match &message {
+            // We'll use a specific Status message for client registration.
+            FireWhalMessage::Status(StatusUpdate { component, message, .. }) if message == "Ready" => {
+                println!("[ROUTER] Registered client '{}' with identity {:?}", component, identity);
+                source_component = component.clone();
+                clients.insert(component.clone(), identity);
             }
+            FireWhalMessage::Debug(DebugMessage { source, .. }) => {
+                source_component = source.clone();
+            }
+            // Add other message types if the router needs to act on them.
+            _ => {
+                // For other messages, we might not know the source component unless it's registered.
+                // We'll just identify it by its raw identity for the debug message.
+                source_component = format!("{:?}", identity);
+            }
+        }
+        
+        // --- FORWARD DEBUG INFO TO TUI ---
+        // Don't forward messages that came from the TUI back to itself.
+        if source_component != "TUI" {
+            // Check if the TUI client has registered itself yet.
+            if let Some(tui_id) = clients.get("TUI") {
+                // Create a new DebugMessage to forward. This ensures all forwarded
+                // messages have a consistent, debug-friendly format.
+                let debug_forward = FireWhalMessage::Debug(DebugMessage {
+                    source: source_component,
+                    content: format!("{:?}", message), // The content is the debug view of the original message
+                });
 
-            match msg_str {
-                "DISCORD_BOT_READY" => discord_bot_identity = Some(identity.to_vec()),
-                "TUI_READY" => tui_identity = Some(identity.to_vec()),
-                "KERNEL_READY" => kernel_identity = Some(identity.to_vec()),
-                "CMD:SHUTDOWN:firewall" => {
-                    if let Some(kernel_id) = &kernel_identity {
-                        println!("[ROUTER] Forwarding shutdown command to firewall kernel.");
-                        // Also need the delimiter here for the kernel's DEALER socket.
-                        router.send(kernel_id, zmq::SNDMORE)?;
-                        router.send(&[] as &[u8], zmq::SNDMORE)?;
-                        router.send("CMD:SHUTDOWN:firewall", 0)?;
-                    }
+                // Re-encode the new debug message to send to the TUI.
+                if let Ok(forward_payload) = bincode::encode_to_vec(&debug_forward, bincode_config) {
+                    // Send as [tui_identity, payload]
+                    router.send(tui_id, zmq::SNDMORE)?;
+                    router.send(&forward_payload, 0)?;
                 }
-                _ => {} // Ignore other messages for now
             }
         }
     }
 }
-

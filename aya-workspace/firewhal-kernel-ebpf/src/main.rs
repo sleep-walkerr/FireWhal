@@ -2,20 +2,21 @@
 Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 */
 
-
 #![no_std]
 #![no_main]
 
-use core::mem;
+use core::{mem, net::Ipv4Addr};
 
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_get_current_pid_tgid,
     macros::{cgroup_sock_addr, map, xdp},
-    maps::HashMap,
-    programs::{SockAddrContext, XdpContext}
+    maps::{HashMap, RingBuf}, // <-- NEW: Import RingBuf
+    programs::{SockAddrContext, XdpContext}, EbpfContext,
 };
 use aya_log_ebpf::info;
+
+use firewhal_kernel_common::{BlockEvent, BlockReason};
 
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -31,15 +32,12 @@ static mut PORT_BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0)
 #[map]
 static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0);
 
+// NEW: Define the RingBuf map for sending events to userspace
+#[map]
+static mut EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0); // 256KB buffer
+
+
 // INGRESS PROGRAMS
-
-/*
-This programs job is to do basic filtering based on IP addresses and ports. Having the allow\block rules be modified from the cgroup_sock_addr egress programs for stateful packet filtering is ideal.
-Ideally everything goes through XDP as it is the most performant, which is why I will try to follow the model of relying on XDP as much as possible, primarily using the cgroup_sock_addr programs to manage XDP rules. 
-
-Next step: 
-use this program to parse source and destination ip addresses and ports, and maybe mac addresses too
-*/
 #[xdp]
 pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
     let result = || -> Result<u32, ()> {
@@ -75,19 +73,16 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
         };
         let icmp_block_ptr = core::ptr::addr_of_mut!(ICMP_BLOCK_ENABLED);
         
-        // Add basic print statement for all packets 
-        // info!(
-        //     &ctx,
-        //     "XDP: Source:[{}], Destination: [{}], Protocol: {}",
-        //     ipv4_hdr.src_addr(),
-        //     ipv4_hdr.dst_addr(),
-        //     ipv4_hdr.proto as u8
-        // );
-
-
         if ipv4_hdr.proto == IpProto::Icmp {
             if unsafe { (*icmp_block_ptr).get(&1).is_some() } {
-                info!(&ctx, "XDP: BLOCKED incoming ICMP packet");
+                // <-- NEW: Send a BlockEvent
+                let event = BlockEvent {
+                    reason: BlockReason::IcmpBlocked,
+                    pid: 0, // PID is not available in the XDP context
+                    dest_addr: ipv4_hdr.dst_addr(),
+                    dest_port: 0,
+                };
+                unsafe { EVENTS.output(&event, 0) };
                 return Ok(xdp_action::XDP_DROP);
             }
         }
@@ -101,16 +96,17 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
     }
 }
 
-/*
-This program is for filtering traffic to specific applications, may be completely unnecessary as a whole. 
-*/
 #[cgroup_sock_addr(recvmsg4)]
 pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
-        info!(
-            &ctx,
-            "Cgroup Ingress Processing, Packet Recieved"
-            );
+        let sockaddr_pointer = ctx.sock_addr;
+        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+        let user_port = unsafe { (*sockaddr_pointer).user_port };
+
+        // Convert to readable format
+        let user_ip_converted = u32::from_be(user_ip4);
+        let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
+
         Ok(1)
         }();
 
@@ -121,39 +117,28 @@ pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
 }
 
 // EGRESS PROGRAMS
-
-/*  Monitors connect syscalls for IPv4 traffic, has awareness of the process making the call and will filter based on application hash and trust later. Only works for TCP
-Include the ability to only allow outgoing traffic for specific ports on an application basis. For example, Firefox is only able to send traffic with a destination port of 443
-Basic example:
-sock_addr_program sees that firefox is in the list of trusted applications, its hash hasnt changed and neither has its path. We allow a connect syscall to a remote IP address with a destination address of 443.
-Now, the sock_addr_program adds an allow rule to the rule list used by the XDP program from that remote IP address and from port 443 for incoming traffic either until the connection is closed or until a certain amount of time has passed. 
-This method forgoes interacting with the systems conntrack functionality at all and requires the use of a map in the eBPF program that is potentially more performant to begin with. 
-*/
 #[cgroup_sock_addr(connect4)]
 pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
         let user_port = unsafe { (*sockaddr_pointer).user_port };
-        // let remote_ip4 = unsafe { (*sockaddr_pointer).msg_src_ip4 };
 
         //Convert to readable format
-        let user_ip_converted = u32::from_be(user_ip4); // This conversion is correct for the IP.
+        let user_ip_converted = u32::from_be(user_ip4);
         let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
-        //let remote_ip_converted = u32::from_be(remote_ip4);
         
-        info!(
-            &ctx,
-            "TCP EGRESS Connection Attempt TO: [{:i}, port: {}]",
-            user_ip_converted, user_port_converted//, remote_ip_converted,
-        );
-
-        // The BLOCKLIST map stores keys in network byte order, so we use the original value.
         let dest_addr = user_ip4;
         let blocklist_ptr =  core::ptr::addr_of_mut!(BLOCKLIST);
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
             let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-            info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
+            let block_report_event = BlockEvent {
+                reason: BlockReason::IpBlockedEgressUdp,
+                pid: ctx.pid(),
+                dest_addr:Ipv4Addr::from(dest_addr),
+                dest_port: user_port_converted,
+            };
+            unsafe { EVENTS.output(&block_report_event, 0) };
             return Ok(0); // Block the connection
         }
 
@@ -167,27 +152,32 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
 }
 
 
-// Monitors for sendmsg syscalls for IPv4 traffic, same as connect4 program except monitors UDP traffic instead
 #[cgroup_sock_addr(sendmsg4)]
 pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
         let user_port = unsafe { (*sockaddr_pointer).user_port };
-        let dest_ip_host = u32::from_be(user_ip4); // This conversion is correct for the IP.
+        let dest_ip_host = u32::from_be(user_ip4);
         let dest_port_host = (u32::from_be(user_port) >> 16) as u16;
-        info!(
-            &ctx,
-            "UDP EGRESS Connection Attempt to: {:i}, port: {}",
-            dest_ip_host, dest_port_host,
-        );
+        // info!(
+        //     &ctx,
+        //     "UDP EGRESS Connection Attempt to: {}, port: {}",
+        //     dest_ip_host, dest_port_host,
+        // );
 
-        // The BLOCKLIST map stores keys in network byte order, so we use the original value.
         let dest_addr = user_ip4;
         let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
             let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-            info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
+            let block_report_event = BlockEvent {
+                reason: BlockReason::IpBlockedEgressUdp,
+                pid: ctx.pid(),
+                dest_addr:Ipv4Addr::from(dest_addr),
+                dest_port: dest_port_host,
+            };
+            unsafe { EVENTS.output(&block_report_event, 0) };
+            // info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
             return Ok(0); // Block the connection
         }
 
@@ -201,26 +191,33 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 }
 
 
-// Monitors bind syscalls for IPv4 traffic, this is used in hosting contexts and will be useful in the context of servers
 #[cgroup_sock_addr(bind4)]
 pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
 let result = || -> Result<i32, i32> {
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
         let user_port = unsafe { (*sockaddr_pointer).user_port };
-        let dest_ip_host = u32::from_be(user_ip4); // This conversion is correct for the IP.
+        let dest_ip_host = u32::from_be(user_ip4);
         let dest_port_host = (u32::from_be(user_port) >> 16) as u16;
-        info!(
-            &ctx,
-            "UDP EGRESS Connection Attempt to: {:i}, port: {}",
-            dest_ip_host, dest_port_host,
-        );
+        // info!(
+        //     &ctx,
+        //     "UDP EGRESS Connection Attempt to: {}, port: {}",
+        //     dest_ip_host, dest_port_host,
+        // );
 
-        // The BLOCKLIST map stores keys in network byte order, so we use the original value.
         let dest_addr = user_ip4;
         let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
             let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+
+            let block_event_message = BlockEvent {
+                reason : BlockReason::BindBlocked,
+                pid: ctx.pid(),
+                dest_addr:Ipv4Addr::from(dest_addr),
+                dest_port: dest_port_host,
+            };
+            unsafe { EVENTS.output(&block_event_message, 0) };
+
             info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
             return Ok(0); // Block the connection
         }
@@ -234,8 +231,8 @@ let result = || -> Result<i32, i32> {
     }
 }
 
-#[cfg(not(test))]
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
-}
+// #[cfg(not(test))]
+// #[panic_handler]
+// fn panic(_info: &core::panic::PanicInfo) -> ! {
+//     loop {}
+// }
