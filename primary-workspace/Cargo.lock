@@ -627,6 +627,7 @@ name = "firewhal-daemon"
 version = "0.1.0"
 dependencies = [
  "aya",
+ "bincode",
  "daemonize",
  "firewhal-core",
  "hex",

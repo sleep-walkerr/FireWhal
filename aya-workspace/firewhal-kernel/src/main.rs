@@ -14,7 +14,7 @@ use clap::Parser;
 use log::{info, warn, LevelFilter};
 use std::{
     fs::File,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::Arc,
 };
 use tokio::{
@@ -23,7 +23,7 @@ use tokio::{
 };
 
 use firewhal_core::{
-    BlockAddressRule, DebugMessage, FireWhalMessage, StatusUpdate,
+    BlockAddressRule, DebugMessage, FireWhalMessage, StatusUpdate, FirewallConfig, Rule
 };
 use firewhal_kernel_common::LogRecord;
 
@@ -33,6 +33,32 @@ struct Opt {
     cgroup_path: String,
     #[clap(short, long, default_value = "wlp5s0")]
     iface: String,
+}
+async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) {
+    let mut bpf_guard = bpf.lock().await;
+
+    for rule in config.rules {
+        if let Some(IpAddr::V4(ip)) = rule.dest_ip {
+            // Use fully qualified syntax to resolve the type mismatch
+            if let Some(blocklist_map_ref) = aya::Ebpf::map_mut(&mut bpf_guard, "BLOCKLIST") {
+                if let Ok(mut blocklist) = AyaHashMap::<_, u32, u32>::try_from(blocklist_map_ref) {
+                    let ip_u32: u32 = ip.into();
+
+                    if matches!(rule.action, firewhal_core::Action::Deny) {
+                        if let Err(e) = blocklist.insert(ip_u32, 1, 0) {
+                            warn!("[Kernel] Failed to insert IP {} into BLOCKLIST: {}", ip, e);
+                        } else {
+                            info!("[Kernel] [Rule] Applied: Block IP {}", ip);
+                        }
+                    }
+                } else {
+                    warn!("[Kernel] Failed to get HashMap handle for 'BLOCKLIST'");
+                }
+            } else {
+                warn!("[Kernel] Could not find eBPF map named 'BLOCKLIST'");
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -57,12 +83,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // --- eBPF Setup ---
     info!("[Kernel] Loading and attaching eBPF programs...");
-    let bpf = Arc::new(Mutex::new(Ebpf::load(include_bytes_aligned!(concat!( // <-- CHANGED
+    let bpf = Arc::new(Mutex::new(Ebpf::load(include_bytes_aligned!(concat!( 
         env!("OUT_DIR"),
         "/firewhal-kernel"
     )))?));
 
-    if let Err(e) = EbpfLogger::init(&mut *bpf.lock().await) { // <-- THE FIX IS HERE
+    if let Err(e) = EbpfLogger::init(&mut *bpf.lock().await) { 
         warn!("[Kernel] Failed to initialize eBPF logger: {}", e);
     }
 
@@ -128,7 +154,6 @@ async fn main() -> Result<(), anyhow::Error> {
         info!("[Kernel] [Rule] Blocking outgoing connections to 9.9.9.9");
     }
 
-    // --- ADD THIS NEW BLOCK ---
     // --- Block Event Handling ---
     let bpf_clone = Arc::clone(&bpf);
     let zmq_tx_clone = to_zmq_tx.clone();
@@ -193,6 +218,12 @@ async fn main() -> Result<(), anyhow::Error> {
             // Handle incoming commands from TUI/Discord/etc.
             Some(message) = from_zmq_rx.recv() => {
                 match message {
+                    // NEW LOAD RULE PROCESSING
+                    FireWhalMessage::LoadRules(config) => {
+                        info!("[Kernel] Received LoadRules message: {:?}", config);
+                        apply_ruleset(Arc::clone(&bpf), config).await;
+                    }
+                    // END LOAD RULE PROCESSING
                     FireWhalMessage::RuleAddBlock(BlockAddressRule { address, .. }) => {
                         info!("[Kernel] Received command to block address: {}", address);
                         match address.parse::<Ipv4Addr>() {

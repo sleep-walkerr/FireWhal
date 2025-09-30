@@ -18,6 +18,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task;
 use tokio::time::{sleep, Duration};
+use bincode;
 
 // Standard library imports
 use std::collections::HashMap;
@@ -26,12 +27,23 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::sync::Arc;
+use std::path;
 
 // Workspace imports
-use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, StatusUpdate};
+use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, StatusUpdate, FirewallConfig};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
+
+
+//Loads and deserializes firewall rules from a binary file
+fn load_rules(path: &path::Path) -> Result<FirewallConfig, Box<dyn std::error::Error>> {
+    let data = std::fs::read(path)?;
+    let config = bincode::config::standard();
+    let (decoded_rules, _len): (FirewallConfig, usize) =
+        bincode::decode_from_slice(&data, config)?;
+    Ok(decoded_rules)
+}
 
 /// Launches a child process as a specific user with an optional working directory.
 /// (Used for non-privileged processes)
@@ -96,7 +108,6 @@ fn main() {
         .stdout(stdout)
         .stderr(stderr)
         .privileged_action(move || {
-            // This code runs as root before privileges are dropped.
             let root_processes = vec![
                 ("/opt/firewhal/bin/firewhal-kernel", vec!["firewhal-kernel"]),
                 ("/opt/firewhal/bin/firewhal-ipc", vec!["firewhal-ipc"]),
@@ -119,7 +130,6 @@ fn main() {
                     Err(e) => eprintln!("[Privileged] Fork failed for {}: {}", path, e),
                 }
             }
-            // Privileges are dropped after this closure returns.
         });
 
     match daemonize.start() {
@@ -135,41 +145,30 @@ fn main() {
 /// The main async logic for the supervisor daemon.
 #[tokio::main]
 async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+    // ... all of your setup code remains exactly the same up to this point ...
     let children = Arc::new(Mutex::new(HashMap::new()));
-
-    // Setup channels for the unified ZMQ client task.
-    // `to_zmq_tx` is used by the supervisor to send messages out.
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
-    // The daemon doesn't currently process incoming messages, so we create a
-    // channel for them but won't use the receiver.
-    let (from_zmq_tx, _from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
-
-    // Spawn the unified ZMQ client connection task.
+    let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
     let zmq_task_handle = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx));
-
-    // Send a "Ready" message to register with the IPC router.
     let ident_msg = FireWhalMessage::Status(StatusUpdate {
         component: "Daemon".to_string(),
         is_healthy: true,
         message: "Ready".to_string(),
     });
     to_zmq_tx.send(ident_msg).await?;
-
     let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
-
+    
+    // ... all the code for launching child processes remains the same ...
     let mut children_guard = children.lock().await;
     let mut reader = unsafe { File::from_raw_fd(root_pids_fd) };
     let mut pid_buffer = [0u8; 4];
-
     reader.read_exact(&mut pid_buffer)?;
     let firewall_pid = i32::from_ne_bytes(pid_buffer);
     children_guard.insert("firewall".to_string(), firewall_pid);
-
     reader.read_exact(&mut pid_buffer)?;
     let ipc_router_pid = i32::from_ne_bytes(pid_buffer);
     children_guard.insert("ipc_router".to_string(), ipc_router_pid);
     drop(reader);
-
     let apps_to_launch = vec![(
         "discord_bot",
         "nobody",
@@ -177,7 +176,6 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
         vec!["firewhal-discord-bot"],
         Some("/opt/firewhal"),
     )];
-
     for (name, user, path, args, workdir) in apps_to_launch {
         let name_str = name.to_string();
         let handle = task::spawn_blocking(move || {
@@ -206,26 +204,63 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
     }
     drop(children_guard);
 
-    // Pass the broadcast sender/receiver to the tasks.
+    // ====================== CHANGE IS HERE ======================
+
+    // 1. Spawn the handlers as independent, concurrent background tasks.
     let shutdown_handler =
         handle_shutdown_signals(Arc::clone(&children), to_zmq_tx.clone(), shutdown_tx.clone());
+    tokio::spawn(shutdown_handler);
+
     let child_exit_handler =
         handle_child_exits(Arc::clone(&children), to_zmq_tx.clone(), shutdown_tx.subscribe());
+    tokio::spawn(child_exit_handler);
+    
+    println!("[Supervisor] All components launched. Monitoring for messages and signals...");
 
-    println!("[Supervisor] All components launched. Monitoring for signals...");
+    // 2. The main loop now only handles incoming messages and the shutdown signal.
+    loop {
+        tokio::select! {
+            // Biased select ensures we check for shutdown first if both are ready.
+            biased;
 
-    // Wait for a shutdown signal to be handled, or for the child monitor to exit.
-    tokio::select! {
-        _ = child_exit_handler => eprintln!("[Supervisor] Child exit handler unexpectedly finished."),
-        _ = shutdown_handler => println!("[Supervisor] OS signal handler finished."),
+            // Listen for the shutdown signal from the broadcast channel.
+            _ = shutdown_rx.recv() => {
+                println!("[Supervisor] Shutdown signal received, exiting main loop.");
+                break; // Exit the loop
+            },
+
+            // Listen for incoming IPC messages.
+            Some(message) = from_zmq_rx.recv() => {
+                if let FireWhalMessage::Status(status) = message {
+                    if status.component == "Firewall" && status.message == "Ready" {
+                        println!("[Supervisor] Firewall is ready. Loading and sending rules...");
+                        let rules_path = path::Path::new("/opt/firewhal/bin/firewall.rules");
+                        match load_rules(rules_path) {
+                            Ok(config) => {
+                                let msg = FireWhalMessage::LoadRules(config);
+                                if let Err(e) = to_zmq_tx.send(msg).await {
+                                    eprintln!("[Supervisor] FAILED to send rules: {}", e);
+                                } else {
+                                    println!("[Supervisor] Rules successfully sent to firewall.");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Supervisor] FAILED to load firewall rules: {}", e);
+                            }
+                        }
+                    }
+                }
+            },
+        }
     }
 
-    // After shutdown is triggered, wait for the ZMQ client to finish its work.
+    // After the loop exits, proceed with graceful shutdown.
     drop(to_zmq_tx);
     let _ = tokio::time::timeout(Duration::from_secs(2), zmq_task_handle).await;
     println!("[Supervisor] Exiting daemon.");
     Ok(())
 }
+
 /// An async task that listens for the SIGCHLD signal and cleans up zombie processes.
 async fn handle_child_exits(
     children: ChildProcesses,

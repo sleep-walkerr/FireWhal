@@ -8,8 +8,8 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 // Import the necessary items from your common library
-use firewhal_core::{FireWhalMessage, DebugMessage, StatusUpdate};
-use bincode;
+use firewhal_core::{DebugMessage, FireWhalMessage, FirewallConfig, StatusUpdate};
+use bincode::{self, config};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let context = zmq::Context::new();
@@ -61,16 +61,40 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // --- CLIENT IDENTIFICATION & MESSAGE HANDLING ---
         match &message {
-            // We'll use a specific Status message for client registration.
+            // Status registration message processing
             FireWhalMessage::Status(StatusUpdate { component, message, .. }) if message == "Ready" => {
                 println!("[ROUTER] Registered client '{}' with identity {:?}", component, identity);
                 source_component = component.clone();
                 clients.insert(component.clone(), identity);
+
+
+                // Forward the registration message to the Daemon so it knows the Firewall is ready.
+                if component != "Daemon" { // Don't forward the daemon's own ready message back to itself
+                    if let Some(daemon_id) = clients.get("Daemon") {
+                        // `payload` is the original, raw byte slice of the message
+                        router.send(daemon_id, zmq::SNDMORE)?;
+                        router.send(payload, 0)?;
+                    }
+                }
+                
             }
+            // Debug Message processing
             FireWhalMessage::Debug(DebugMessage { source, .. }) => {
                 source_component = source.clone();
             }
-            // Add other message types if the router needs to act on them.
+            // FireWall Config message processing
+            FireWhalMessage::LoadRules(_) => {
+                source_component = "Daemon".to_string();
+
+                if let Some(firewall_identity) = clients.get("Firewall") {
+                    println!("[ROUTER] Forwarding LoadRules command to firewall.");
+                    router.send(firewall_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0)?;
+                } else {
+                    eprintln!("[ROUTER] Received LoadRules command, but firewall client is not registered!");
+
+                }
+            }
             _ => {
                 // For other messages, we might not know the source component unless it's registered.
                 // We'll just identify it by its raw identity for the debug message.
