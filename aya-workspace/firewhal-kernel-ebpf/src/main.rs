@@ -138,7 +138,9 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
                 dest_addr:Ipv4Addr::from(dest_addr),
                 dest_port: user_port_converted,
             };
-            unsafe { EVENTS.output(&block_report_event, 0) };
+        if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
+            info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
+        }
             return Ok(0); // Block the connection
         }
 
