@@ -135,7 +135,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
             let block_report_event = BlockEvent {
                 reason: BlockReason::IpBlockedEgressUdp,
                 pid: ctx.pid(),
-                dest_addr:Ipv4Addr::from(dest_addr),
+                dest_addr:Ipv4Addr::from(dest_addr.to_be()),
                 dest_port: user_port_converted,
             };
         if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
@@ -175,7 +175,7 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
             let block_report_event = BlockEvent {
                 reason: BlockReason::IpBlockedEgressUdp,
                 pid: ctx.pid(),
-                dest_addr:Ipv4Addr::from(dest_addr),
+                dest_addr:Ipv4Addr::from(dest_addr.to_be()),
                 dest_port: dest_port_host,
             };
             unsafe { EVENTS.output(&block_report_event, 0) };
@@ -215,7 +215,7 @@ let result = || -> Result<i32, i32> {
             let block_event_message = BlockEvent {
                 reason : BlockReason::BindBlocked,
                 pid: ctx.pid(),
-                dest_addr:Ipv4Addr::from(dest_addr),
+                dest_addr:Ipv4Addr::from(dest_addr.to_be()),
                 dest_port: dest_port_host,
             };
             unsafe { EVENTS.output(&block_event_message, 0) };

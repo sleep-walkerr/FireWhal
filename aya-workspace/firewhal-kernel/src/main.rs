@@ -54,11 +54,14 @@ async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) {
                 // THE FIX #1: Use `if let Some` as your compiler requires.
                 if let Some(map_ref) = aya::Ebpf::map_mut(&mut bpf_guard, "BLOCKLIST") {
                     if let Ok(mut blocklist) = AyaHashMap::<_, u32, u32>::try_from(map_ref) {
-                        let ip_u32: u32 = (*ip).into();
+
+                        let ip_u32 = u32::from_le_bytes(ip.octets());
+
                         if matches!(rule.action, firewhal_core::Action::Deny) {
                             if let Err(e) = blocklist.insert(ip_u32, 1, 0) {
                                 warn!("[Kernel] Failed to insert IP {} into BLOCKLIST: {}", ip, e);
                             } else {
+                                // For debugging, let's log the hex value we are inserting
                                 info!("[Kernel] [Rule] Applied: Block IP {}", ip);
                             }
                         }

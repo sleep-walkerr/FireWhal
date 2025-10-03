@@ -101,7 +101,7 @@ pub async fn zmq_client_connection(
 /// Serializes and sends any AppMessage over a ZMQ socket using bincode 2.0.
 pub fn send_message(socket: &zmq::Socket, message: &FireWhalMessage) -> Result<(), zmq::Error> {
     // 1. Get the standard bincode configuration.
-    let config = config::standard();
+    let config = bincode::config::standard().with_big_endian();
     // 2. Encode the message directly into a Vec<u8>.
     let bytes = bincode::encode_to_vec(message, config)
         .expect("Failed to encode AppMessage");
@@ -113,7 +113,7 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
     let bytes = socket.recv_bytes(0).map_err(IpcError::Zmq)?;
 
     // 1. Get the standard bincode configuration.
-    let config = config::standard();
+    let config = bincode::config::standard().with_big_endian();
     // 2. Decode the message from the received byte slice.
     let (message, len) = bincode::decode_from_slice(&bytes, config)
             .map_err(|e| IpcError::Deserialization(e.to_string()))?;
