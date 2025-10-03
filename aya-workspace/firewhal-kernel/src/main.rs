@@ -12,7 +12,7 @@ use std::{
     fs::File,
     mem::{self, MaybeUninit},
     net::{IpAddr, Ipv4Addr},
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
 };
 use tokio::{
     signal,
@@ -84,7 +84,7 @@ async fn main() -> Result<(), anyhow::Error> {
     to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
     let bpf = Arc::new(Mutex::new(Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?));
     if let Err(e) = EbpfLogger::init(&mut *bpf.lock().await) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
-    
+
     // Attach eBPF programs...
     {
         let mut bpf_guard = bpf.lock().await;
@@ -108,6 +108,9 @@ async fn main() -> Result<(), anyhow::Error> {
     // 1. Create an internal channel to pass parsed events.
     let (event_tx, mut event_rx) = mpsc::channel::<BlockEvent>(1024); // Increased buffer
     
+    let shutting_down = Arc::new(AtomicBool::new(false));
+
+
     // 2. Spawn the SENDER task (remains async).
     // This task's only job is to receive events and send them over ZMQ.
     let zmq_tx_clone_sender = to_zmq_tx.clone();
@@ -131,7 +134,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
 // 3. Spawn the READER task in a dedicated blocking thread.
     let bpf_clone_reader = Arc::clone(&bpf);
-    task::spawn_blocking(move || {
+    let reader_shutdown_flag = Arc::clone(&shutting_down);
+
+
+    let reader_handle = task::spawn_blocking(move || {
         info!("[Reader] Started listening for block events from the kernel.");
 
         // --- THIS IS THE FIX ---
@@ -141,7 +147,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let mut events = RingBuf::try_from(map).unwrap();
 
         // This loop now continuously uses the SAME `events` handle.
-        loop {
+        while !reader_shutdown_flag.load(Ordering::SeqCst) {
             // Check for a single event. The `next()` call advances the internal
             // state of the `events` handle (moves the bookmark).
             if let Some(buf) = events.next() {
@@ -176,6 +182,12 @@ async fn main() -> Result<(), anyhow::Error> {
             _ = sigterm.recv() => { info!("[Kernel] SIGTERM received. Shutting down."); break; },
         };
     }
+    info!("[Kernel] Shutting down tasks...");
+    shutting_down.store(true, Ordering::SeqCst);
+
+    reader_handle.await?;
+
+
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
     drop(to_zmq_tx);
     let _ = time::timeout(time::Duration::from_secs(2), zmq_handle).await;
