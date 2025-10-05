@@ -1,0 +1,23 @@
+For Next Meeting: 09/26/2025
+
+· Build the UI to integrate all the components
+
+· Let the daemon listen to be stopped instead of doing that manually
+
+· In the UI, there should be all the network interfaces (like Wireshark), and the user can pick which interface the firewall rules will be applied to
+
+· Notification messages for the blocked packets (instead of all the packets). You can still keep the log file for the admin to analyze if he/she wants
+
+· Put the IP addresses in a file and let your app to read it instead of hardcoding inside your source code
+
+For Next Meeting: 10/17/2025
+
+· Build the UI to integrate all the components
+
+· Continue the missing parts from the previous meeting (06/26/2025)
+
+· Access control to the firewall rule file (consider later; consider read, read/write permissions on this file)
+
+· You should have so many rules for your firewall rules
+    
+

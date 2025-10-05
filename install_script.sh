@@ -11,6 +11,9 @@ else
 
 fi
 
+
+# Need to add check to see if nobody is part of the firewhal-admin group, and if not add them
+
 current_user=$(whoami)
 
 

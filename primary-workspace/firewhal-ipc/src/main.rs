@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Use a HashMap to store client identities for scalability.
     let mut clients: HashMap<String, Vec<u8>> = HashMap::new();
-    let bincode_config = bincode::config::standard();
+    let bincode_config = bincode::config::standard().with_big_endian();
 
     println!("[ROUTER] Waiting for clients to connect...");
     loop {

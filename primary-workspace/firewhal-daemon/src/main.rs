@@ -26,8 +26,11 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
-use std::sync::Arc;
-use std::path;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::{path, vec};
+use std::process::{Command, Stdio};
+use std::os::unix::process::CommandExt;
+
 
 // Workspace imports
 use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, StatusUpdate, FirewallConfig};
@@ -45,50 +48,55 @@ fn load_rules(path: &path::Path) -> Result<FirewallConfig, Box<dyn std::error::E
     Ok(decoded_rules)
 }
 
-/// Launches a child process as a specific user with an optional working directory.
-/// (Used for non-privileged processes)
-fn launch_child_process(
-    user: &str,
+/// Launches a child process, optionally as a specific user.
+fn launch_process(
     program: &str,
     args: &[&str],
+    user: Option<&str>,
     working_dir: Option<&str>,
-) -> Result<i32, String> {
-    let target_user = nix::unistd::User::from_name(user)
-        .map_err(|e| e.to_string())?
-        .ok_or(format!("User '{}' not found", user))?;
-    let target_uid = target_user.uid;
-    let target_gid = target_user.gid;
+) -> Result<u32, String> {
+    let mut command = Command::new(program);
+    command.args(args);
 
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { child }) => Ok(child.into()),
-        Ok(ForkResult::Child) => {
-            if let Err(e) = setgid(target_gid) {
-                eprintln!("[Child] Failed to set group ID for {}: {}", program, e);
-                std::process::exit(1);
-            }
-            if let Err(e) = setuid(target_uid) {
-                eprintln!("[Child] Failed to set user ID for {}: {}", program, e);
-                std::process::exit(1);
-            }
-            if let Some(dir) = working_dir {
-                if let Err(e) = chdir(dir) {
-                    eprintln!(
-                        "[Child] Failed to change working directory to '{}' for {}: {}",
-                        dir, program, e
-                    );
-                    std::process::exit(1);
+    if let Some(dir) = working_dir {
+        command.current_dir(dir);
+    }
+    
+    // If a user is specified, look them up and set the process UID/GID.
+    if let Some(user_name) = user {
+        let target_user = nix::unistd::User::from_name(user_name)
+            .map_err(|e| e.to_string())?
+            .ok_or(format!("User '{}' not found", user_name))?;
+        
+        // Take ownership of the user_name so it can be moved into the 'static closure.
+        let user_name_owned = user_name.to_string();
+
+        // Use pre_exec to correctly drop privileges, including supplementary groups.
+        // This is unsafe because it runs in the child process after fork, where many
+        // things are not safe to do. However, the nix calls are designed for this.
+        let last_error = Arc::new(StdMutex::new(None));
+        let last_error_clone = Arc::clone(&last_error);
+        
+        unsafe {
+            command.pre_exec(move || {
+                // Initialize supplementary groups for the target user.
+                // Clone the string to create the CString, as CString::new consumes its input.
+                if let Err(e) = nix::unistd::initgroups(&CString::new(user_name_owned.clone()).unwrap(), target_user.gid) {
+                    *last_error_clone.lock().unwrap() = Some(std::io::Error::from_raw_os_error(e as i32));
+                    return Err(std::io::Error::from_raw_os_error(e as i32));
                 }
-            }
-            let c_program = CString::new(program).unwrap();
-            let c_args: Vec<CString> = args.iter().map(|&arg| CString::new(arg).unwrap()).collect();
-            let c_args_refs: Vec<&CStr> = c_args.iter().map(|c| c.as_c_str()).collect();
-            let _ = execv(&c_program, &c_args_refs).map_err(|e| {
-                eprintln!("[Child] Failed to exec '{}': {}", program, e);
-                std::process::exit(127);
+                // Set the primary group and user ID.
+                nix::unistd::setgid(target_user.gid).map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                nix::unistd::setuid(target_user.uid).map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                Ok(())
             });
-            unreachable!();
         }
-        Err(e) => Err(format!("Fork failed: {}", e)),
+    }
+    // If `user` is `None`, the new process inherits the current user (root).
+    
+    match command.spawn() {
+        Ok(child) => Ok(child.id()), // Return the process ID (PID)
+        Err(e) => Err(format!("Failed to spawn '{}': {}", program, e)),
     }
 }
 
@@ -108,29 +116,39 @@ fn main() {
         .stdout(stdout)
         .stderr(stderr)
         .privileged_action(move || {
-            let root_processes = vec![
-                ("/opt/firewhal/bin/firewhal-kernel", vec!["firewhal-kernel"]),
-                ("/opt/firewhal/bin/firewhal-ipc", vec!["firewhal-ipc"]),
-            ];
-            let mut writer = unsafe { File::from_raw_fd(write_fd) };
-            for (path, args_vec) in root_processes {
-                let args: Vec<&str> = args_vec.iter().map(|s| *s).collect();
-                match unsafe { fork() } {
-                    Ok(ForkResult::Parent { child }) => {
-                        writer.write_all(&i32::from(child).to_ne_bytes()).unwrap();
-                    }
-                    Ok(ForkResult::Child) => {
-                        let c_program = CString::new(path).unwrap();
-                        let c_args: Vec<CString> =
-                            args.iter().map(|&arg| CString::new(arg).unwrap()).collect();
-                        let c_args_refs: Vec<&CStr> = c_args.iter().map(|c| c.as_c_str()).collect();
-                        let _ = execv(&c_program, &c_args_refs);
-                        std::process::exit(127);
-                    }
-                    Err(e) => eprintln!("[Privileged] Fork failed for {}: {}", path, e),
-                }
+    let root_processes = vec![
+        ("/opt/firewhal/bin/firewhal-ipc", vec![]),
+        ("/opt/firewhal/bin/firewhal-kernel", vec![]),
+    ];
+
+    let mut writer = unsafe { File::from_raw_fd(write_fd) };
+
+    for (path, args_vec) in root_processes {
+        let args: Vec<&str> = args_vec.iter().map(|s| *s).collect();
+        
+        // Call the unified function with `user: None` to run as root.
+        match launch_process(path, &args, None, None) {
+            Ok(pid) => {
+                // Write the PID to the pipe for the main logic.
+                writer.write_all(&pid.to_ne_bytes()).unwrap();
             }
-        });
+            Err(e) => eprintln!("[Privileged] Failed to launch {}: {}", path, e),
+        }
+    }
+    // TEST CODE, DELETE LATER
+    // match launch_process("/opt/firewhal/bin/firewhal-discord-bot", &vec![], Some("nobody"), Some("/opt/firewhal")) {
+    //     Ok(pid) => {
+    //         writer.write_all(&pid.to_ne_bytes()).unwrap();
+    //     }
+    //     Err(e) => {
+    //         eprintln!("[Privileged] Failed to launch /opt/firewhal/bin/firewhal-discord-bot: {}", e);
+    //     }
+    // }
+    drop(writer)
+    
+    
+
+});
 
     match daemonize.start() {
         Ok(_) => {
@@ -163,43 +181,42 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
     let mut reader = unsafe { File::from_raw_fd(root_pids_fd) };
     let mut pid_buffer = [0u8; 4];
     reader.read_exact(&mut pid_buffer)?;
-    let firewall_pid = i32::from_ne_bytes(pid_buffer);
-    children_guard.insert("firewall".to_string(), firewall_pid);
-    reader.read_exact(&mut pid_buffer)?;
     let ipc_router_pid = i32::from_ne_bytes(pid_buffer);
     children_guard.insert("ipc_router".to_string(), ipc_router_pid);
+
+    reader.read_exact(&mut pid_buffer)?;
+    let firewall_pid = i32::from_ne_bytes(pid_buffer);
+    children_guard.insert("firewall".to_string(), firewall_pid);
     drop(reader);
+
     let apps_to_launch = vec![(
         "discord_bot",
         "nobody",
         "/opt/firewhal/bin/firewhal-discord-bot",
-        vec!["firewhal-discord-bot"],
+        vec![],
         Some("/opt/firewhal"),
     )];
     for (name, user, path, args, workdir) in apps_to_launch {
         let name_str = name.to_string();
-        let handle = task::spawn_blocking(move || {
-            let args_cstr: Vec<&str> = args.iter().map(|s| *s).collect();
-            launch_child_process(user, path, &args_cstr, workdir)
-        });
+        let handle = task::spawn_blocking(move || { launch_process(path, &args, Some(user), workdir) });
         match handle.await? {
             Ok(pid) => {
                 println!("[Supervisor] Launched '{}' with PID {}.", name, pid);
-                children_guard.insert(name_str.clone(), pid);
-                let msg = FireWhalMessage::Debug(DebugMessage {
+                children_guard.insert(name_str.clone(), pid as i32);
+                let launch_message = FireWhalMessage::Debug(DebugMessage {
                     source: "Daemon".to_string(),
-                    content: format!("Launched {} with PID {}", name_str, pid),
+                    content: format!("[Supervisor] Launched '{}' with PID {}.", name, pid),
                 });
-                to_zmq_tx.send(msg).await.ok();
+                to_zmq_tx.send(launch_message).await.ok();
             }
             Err(e) => {
                 eprintln!("[Supervisor] FAILED to launch '{}': {}", name, e);
-                let msg = FireWhalMessage::Debug(DebugMessage {
+                let launch_fail_message = FireWhalMessage::Debug(DebugMessage {
                     source: "Daemon".to_string(),
-                    content: format!("FAILED to launch {}", name_str),
+                    content: format!("[Supervisor] Failed to launch '{}': {}.", name, e),
                 });
-                to_zmq_tx.send(msg).await.ok();
-            }
+                to_zmq_tx.send(launch_fail_message).await.ok();
+            } 
         }
     }
     drop(children_guard);
@@ -253,10 +270,17 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
             },
         }
     }
+    println!("[Supervisor] Main loop exited. Cleaning up remaining tasks...");
 
-    // After the loop exits, proceed with graceful shutdown.
-    drop(to_zmq_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(2), zmq_task_handle).await;
+    // 1. Abort the ZMQ connection task. This will forcefully cancel it.
+    zmq_task_handle.abort();
+
+    // 2. We can optionally await the handle to ensure it has shut down.
+    //    The result will be an error because we aborted it, which is expected.
+    let _ = zmq_task_handle.await;
+    println!("[Supervisor] ZMQ client task has been shut down.");
+    
+    // The to_zmq_tx sender is dropped automatically when supervisor_logic exits.
     println!("[Supervisor] Exiting daemon.");
     Ok(())
 }
@@ -334,7 +358,7 @@ async fn handle_shutdown_signals(
         _ = sigint.recv() => println!("[Shutdown] Received SIGINT."),
     };
     
-    // Notify all other tasks to shut down.
+    // Notify all other internal tasks to shut down.
     if shutdown_tx.send(()).is_err() {
         eprintln!("[Shutdown] Failed to broadcast shutdown signal to other tasks.");
     }
@@ -346,25 +370,39 @@ async fn handle_shutdown_signals(
     });
     zmq_tx.send(msg).await.ok();
 
-    let children_guard = children.lock().await;
-    let pids_to_reap: Vec<_> = children_guard.values().cloned().collect();
-    for (name, &pid) in children_guard.iter() {
-        println!("[Shutdown] Sending SIGTERM to '{}' (PID {})...", name, pid);
-        let _ = signal::kill(Pid::from_raw(pid), Signal::SIGTERM);
-    }
-    drop(children_guard);
+    // --- PHASE 1: GRACEFUL SHUTDOWN (SIGTERM) ---
+    {
+        let children_guard = children.lock().await;
+        for (name, &pid) in children_guard.iter() {
+            println!("[Shutdown] Sending SIGTERM to '{}' (PID {})...", name, pid);
+            let _ = signal::kill(Pid::from_raw(pid), Signal::SIGTERM);
+        }
+    } // Lock is released
 
-    // Wait for the child monitor to reap all processes.
-    let wait_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // Wait for up to 5 seconds for children to exit gracefully.
+    let wait_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if children.lock().await.is_empty() {
-            println!("[Shutdown] All children have exited.");
-            break;
+            println!("[Shutdown] All children have exited gracefully.");
+            break; // Success! Exit the loop.
         }
         if tokio::time::Instant::now() > wait_deadline {
-            eprintln!("[Shutdown] Timeout waiting for children to exit. Some processes may remain.");
-            break;
+            eprintln!("[Shutdown] Timeout waiting for graceful exit. Escalating to SIGKILL.");
+            break; // Timeout, proceed to forceful shutdown.
         }
         sleep(Duration::from_millis(200)).await;
     }
+
+    // --- PHASE 2: FORCEFUL SHUTDOWN (SIGKILL) ---
+    // This part only runs if the graceful shutdown timed out.
+    let remaining_children = children.lock().await;
+    if !remaining_children.is_empty() {
+        println!("[Shutdown] Forcibly terminating stubborn children...");
+        for (name, &pid) in remaining_children.iter() {
+            println!("[Shutdown] Sending SIGKILL to '{}' (PID {})...", name, pid);
+            let _ = signal::kill(Pid::from_raw(pid), Signal::SIGKILL);
+        }
+    }
+    
+    println!("[Shutdown] Shutdown signals sent. Handler task is finished.");
 }
