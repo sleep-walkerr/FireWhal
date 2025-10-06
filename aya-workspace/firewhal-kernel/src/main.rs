@@ -7,7 +7,7 @@ use aya::{
 };
 use aya_log::EbpfLogger;
 use clap::Parser;
-use log::{info, warn, LevelFilter};
+use log::{debug, info, warn, LevelFilter};
 use std::{
     fs::File,
     mem::{self, MaybeUninit},
@@ -24,7 +24,7 @@ use firewhal_core::{
     zmq_client_connection, BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, Rule,
     StatusUpdate,
 };
-use firewhal_kernel_common::BlockEvent;
+use firewhal_kernel_common::{BlockEvent, RuleAction, RuleKey};
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -45,26 +45,39 @@ fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
     }
 }
 
-async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) {
+
+async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
     info!("[Kernel] [Rule] Applying ruleset...");
     let mut bpf_guard = bpf.lock().await;
+
+    if let Ok(mut blocklist) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf_guard.map_mut("RULES").unwrap()) {
+
     for rule in config.rules {
         match &rule.dest_ip {
             Some(IpAddr::V4(ip)) => {
-                // THE FIX #1: Use `if let Some` as your compiler requires.
-                if let Some(map_ref) = aya::Ebpf::map_mut(&mut bpf_guard, "BLOCKLIST") {
-                    if let Ok(mut blocklist) = AyaHashMap::<_, u32, u32>::try_from(map_ref) {
+                // The map is already correctly typed, so we can use it directly.
+                let octets = ip.octets();
+                let ip_u32 = u32::from_le_bytes(octets);
+                
+                // This is a simplified key for demonstration
+                let key = RuleKey {
+                    protocol: 6, // TCP for example
+                    dest_ip: ip_u32,
+                    dest_port: u32::from(rule.dest_port.unwrap_or(0)), // Wildcard port if not specified
+                    source_ip: 0,
+                    source_port: 0,
+                };
 
-                        let ip_u32 = u32::from_le_bytes(ip.octets());
+                let action = RuleAction {
+                    action: firewhal_kernel_common::Action::Block,
+                    rule_id: 123,
+                };
 
-                        if matches!(rule.action, firewhal_core::Action::Deny) {
-                            if let Err(e) = blocklist.insert(ip_u32, 1, 0) {
-                                warn!("[Kernel] Failed to insert IP {} into BLOCKLIST: {}", ip, e);
-                            } else {
-                                // For debugging, let's log the hex value we are inserting
-                                info!("[Kernel] [Rule] Applied: Block IP {}", ip);
-                            }
-                        }
+                if matches!(rule.action, firewhal_core::Action::Deny) {
+                    if let Err(e) = blocklist.insert(&key, &action, 0) {
+                        warn!("[Kernel] Failed to insert rule: {}", e);
+                    } else {
+                        info!("[Kernel] [Rule] Applied: Block traffic to {}", key.dest_ip);
                     }
                 }
             }
@@ -72,6 +85,35 @@ async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) {
         }
     }
 }
+    Ok(()) // Return Ok to signify success.
+}
+// async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) {
+//     info!("[Kernel] [Rule] Applying ruleset...");
+//     let mut bpf_guard = bpf.lock().await;
+//     for rule in config.rules {
+//         match &rule.dest_ip {
+//             Some(IpAddr::V4(ip)) => {
+//                 // THE FIX #1: Use `if let Some` as your compiler requires.
+//                 if let Some(map_ref) = aya::Ebpf::map_mut(&mut bpf_guard, "BLOCKLIST") {
+//                     if let Ok(mut blocklist) = AyaHashMap::<_, u32, u32>::try_from(map_ref) {
+
+//                         let ip_u32 = u32::from_le_bytes(ip.octets());
+
+//                         if matches!(rule.action, firewhal_core::Action::Deny) {
+//                             if let Err(e) = blocklist.insert(ip_u32, 1, 0) {
+//                                 warn!("[Kernel] Failed to insert IP {} into BLOCKLIST: {}", ip, e);
+//                             } else {
+//                                 // For debugging, let's log the hex value we are inserting
+//                                 info!("[Kernel] [Rule] Applied: Block IP {}", ip);
+//                             }
+//                         }
+//                     }
+//                 }
+//             }
+//             _ => {}
+//         }
+//     }
+// }
 
 
 #[tokio::main]
@@ -173,7 +215,9 @@ async fn main() -> Result<(), anyhow::Error> {
             Some(message) = from_zmq_rx.recv() => {
                 match message {
                     FireWhalMessage::LoadRules(config) => {
-                        apply_ruleset(Arc::clone(&bpf), config).await;
+                        if let Err(e) = apply_ruleset(Arc::clone(&bpf), config).await {
+                            warn!("[Kernel] Failed to apply ruleset: {}", e);
+                        }
                     }
                     _ => {}
                 }

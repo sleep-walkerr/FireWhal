@@ -5,7 +5,7 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 #![no_std]
 #![no_main]
 
-use core::{mem, net::Ipv4Addr};
+use core::{mem, net::{IpAddr,Ipv4Addr}};
 
 use aya_ebpf::{
     bindings::xdp_action,
@@ -16,7 +16,7 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::info;
 
-use firewhal_kernel_common::{BlockEvent, BlockReason};
+use firewhal_kernel_common::{BlockEvent, BlockReason, RuleKey, RuleAction, Action};
 
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -32,10 +32,11 @@ static mut PORT_BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0)
 #[map]
 static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0);
 
-// NEW: Define the RingBuf map for sending events to userspace
 #[map]
 static mut EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0); // 256KB buffer
 
+#[map]
+static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
 
 // INGRESS PROGRAMS
 #[xdp]
@@ -79,7 +80,7 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
                 let event = BlockEvent {
                     reason: BlockReason::IcmpBlocked,
                     pid: 0, // PID is not available in the XDP context
-                    dest_addr: ipv4_hdr.dst_addr(),
+                    dest_addr: IpAddr::V4(ipv4_hdr.dst_addr()),
                     dest_port: 0,
                 };
                 unsafe { EVENTS.output(&event, 0) };
@@ -117,6 +118,42 @@ pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
 }
 
 // EGRESS PROGRAMS
+// In the eBPF connect4 function
+// #[cgroup_sock_addr(connect4)]
+// pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
+//     let dest_ip = Ipv4Addr::from(unsafe { (*ctx.sock_addr).user_ip4 });
+//     let dest_port = u16::from_be(unsafe { (u32::from_be((*ctx.sock_addr).user_port) >> 16) as u16});
+//     // Note: The protocol isn't easily available in connect4, so we'd use a wildcard here.
+//     // The XDP hook is better for matching on protocol.
+
+//     // Build the key from the packet data
+//     let key = RuleKey {
+//         protocol: 0, // Wildcard
+//         source_ip: Ipv4Addr::UNSPECIFIED,
+//         dest_ip: dest_ip,
+//         source_port: 0,
+//         dest_port: dest_port,
+//     };
+
+//     // Look it up in the map!
+//     if let Some(action) = unsafe { RULES.get(&key) } {
+//         if matches!(action.action, Action::Block) {
+//             info!(&ctx, "Rule {} blocked connection to {}", action.rule_id, dest_ip);
+//             return 0; // Block
+//         }
+//     }
+
+//     // You would also check for more general rules, like a wildcard port match
+//     let wildcard_port_key = RuleKey { dest_port: 0, ..key };
+//     if let Some(action) = unsafe { RULES.get(&wildcard_port_key) } {
+//         if matches!(action.action, Action::Block) {
+//             info!(&ctx, "Rule {} blocked connection to {}", action.rule_id, dest_ip);
+//             return 0; // Block
+//         }
+//     }
+    
+//     return 1; // Allow
+// }
 #[cgroup_sock_addr(connect4)]
 pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
@@ -124,25 +161,62 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
         let user_port = unsafe { (*sockaddr_pointer).user_port };
 
+
         //Convert to readable format
         let user_ip_converted = u32::from_be(user_ip4);
         let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
         
         let dest_addr = user_ip4;
-        let blocklist_ptr =  core::ptr::addr_of_mut!(BLOCKLIST);
+        let rules_ptr =  core::ptr::addr_of_mut!(RULES);
+        // Add old map just to demonstrate, delete later
+        let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
+        // Create key to be used for block
+
+        /*
+        pub struct RuleKey {
+            pub protocol: u32,
+            pub source_port: u16,
+            pub dest_port: u16,
+            pub source_ip: Ipv4Addr,
+            pub dest_ip: Ipv4Addr,
+        }
+         */
+        // The protocol and source IP are not available in the connect4 hook.
+        // We must use wildcards (0) for these fields.
+        let key = RuleKey {
+            protocol: 6, // Wildcard for protocol
+            source_port: 0, // Wildcard for source port
+            dest_port: 0,
+            source_ip: 0, // Wildcard for source IP
+            dest_ip: user_ip4,
+        };
+        info!(&ctx,"Checking block for IP: {}", user_ip4);
+
+        if let Some(action) = unsafe { (*rules_ptr).get(&key) } {
+            if matches!(action.action, Action::Block) {
+                info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
+                return Ok(0); // Block
+            }
+        }
+
         if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
-            let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-            let block_report_event = BlockEvent {
-                reason: BlockReason::IpBlockedEgressUdp,
-                pid: ctx.pid(),
-                dest_addr:Ipv4Addr::from(dest_addr.to_be()),
-                dest_port: user_port_converted,
-            };
-        if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
-            info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
+            return Ok(0);
         }
-            return Ok(0); // Block the connection
-        }
+
+
+        // if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
+        //     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+        //     let block_report_event = BlockEvent {
+        //         reason: BlockReason::IpBlockedEgressUdp,
+        //         pid: ctx.pid(),
+        //         dest_addr:IpAddr::V4(Ipv4Addr::from(dest_addr.to_be())),
+        //         dest_port: user_port_converted,
+        //     };
+        // if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
+        //     info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
+        // }
+        //     return Ok(0); // Block the connection
+        // }
 
         Ok(1) // Allow the connection
     }();
@@ -175,7 +249,7 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
             let block_report_event = BlockEvent {
                 reason: BlockReason::IpBlockedEgressUdp,
                 pid: ctx.pid(),
-                dest_addr:Ipv4Addr::from(dest_addr.to_be()),
+                dest_addr:IpAddr::V4(Ipv4Addr::from(dest_addr.to_be())),
                 dest_port: dest_port_host,
             };
             unsafe { EVENTS.output(&block_report_event, 0) };
@@ -215,7 +289,7 @@ let result = || -> Result<i32, i32> {
             let block_event_message = BlockEvent {
                 reason : BlockReason::BindBlocked,
                 pid: ctx.pid(),
-                dest_addr:Ipv4Addr::from(dest_addr.to_be()),
+                dest_addr:IpAddr::V4(Ipv4Addr::from(dest_addr.to_be())),
                 dest_port: dest_port_host,
             };
             unsafe { EVENTS.output(&block_event_message, 0) };

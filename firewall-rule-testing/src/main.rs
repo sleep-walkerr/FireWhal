@@ -62,6 +62,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 dest_port: None,
                 description: "Block a specific malicious IP".to_string(),
             },
+            Rule {
+                action: Action::Deny,
+                protocol: Protocol::Tcp,
+                source_ip: None,
+                source_port: None,
+                dest_ip: Some(IpAddr::V4(Ipv4Addr::new(172, 168, 8, 7))),
+                dest_port: None,
+                description: "Block a specific malicious IP".to_string(),
+            },
         ],
     };
 
