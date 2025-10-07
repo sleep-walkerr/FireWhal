@@ -118,80 +118,37 @@ pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
 }
 
 // EGRESS PROGRAMS
-// In the eBPF connect4 function
-// #[cgroup_sock_addr(connect4)]
-// pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
-//     let dest_ip = Ipv4Addr::from(unsafe { (*ctx.sock_addr).user_ip4 });
-//     let dest_port = u16::from_be(unsafe { (u32::from_be((*ctx.sock_addr).user_port) >> 16) as u16});
-//     // Note: The protocol isn't easily available in connect4, so we'd use a wildcard here.
-//     // The XDP hook is better for matching on protocol.
-
-//     // Build the key from the packet data
-//     let key = RuleKey {
-//         protocol: 0, // Wildcard
-//         source_ip: Ipv4Addr::UNSPECIFIED,
-//         dest_ip: dest_ip,
-//         source_port: 0,
-//         dest_port: dest_port,
-//     };
-
-//     // Look it up in the map!
-//     if let Some(action) = unsafe { RULES.get(&key) } {
-//         if matches!(action.action, Action::Block) {
-//             info!(&ctx, "Rule {} blocked connection to {}", action.rule_id, dest_ip);
-//             return 0; // Block
-//         }
-//     }
-
-//     // You would also check for more general rules, like a wildcard port match
-//     let wildcard_port_key = RuleKey { dest_port: 0, ..key };
-//     if let Some(action) = unsafe { RULES.get(&wildcard_port_key) } {
-//         if matches!(action.action, Action::Block) {
-//             info!(&ctx, "Rule {} blocked connection to {}", action.rule_id, dest_ip);
-//             return 0; // Block
-//         }
-//     }
-    
-//     return 1; // Allow
-// }
 #[cgroup_sock_addr(connect4)]
 pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
+        //Consider changing these back to safe "ctx.user_ipv" and the like if you can
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-        let user_port = unsafe { (*sockaddr_pointer).user_port };
+        let user_port = unsafe { (*sockaddr_pointer).user_port }; 
+        let protocol = unsafe { (*sockaddr_pointer).protocol };
+
+        //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
+        // They need to be converted to be used first
+        let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
+        let destination_port = unsafe { ((*sockaddr_pointer).user_port >> 16) as u16};
 
 
-        //Convert to readable format
+        //Convert to readable format for error logging
         let user_ip_converted = u32::from_be(user_ip4);
         let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
         
-        let dest_addr = user_ip4;
+        // Get a reference to the RULES hashmap
         let rules_ptr =  core::ptr::addr_of_mut!(RULES);
-        // Add old map just to demonstrate, delete later
-        let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
-        // Create key to be used for block
 
-        /*
-        pub struct RuleKey {
-            pub protocol: u32,
-            pub source_port: u16,
-            pub dest_port: u16,
-            pub source_ip: Ipv4Addr,
-            pub dest_ip: Ipv4Addr,
-        }
-         */
-        // The protocol and source IP are not available in the connect4 hook.
-        // We must use wildcards (0) for these fields.
+        // Create key to be used for block
         let key = RuleKey {
-            protocol: 6, // Wildcard for protocol
-            source_port: 0, // Wildcard for source port
-            dest_port: 0,
-            source_ip: 0, // Wildcard for source IP
+            protocol: protocol, // Don't forget about wild card for protocol
+            source_port: source_port, // Wildcard for source port
+            dest_port: destination_port,
+            source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
             dest_ip: user_ip4,
         };
-        info!(&ctx,"Checking block for IP: {}", user_ip4);
-
+        info!(&ctx, "Checking block for Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}", key.protocol, key.dest_ip, key.dest_port, key.source_ip, key.source_port);
         if let Some(action) = unsafe { (*rules_ptr).get(&key) } {
             if matches!(action.action, Action::Block) {
                 info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
@@ -199,9 +156,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
             }
         }
 
-        if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
-            return Ok(0);
-        }
+
 
 
         // if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {

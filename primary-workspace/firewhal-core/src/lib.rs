@@ -135,9 +135,9 @@ pub enum Action {
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum Protocol {
-    Tcp,
-    Udp,
-    Icmp
+    Tcp = 6,
+    Udp = 17,
+    Icmp = 1
 }
 
 

@@ -46,6 +46,26 @@ fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
 }
 
 
+// Simple fxn to check if the rule is for v4 or v6 traffic
+fn check_rule_with_if(rule: &Rule) {
+    let dest_is_v4 = rule.dest_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
+    let src_is_v4 = rule.source_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
+
+    if dest_is_v4 || src_is_v4 {
+        println!("Rule contains at least one IPv4 address.");
+
+        // You can then handle the specific values
+        if let Some(IpAddr::V4(dest)) = &rule.dest_ip {
+             println!("Destination is an IPv4 address: {}", dest);
+        }
+        if let Some(IpAddr::V4(src)) = &rule.source_ip {
+            println!("Source is an IPv4 address: {}", src);
+        }
+    } else {
+        println!("Rule does not contain any IPv4 addresses.");
+    }
+}
+
 async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
     info!("[Kernel] [Rule] Applying ruleset...");
     let mut bpf_guard = bpf.lock().await;
@@ -53,35 +73,42 @@ async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<
     if let Ok(mut blocklist) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf_guard.map_mut("RULES").unwrap()) {
 
     for rule in config.rules {
-        match &rule.dest_ip {
-            Some(IpAddr::V4(ip)) => {
-                // The map is already correctly typed, so we can use it directly.
-                let octets = ip.octets();
-                let ip_u32 = u32::from_le_bytes(octets);
-                
-                // This is a simplified key for demonstration
-                let key = RuleKey {
-                    protocol: 6, // TCP for example
-                    dest_ip: ip_u32,
-                    dest_port: u32::from(rule.dest_port.unwrap_or(0)), // Wildcard port if not specified
-                    source_ip: 0,
-                    source_port: 0,
-                };
+        let dest_is_v4 = rule.dest_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
+        let src_is_v4 = rule.source_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
 
-                let action = RuleAction {
-                    action: firewhal_kernel_common::Action::Block,
-                    rule_id: 123,
-                };
+        if dest_is_v4 || src_is_v4 { //This will be used to decide which map to insert the rule into in the future
+            // Convert src and dst IP addresses
+            let src_ip_u32: u32;
+            let dst_ip_u32: u32;
+            if let Some(IpAddr::V4(source_ip)) = rule.source_ip {
+                src_ip_u32 = u32::from_le_bytes(source_ip.octets());
+            } else { src_ip_u32 = 0; }
+            if let Some(IpAddr::V4(destination_ip)) = rule.dest_ip {
+                dst_ip_u32 = u32::from_le_bytes(destination_ip.octets());
+            } else { dst_ip_u32 = 0; }
+            
 
-                if matches!(rule.action, firewhal_core::Action::Deny) {
-                    if let Err(e) = blocklist.insert(&key, &action, 0) {
-                        warn!("[Kernel] Failed to insert rule: {}", e);
-                    } else {
-                        info!("[Kernel] [Rule] Applied: Block traffic to {}", key.dest_ip);
-                    }
+            // Create Key from Rule
+            let new_key = RuleKey {
+                protocol: rule.protocol as u32,
+                dest_ip: dst_ip_u32, 
+                dest_port: rule.dest_port.unwrap_or(0), // Wildcard port if not specified
+                source_ip: src_ip_u32,
+                source_port: rule.source_port.unwrap_or(0), // Wildcard port if not specified,
+            };
+
+            let action = RuleAction {
+                action: firewhal_kernel_common::Action::Block,
+                rule_id: 123,
+            };
+
+            if matches!(rule.action, firewhal_core::Action::Deny) {
+                if let Err(e) = blocklist.insert(&new_key, &action, 0) {
+                    warn!("[Kernel] Failed to insert rule: {}", e);
+                } else {
+                    info!("[Kernel] [Rule] Applied: Block traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}", new_key.protocol, new_key.dest_ip, new_key.dest_port, new_key.source_ip, new_key.source_port);
                 }
             }
-            _ => {}
         }
     }
 }

@@ -29,8 +29,8 @@ pub enum Action {
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
 pub struct RuleKey {
     pub protocol: u32,
-    pub source_port: u32,
-    pub dest_port: u32,
+    pub source_port: u16,
+    pub dest_port: u16,
     pub source_ip: u32,
     pub dest_ip: u32,
 }
