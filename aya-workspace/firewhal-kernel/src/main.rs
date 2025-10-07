@@ -45,27 +45,6 @@ fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
     }
 }
 
-
-// Simple fxn to check if the rule is for v4 or v6 traffic
-fn check_rule_with_if(rule: &Rule) {
-    let dest_is_v4 = rule.dest_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
-    let src_is_v4 = rule.source_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
-
-    if dest_is_v4 || src_is_v4 {
-        println!("Rule contains at least one IPv4 address.");
-
-        // You can then handle the specific values
-        if let Some(IpAddr::V4(dest)) = &rule.dest_ip {
-             println!("Destination is an IPv4 address: {}", dest);
-        }
-        if let Some(IpAddr::V4(src)) = &rule.source_ip {
-            println!("Source is an IPv4 address: {}", src);
-        }
-    } else {
-        println!("Rule does not contain any IPv4 addresses.");
-    }
-}
-
 async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
     info!("[Kernel] [Rule] Applying ruleset...");
     let mut bpf_guard = bpf.lock().await;
@@ -106,7 +85,8 @@ async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<
                 if let Err(e) = blocklist.insert(&new_key, &action, 0) {
                     warn!("[Kernel] Failed to insert rule: {}", e);
                 } else {
-                    info!("[Kernel] [Rule] Applied: Block traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}", new_key.protocol, new_key.dest_ip, new_key.dest_port, new_key.source_ip, new_key.source_port);
+                    info!("[Kernel] [Rule] Applied: Block traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}",
+                    new_key.protocol, Ipv4Addr::from(u32::from_be(new_key.dest_ip)), new_key.dest_port, Ipv4Addr::from(u32::from_be(new_key.source_ip)), new_key.source_port);
                 }
             }
         }
@@ -114,34 +94,6 @@ async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<
 }
     Ok(()) // Return Ok to signify success.
 }
-// async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) {
-//     info!("[Kernel] [Rule] Applying ruleset...");
-//     let mut bpf_guard = bpf.lock().await;
-//     for rule in config.rules {
-//         match &rule.dest_ip {
-//             Some(IpAddr::V4(ip)) => {
-//                 // THE FIX #1: Use `if let Some` as your compiler requires.
-//                 if let Some(map_ref) = aya::Ebpf::map_mut(&mut bpf_guard, "BLOCKLIST") {
-//                     if let Ok(mut blocklist) = AyaHashMap::<_, u32, u32>::try_from(map_ref) {
-
-//                         let ip_u32 = u32::from_le_bytes(ip.octets());
-
-//                         if matches!(rule.action, firewhal_core::Action::Deny) {
-//                             if let Err(e) = blocklist.insert(ip_u32, 1, 0) {
-//                                 warn!("[Kernel] Failed to insert IP {} into BLOCKLIST: {}", ip, e);
-//                             } else {
-//                                 // For debugging, let's log the hex value we are inserting
-//                                 info!("[Kernel] [Rule] Applied: Block IP {}", ip);
-//                             }
-//                         }
-//                     }
-//                 }
-//             }
-//             _ => {}
-//         }
-//     }
-// }
-
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {

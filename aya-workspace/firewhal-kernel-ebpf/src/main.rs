@@ -134,7 +134,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
 
 
         //Convert to readable format for error logging
-        let user_ip_converted = u32::from_be(user_ip4);
+        let user_ip_converted = Ipv4Addr::from(u32::from_be(user_ip4));
         let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
         
         // Get a reference to the RULES hashmap
@@ -165,43 +165,39 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
             source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
             dest_ip: 0,
         };
+        // Create block event to report block
+        let block_report_event = BlockEvent {
+            reason: BlockReason::IpBlockedEgressUdp,
+            pid: ctx.pid(),
+            dest_addr:IpAddr::V4(Ipv4Addr::from(user_ip4.to_be())),
+            dest_port: user_port_converted,
+        };
         // Check all keys
-        info!(&ctx, "Checking block for Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}", full_key.protocol, full_key.dest_ip, full_key.dest_port, full_key.source_ip, full_key.source_port);
         if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
             if matches!(action.action, Action::Block) {
                 info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
+                if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
+                    info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
+                }
                 return Ok(0); // Block
             }
         } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
             if matches!(action.action, Action::Block) {
-
                 info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
+                if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
+                    info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
+                }
                 return Ok(0); // Block
             }
         } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
             if matches!(action.action, Action::Block) {
                 info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
+                if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
+                    info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
+                }
                 return Ok(0); // Block
             }
         }
-
-
-
-
-        // if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
-        //     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-        //     let block_report_event = BlockEvent {
-        //         reason: BlockReason::IpBlockedEgressUdp,
-        //         pid: ctx.pid(),
-        //         dest_addr:IpAddr::V4(Ipv4Addr::from(dest_addr.to_be())),
-        //         dest_port: user_port_converted,
-        //     };
-        // if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
-        //     info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
-        // }
-        //     return Ok(0); // Block the connection
-        // }
-
         Ok(1) // Allow the connection
     }();
 
