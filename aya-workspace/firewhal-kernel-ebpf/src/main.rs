@@ -140,16 +140,45 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
         // Get a reference to the RULES hashmap
         let rules_ptr =  core::ptr::addr_of_mut!(RULES);
 
-        // Create key to be used for block
-        let key = RuleKey {
+        // Create keys to check for block
+        // Specific Match
+        let full_key = RuleKey {
             protocol: protocol, // Don't forget about wild card for protocol
-            source_port: source_port, // Wildcard for source port
+            source_port: 0, // Source port is irrelevant in this filter
             dest_port: destination_port,
             source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
             dest_ip: user_ip4,
         };
-        info!(&ctx, "Checking block for Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}", key.protocol, key.dest_ip, key.dest_port, key.source_ip, key.source_port);
-        if let Some(action) = unsafe { (*rules_ptr).get(&key) } {
+        // Wildcard port match
+        let wildcard_port_key = RuleKey {
+            protocol: protocol, // Don't forget about wild card for protocol
+            source_port: 0, // Source port is irrelevant in this filter
+            dest_port: 0,
+            source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
+            dest_ip: user_ip4,
+        };
+        // Wildcard IP match
+        let wildcard_ip_key = RuleKey {
+            protocol: protocol, // Don't forget about wild card for protocol
+            source_port: 0, // Source port is irrelevant in this filter
+            dest_port: destination_port,
+            source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
+            dest_ip: 0,
+        };
+        // Check all keys
+        info!(&ctx, "Checking block for Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}", full_key.protocol, full_key.dest_ip, full_key.dest_port, full_key.source_ip, full_key.source_port);
+        if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
+            if matches!(action.action, Action::Block) {
+                info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
+                return Ok(0); // Block
+            }
+        } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
+            if matches!(action.action, Action::Block) {
+
+                info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
+                return Ok(0); // Block
+            }
+        } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
             if matches!(action.action, Action::Block) {
                 info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
                 return Ok(0); // Block
