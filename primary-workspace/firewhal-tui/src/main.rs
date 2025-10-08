@@ -121,14 +121,19 @@ async fn main() -> Result<(), io::Error> {
 
         
 
-
-        // Process all pending messages from the ZMQ task.
+        // Change this to Some(message) later
+        // Process all pending messages from the ZMQ task. 
         loop {
             match from_zmq_rx.try_recv() {
                 Ok(FireWhalMessage::Debug(msg)) => {
                     // Add the formatted message to the app's state.
                     let formatted_msg = format!("[{}]: {}", msg.source, msg.content);
                     app.debug_print.add_message(formatted_msg);
+                }
+                Ok(FireWhalMessage::InterfaceResponse(response)) => {
+                    if response.source == "Firewall" {
+                        for interface in response.interfaces {app.interface_selection.add_interface(interface)}
+                    }
                 }
                 Ok(_) => { /* Ignore other message types for now */ }
                 Err(TryRecvError::Empty) => {
