@@ -26,6 +26,8 @@ use firewhal_core::{
 };
 use firewhal_kernel_common::{BlockEvent, RuleAction, RuleKey};
 
+use pnet::datalink;
+
 #[derive(Debug, Parser)]
 struct Opt {
     #[clap(short, long, default_value = "/sys/fs/cgroup")]

@@ -1,14 +1,5 @@
 use ratatui::{prelude::*, widgets::*};
 use crate::ui::app::App;
-use pnet::datalink;
-
-fn get_all_interfaces() -> Vec<String> {
-    datalink::interfaces()
-        .into_iter()
-        .map(|iface| iface.name)
-        .collect()
-}
-
 
 pub fn render(f: &mut Frame, app: &App) {
     let block = Block::default()
@@ -24,18 +15,11 @@ pub fn render(f: &mut Frame, app: &App) {
     // Now we can render the block.
     f.render_widget(block, area); // `block` is consumed here.
 
-    
-    let mut interface_list: Vec<ListItem> = Vec::new();
-    for iface in get_all_interfaces() {
-        interface_list.push(ListItem::new(iface))
+    // // Create a List widget
+    // let messages_list = List::new(interface_list)
+    //     .block(Block::default().borders(Borders::NONE))
+    //     .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+    //     .highlight_symbol(">> ");
 
-    }
-
-    // Create a List widget
-    let messages_list = List::new(interface_list)
-        .block(Block::default().borders(Borders::NONE))
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
-        .highlight_symbol(">> ");
-
-    f.render_widget(messages_list, inner_area);
+    // f.render_widget(messages_list, inner_area);
 }

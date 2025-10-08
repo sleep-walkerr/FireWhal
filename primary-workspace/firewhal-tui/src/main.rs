@@ -28,6 +28,10 @@ use zmq;
 use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate};
 use tokio::sync::mpsc::error::TryRecvError;
 
+// Upon entering the interface selection menu, have the TUI send a message requesting the interface list
+// The userspace loader receives the message, scans for interfaces, and then sends a request response
+// The TUI then populates the list with the message it receives containing the available interfaces
+
 
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {

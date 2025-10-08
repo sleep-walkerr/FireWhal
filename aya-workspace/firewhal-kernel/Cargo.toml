@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 firewhal-kernel-common = { path = "../firewhal-kernel-common", features = ["user"] }
 plain = "0.2.3"
+pnet = "0.35.0"
 
 [build-dependencies]
 anyhow = { workspace = true }
