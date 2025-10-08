@@ -10,3 +10,5 @@ crossterm = "0.29.0"
 ratatui = "0.29.0"
 zmq = "0.10.0"
 tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+pnet = "0.35.0"
+

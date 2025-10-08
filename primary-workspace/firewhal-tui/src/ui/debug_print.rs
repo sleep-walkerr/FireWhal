@@ -1,7 +1,24 @@
 use ratatui::{prelude::*, widgets::*};
-use crate::app::App;
+use crate::ui::app::App;
 
-pub fn render(f: &mut Frame, app: &App) {
+#[derive(Debug, Default)]
+pub struct DebugPrintState {
+    pub messages: Vec<String>,
+}
+
+impl DebugPrintState {
+    pub fn add_message(&mut self, message: String) {
+        self.messages.push(message);
+        // To prevent the list from growing indefinitely, we can cap its size.
+        const MAX_MESSAGES: usize = 100;
+        if self.messages.len() > MAX_MESSAGES {
+            // Removes the oldest message
+            self.messages.remove(0);
+        }
+    }
+}
+
+pub fn render(f: &mut Frame, app: &mut App) {
     let block = Block::default()
         .title("IPC Debug Log")
         .borders(Borders::ALL)
@@ -16,8 +33,9 @@ pub fn render(f: &mut Frame, app: &App) {
     f.render_widget(block, area); // `block` is consumed here.
 
     // Convert the Vec<String> from the app state into a Vec<ListItem> for the widget.
-    let messages: Vec<ListItem> = app
-        .debug_messages
+    let list_items: Vec<ListItem> = app
+        .debug_print
+        .messages
         .iter()
         .rev() // Show the most recent messages at the bottom of the view (top of the list)
         .map(|msg| {
@@ -41,7 +59,7 @@ pub fn render(f: &mut Frame, app: &App) {
         .collect();
 
     // Create a List widget
-    let messages_list = List::new(messages)
+    let messages_list = List::new(list_items)
         .block(Block::default().borders(Borders::NONE))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol(">> ");

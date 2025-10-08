@@ -21,3 +21,6 @@ For Next Meeting: 10/17/2025
 · You should have so many rules for your firewall rules
     
 
+Progress Made:
+-- Fixed issue with daemon launching components without subgroup awareness for the user running the program. This was blocking the discord bot from sending IPC messages
+-- Updated firewall to load complete rules instead of just destination IP addresses. This was done using a hashmap that accepts a predefined rule structure

@@ -5,10 +5,46 @@ Show basic status of each subapp, for now each will show inactive
 
 */
 use ratatui::{prelude::*, widgets::*};
-use crate::app::App;
+use crate::ui::app::App;
 
 
-pub fn render(f: &mut Frame, app: &App) {
+/// Holds the state for the Main Menu screen.
+#[derive(Debug)]
+pub struct MainMenuState {
+    pub progress: f64,
+    pub progress_direction: i8,
+    pub last_tick: std::time::Instant,
+}
+
+impl Default for MainMenuState {
+    fn default() -> Self {
+        Self {
+            progress: 0.0,
+            progress_direction: 1,
+            last_tick: std::time::Instant::now(),
+        }
+    }
+}
+
+impl MainMenuState {
+    pub fn update_progress(&mut self) {
+        self.progress += (self.progress_direction as f64) * 0.01; // Adjust speed as needed
+
+        // make this random later
+        if self.progress >= 1.0 {
+            self.progress = 1.0;
+            self.progress_direction = -1; // Reverse direction
+        } else if self.progress <= 0.0 {
+            self.progress = 0.0;
+            self.progress_direction = 1; // Reverse direction
+        }
+        self.last_tick = std::time::Instant::now();
+    }
+}
+
+
+
+pub fn render(f: &mut Frame, app: &mut App) {
     // --- TITLE ---
     let firewhal_span = Span::styled(
         "FireWhal ",
@@ -146,8 +182,8 @@ pub fn render(f: &mut Frame, app: &App) {
     let network_usage_bar = Gauge::default()
         .block(Block::default().title("Network Usage").borders(Borders::ALL))
         .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-        .percent((app.progress * 100.0) as u16) // Use app.progress
-        .label(format!("{:.0}%", app.progress * 100.0)); // Display percentage
+        .percent((app.main_menu.progress * 100.0) as u16) // Use progress from MainMenuState
+        .label(format!("{:.0}%", app.main_menu.progress * 100.0)); // Display percentage
 
     f.render_widget(network_usage_bar,main_vertical_content_layout[1])
 }

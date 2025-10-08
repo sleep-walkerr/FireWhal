@@ -1,6 +1,6 @@
 // import UI screens
 mod ui;
-use ui::app;
+use ui::app::{App, AppScreen};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -28,14 +28,6 @@ use zmq;
 use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate};
 use tokio::sync::mpsc::error::TryRecvError;
 
-/// Holds the application's state
-struct App<> {
-    titles: Vec<String>,
-    index: usize,
-    progress: f64, // New: Current progress for the gauge (0.0 to 1.0)
-    progress_direction: i8, // New: 1 for increasing, -1 for decreasing
-    last_tick: Instant, // New: To control animation speed
-}
 
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
@@ -68,14 +60,15 @@ async fn main() -> Result<(), io::Error> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?; // ⬅ clear screen before drawing
 
-    let mut app = app::App::default();
+    let mut app = App::default();
     let tick_rate = Duration::from_millis(100);
+    let mut last_tick = Instant::now();
 
     loop {
-        terminal.draw(|f| ui::render(f, &app))?;
+        terminal.draw(|f| ui::render(f, &mut app))?;
 
         let timeout = tick_rate
-            .checked_sub(app.last_tick.elapsed())
+            .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
         if event::poll(timeout)? {
@@ -87,10 +80,15 @@ async fn main() -> Result<(), io::Error> {
                 }
             }
         }
-        if app.last_tick.elapsed() >= tick_rate {
-            app.update_progress();
-            app.last_tick = Instant::now();
+        if last_tick.elapsed() >= tick_rate {
+            // Delegate updates to the active screen's state
+            match app.screen {
+                AppScreen::MainMenu => app.main_menu.update_progress(),
+                _ => { /* Other screens might have their own updates here */ }
+            }
+            last_tick = Instant::now();
         }
+
 
         // Process all pending messages from the ZMQ task.
         loop {
@@ -98,7 +96,7 @@ async fn main() -> Result<(), io::Error> {
                 Ok(FireWhalMessage::Debug(msg)) => {
                     // Add the formatted message to the app's state.
                     let formatted_msg = format!("[{}]: {}", msg.source, msg.content);
-                    app.debug_messages.push(formatted_msg);
+                    app.debug_print.add_message(formatted_msg);
                 }
                 Ok(_) => { /* Ignore other message types for now */ }
                 Err(TryRecvError::Empty) => {

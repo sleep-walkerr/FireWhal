@@ -7,7 +7,7 @@ use aya::{
 };
 use aya_log::EbpfLogger;
 use clap::Parser;
-use log::{debug, info, warn, LevelFilter};
+use log::{info, warn, LevelFilter};
 use std::{
     fs::File,
     mem::{self, MaybeUninit},
@@ -111,7 +111,10 @@ async fn main() -> Result<(), anyhow::Error> {
         let mut bpf_guard = bpf.lock().await;
         let prog: &mut Xdp = bpf_guard.program_mut("firewhal_xdp").unwrap().try_into()?;
         prog.load()?;
-        prog.attach(&opt.iface, XdpFlags::default()).context("failed to attach XDP program")?;
+        //Test Changes
+        //prog.attach(&opt.iface, XdpFlags::default()).context("failed to attach XDP program")?;
+        prog.attach("wlp5s0", XdpFlags::SKB_MODE).context("failed to attach XDP program")?;
+        prog.attach("eth0", XdpFlags::SKB_MODE).context("failed to attach XDP program")?;
     }
     {
         let cgroup_file = File::open(&opt.cgroup_path)?;

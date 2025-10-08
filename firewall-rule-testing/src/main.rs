@@ -10,6 +10,8 @@ use std::fs;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use bincode::{config, Encode, Decode};
+use pnet::datalink;
+
 
 #[derive(Encode, Decode, Debug)]
 pub enum Action {
@@ -41,6 +43,14 @@ pub struct FirewallConfig {
     pub rules: Vec<Rule>,
 }
 
+fn get_all_interfaces() -> Vec<String> {
+    datalink::interfaces()
+        .into_iter()
+        .map(|iface| iface.name)
+        .collect()
+}
+
+
 fn main() -> Result<(), Box<dyn Error>> {
     let my_rules = FirewallConfig {
         rules: vec![
@@ -71,8 +81,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                 dest_port: None,
                 description: "Block a specific malicious IP".to_string(),
             },
+            Rule {
+                action: Action::Deny,
+                protocol: Protocol::Udp,
+                source_ip: None,
+                source_port: None,
+                dest_ip: Some(IpAddr::V4(Ipv4Addr::new(7, 0, 0, 5))),
+                dest_port: None,
+                description: "Block a specific malicious IP".to_string(),
+            },
+            Rule {
+                action: Action::Deny,
+                protocol: Protocol::Udp,
+                source_ip: None,
+                source_port: None,
+                dest_ip: Some(IpAddr::V4(Ipv4Addr::new(172, 168, 8, 7))),
+                dest_port: None,
+                description: "Block a specific malicious IP".to_string(),
+            },
         ],
     };
+
+    
+
 
     let config = bincode::config::standard();
     let encoded_bytes: Vec<u8> = bincode::encode_to_vec(&my_rules, config)?;
@@ -88,6 +119,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("✅ Successfully loaded {} rules from file.", decoded_rules.rules.len());
     dbg!(decoded_rules);
+
+    // Interface scan testing
+    let interfaces = get_all_interfaces();
+    println!("Available interfaces: {:?}", interfaces);
 
     Ok(())
 }
