@@ -47,8 +47,7 @@ fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
     }
 }
 
-async fn get_all_interfaces(bpf: Arc<Mutex<Ebpf>>) -> Vec<String> {
-    let _ = bpf.lock().await;
+fn get_all_interfaces() -> Vec<String> {
     datalink::interfaces()
         .into_iter()
         .map(|iface| iface.name)
@@ -214,16 +213,24 @@ async fn main() -> Result<(), anyhow::Error> {
                     },
                     FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interfaces
                         info!("[Kernel] Received interface request from TUI.");
-                        // Collect Interfaces
-                        let interface_list = get_all_interfaces(Arc::clone(&bpf)).await;
-                        // Craft Response Message
+                        
+                        // --- THIS IS THE FIX ---
+                        // Move the blocking `get_all_interfaces` call to a blocking-safe thread.
+                        let interface_list = match task::spawn_blocking(get_all_interfaces).await {
+                            Ok(list) => list,
+                            Err(e) => {
+                                warn!("[Kernel] Failed to spawn blocking task for interfaces: {}", e);
+                                vec![] // Send back an empty list on error
+                            }
+                        };
+                        
                         let response = FireWhalMessage::InterfaceResponse(NetInterfaceResponse {
-                            source: request.source,
+                            source: "Firewall".to_string(), // The firewall is the source of the list
                             interfaces: interface_list,
                         });
-                        // Send Response Message
+                        
                         if let Err(e) = to_zmq_tx.send(response).await {
-                            warn!("[Kernel] Failed to send interface list to TUI: {}", e);
+                            warn!("[Kernel] Failed to send interface list: {}", e);
                         }
                     },
                     _ => {}
