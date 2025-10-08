@@ -1,5 +1,5 @@
 use std::time::Instant;
-use crate::ui::{debug_print::DebugPrintState, main_menu::MainMenuState};
+use crate::ui::{debug_print::DebugPrintState, main_menu::MainMenuState, interface_selection::InterfaceList};
 
 #[derive(Debug)]
 pub struct App<'a> {
@@ -10,6 +10,7 @@ pub struct App<'a> {
     // Screen-specific states
     pub main_menu: MainMenuState,
     pub debug_print: DebugPrintState,
+    pub interface_selection: InterfaceList,
 }
 
 #[derive(Debug)]
@@ -49,6 +50,7 @@ impl Default for App<'_> {
             index: 0,
             main_menu: MainMenuState::default(),
             debug_print: DebugPrintState::default(),
+            interface_selection: InterfaceList::default()
         }
     }
 }

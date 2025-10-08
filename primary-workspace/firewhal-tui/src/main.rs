@@ -79,7 +79,32 @@ async fn main() -> Result<(), io::Error> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Tab => app.next_screen(),
+                    KeyCode::Tab => {
+                        app.next_screen();
+                        // THIS CODE CAUSES BUSY WAITING
+                        // Match to correct interface and then perform relevant operations
+                        match app.screen {
+                            AppScreen::InterfaceSelection => {
+                                // Send a interface request message to firewhal-kernel if screen is interface selection
+                                // Craft request message
+                                let request_message = FireWhalMessage::InterfaceRequest(firewhal_core::NetInterfaceRequest {
+                                    source: "TUI".to_string(),
+                                });
+                                // Send request message
+                                if let Err(e) = to_zmq_tx.send(request_message).await {
+                                    eprintln!("Failed to send interface request: {}", e);
+                                }
+                            },
+                            // AppScreen::MainMenu => {
+                            //     if last_tick.elapsed() >= tick_rate {
+                            //         app.main_menu.update_progress();
+                            //         last_tick = Instant::now();
+                            //     }
+                                
+                            // },
+                            _ => {}
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -92,6 +117,9 @@ async fn main() -> Result<(), io::Error> {
             }
             last_tick = Instant::now();
         }
+
+
+        
 
 
         // Process all pending messages from the ZMQ task.

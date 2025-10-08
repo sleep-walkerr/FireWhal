@@ -3,7 +3,7 @@ use crate::ui::app::App;
 
 #[derive(Debug, Default)]
 pub struct DebugPrintState {
-    pub messages: Vec<String>,
+    messages: Vec<String>,
 }
 
 impl DebugPrintState {

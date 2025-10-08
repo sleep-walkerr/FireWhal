@@ -22,7 +22,7 @@ use tokio::{
 
 use firewhal_core::{
     zmq_client_connection, BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, Rule,
-    StatusUpdate,
+    StatusUpdate, NetInterfaceRequest, NetInterfaceResponse,
 };
 use firewhal_kernel_common::{BlockEvent, RuleAction, RuleKey};
 
@@ -45,6 +45,14 @@ fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
         std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, size);
         Ok(data.assume_init())
     }
+}
+
+async fn get_all_interfaces(bpf: Arc<Mutex<Ebpf>>) -> Vec<String> {
+    let _ = bpf.lock().await;
+    datalink::interfaces()
+        .into_iter()
+        .map(|iface| iface.name)
+        .collect()
 }
 
 async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
@@ -196,13 +204,28 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
+            // Message processing
             Some(message) = from_zmq_rx.recv() => {
                 match message {
                     FireWhalMessage::LoadRules(config) => {
                         if let Err(e) = apply_ruleset(Arc::clone(&bpf), config).await {
                             warn!("[Kernel] Failed to apply ruleset: {}", e);
                         }
-                    }
+                    },
+                    FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interfaces
+                        info!("[Kernel] Received interface request from TUI.");
+                        // Collect Interfaces
+                        let interface_list = get_all_interfaces(Arc::clone(&bpf)).await;
+                        // Craft Response Message
+                        let response = FireWhalMessage::InterfaceResponse(NetInterfaceResponse {
+                            source: request.source,
+                            interfaces: interface_list,
+                        });
+                        // Send Response Message
+                        if let Err(e) = to_zmq_tx.send(response).await {
+                            warn!("[Kernel] Failed to send interface list to TUI: {}", e);
+                        }
+                    },
                     _ => {}
                 }
             }

@@ -8,7 +8,7 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 // Import the necessary items from your common library
-use firewhal_core::{DebugMessage, FireWhalMessage, FirewallConfig, StatusUpdate};
+use firewhal_core::{DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, StatusUpdate};
 use bincode::{self, config};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -93,6 +93,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                 } else {
                     eprintln!("[ROUTER] Received LoadRules command, but firewall client is not registered!");
 
+                }
+            }
+            // Interface Request message processing
+            FireWhalMessage::InterfaceRequest(NetInterfaceRequest {source}) => {
+                source_component = source.clone();
+                if &source_component == "TUI" {
+                    if let Some(firewall_identity) = clients.get("Firewall") {
+                        println!("[ROUTER] Forwarding InterfaceRequest command to firewall.");
+                        router.send(firewall_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?;
+                    } else {
+                        eprintln!("[ROUTER] Received InterfaceRequest command, but firewall client is not registered!");
+                    }
+                }
+            }
+            // Interface Response message processing
+            FireWhalMessage::InterfaceResponse(NetInterfaceResponse {source, ..}) => {
+                source_component = source.clone();
+                if source_component == "Firewall" {
+                    println!("[ROUTER] Forwarding InterfaceResponse from firewall to TUI.");
+                    if let Some(tui_identity) = clients.get("TUI") {
+                        router.send(tui_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?;
+                    } else {
+                        eprintln!("[ROUTER] Received InterfaceResponse, but TUI client is not registered!");
+                    }
                 }
             }
             _ => {

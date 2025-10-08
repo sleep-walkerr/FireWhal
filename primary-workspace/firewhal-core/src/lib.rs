@@ -164,11 +164,22 @@ pub enum FireWhalMessage {
     RuleAddBlock(BlockAddressRule),
     Status(StatusUpdate),
     Debug(DebugMessage),
-    LoadRules(FirewallConfig)
+    LoadRules(FirewallConfig),
+    InterfaceRequest(NetInterfaceRequest),
+    InterfaceResponse(NetInterfaceResponse)
     // You can remove Ident(IdentityMessage) if Status handles registration
 }
 
-// ... other structs like ShutdownCommand and BlockAddressRule are fine ...
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct NetInterfaceRequest {
+    pub source: String,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct NetInterfaceResponse {
+    pub source: String,
+    pub interfaces: Vec<String>,
+}
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct StatusUpdate {
