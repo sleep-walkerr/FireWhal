@@ -1,11 +1,14 @@
 use std::time::Instant;
 use crate::ui::{debug_print::DebugPrintState, main_menu::MainMenuState, interface_selection::InterfaceList};
+use tokio::sync::mpsc;
+use firewhal_core::FireWhalMessage;
 
 #[derive(Debug)]
 pub struct App<'a> {
     pub titles: Vec<&'a str>,
     pub screen: AppScreen,
     pub index: usize,
+    pub to_zmq_tx: Option<mpsc::Sender<FireWhalMessage>>,
 
     // Screen-specific states
     pub main_menu: MainMenuState,
@@ -40,6 +43,7 @@ impl<'a> App<'a> {
 impl Default for App<'_> {
     fn default() -> Self {
         App {
+            to_zmq_tx: None,
             screen: AppScreen::default(),
             titles: vec![
                 "Status",

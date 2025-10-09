@@ -1,4 +1,6 @@
 use ratatui::{prelude::*, widgets::*};
+use tokio::sync::mpsc;
+use firewhal_core::FireWhalMessage;
 use crate::ui::app::App;
 
 #[derive(Debug, Default)]
@@ -9,6 +11,9 @@ pub struct InterfaceList {
 impl InterfaceList {
  pub fn add_interface(&mut self, interface: String) {
     self.interfaces.push(interface);
+ }
+ pub fn clear_interfaces(&mut self) {
+    self.interfaces.clear();
  }
 }
 

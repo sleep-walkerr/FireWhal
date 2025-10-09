@@ -27,6 +27,9 @@ use tokio::{
 use zmq;
 use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate};
 use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::Mutex;
+
+use crate::ui::app;
 
 // Upon entering the interface selection menu, have the TUI send a message requesting the interface list
 // The userspace loader receives the message, scans for interfaces, and then sends a request response
@@ -46,16 +49,6 @@ async fn main() -> Result<(), io::Error> {
     // `from_zmq_tx` is the `incoming_tx` for the ZMQ task.
     let ipc_connection = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx));
 
-    let ident_message = FireWhalMessage::Status(StatusUpdate {
-        component: "TUI".to_string(),
-        is_healthy: true,
-        message: "Ready".to_string(),
-    }
-    );
-    
-    // Unhandled error, needs to be fixed later
-    _ = to_zmq_tx.send(ident_message).await;
-
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -64,12 +57,64 @@ async fn main() -> Result<(), io::Error> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?; // ⬅ clear screen before drawing
 
-    let mut app = App::default();
+    // Main app variable needs multiple ownership, accomplished by Arc and Mutex
+    // Arc allows for multiple owners for a piece of data, and mutex is used to lock usage to one owner at a time
+    let app= Arc::new(Mutex::new(App::default())); 
+    // Add sender channel to app to allow interfaces to send IPC messages
+    app.lock().await.to_zmq_tx = Some(to_zmq_tx.clone());
+
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
 
+    // Incoming Message Processing
+    //--Clone reference to use in subroutine
+    let app_clone  = Arc::clone(&app);
+
+    // Craft Ident message
+    let ident_message = FireWhalMessage::Status(StatusUpdate {
+        component: "TUI".to_string(),
+        is_healthy: true,
+        message: "Ready".to_string(),
+    }
+    );
+    
+    // Send Ident Message
+    match to_zmq_tx.send(ident_message).await {
+        Ok(_) => {
+            let mut app_guard = app_clone.lock().await;
+            app_guard.debug_print.add_message("[TUI]: Successfully sent ident message".to_string());
+        },
+        Err(e) => {
+            let mut app_guard = app_clone.lock().await;
+            app_guard.debug_print.add_message(format!("[TUI]: Failed to send ident message with error {}", e));
+        }
+    }
+    
+    tokio::spawn(async move {
+        while let Some(message) = from_zmq_rx.recv().await {
+            let mut app_guard = app_clone.lock().await;
+            match message {
+                FireWhalMessage::Debug(msg) => {
+                    let formatted_msg = format!("[{}]: {}", msg.source, msg.content);
+                    app_guard.debug_print.add_message(formatted_msg);
+                }
+                FireWhalMessage::InterfaceResponse(response) => {
+                    if response.source == "Firewall" {
+                        // Clear vector entries
+                        app_guard.interface_selection.clear_interfaces();
+                        // Add new entries
+                        for interface in response.interfaces {app_guard.interface_selection.add_interface(interface);}
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
     loop {
-        terminal.draw(|f| ui::render(f, &mut app))?;
+        let mut app_guard = app.lock().await;
+
+        terminal.draw(|f| ui::render(f, &mut app_guard))?;
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -80,10 +125,10 @@ async fn main() -> Result<(), io::Error> {
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Tab => {
-                        app.next_screen();
+                        app_guard.next_screen();
                         // THIS CODE CAUSES BUSY WAITING
                         // Match to correct interface and then perform relevant operations
-                        match app.screen {
+                        match app_guard.screen {
                             AppScreen::InterfaceSelection => {
                                 // Send a interface request message to firewhal-kernel if screen is interface selection
                                 // Craft request message
@@ -111,40 +156,11 @@ async fn main() -> Result<(), io::Error> {
         }
         if last_tick.elapsed() >= tick_rate {
             // Delegate updates to the active screen's state
-            match app.screen {
-                AppScreen::MainMenu => app.main_menu.update_progress(),
+            match app_guard.screen {
+                AppScreen::MainMenu => app_guard.main_menu.update_progress(),
                 _ => { /* Other screens might have their own updates here */ }
             }
             last_tick = Instant::now();
-        }
-
-
-        
-
-        // Change this to Some(message) later
-        // Process all pending messages from the ZMQ task. 
-        loop {
-            match from_zmq_rx.try_recv() {
-                Ok(FireWhalMessage::Debug(msg)) => {
-                    // Add the formatted message to the app's state.
-                    let formatted_msg = format!("[{}]: {}", msg.source, msg.content);
-                    app.debug_print.add_message(formatted_msg);
-                }
-                Ok(FireWhalMessage::InterfaceResponse(response)) => {
-                    if response.source == "Firewall" {
-                        for interface in response.interfaces {app.interface_selection.add_interface(interface)}
-                    }
-                }
-                Ok(_) => { /* Ignore other message types for now */ }
-                Err(TryRecvError::Empty) => {
-                    // No more messages in the queue.
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    // The ZMQ task has shut down, so we should exit.
-                    break;
-                }
-            }
         }
     }
 
