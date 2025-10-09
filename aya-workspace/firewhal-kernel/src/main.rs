@@ -213,9 +213,6 @@ async fn main() -> Result<(), anyhow::Error> {
                     },
                     FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interfaces
                         info!("[Kernel] Received interface request from TUI.");
-                        
-                        // --- THIS IS THE FIX ---
-                        // Move the blocking `get_all_interfaces` call to a blocking-safe thread.
                         let interface_list = match task::spawn_blocking(get_all_interfaces).await {
                             Ok(list) => list,
                             Err(e) => {
@@ -231,6 +228,11 @@ async fn main() -> Result<(), anyhow::Error> {
                         
                         if let Err(e) = to_zmq_tx.send(response).await {
                             warn!("[Kernel] Failed to send interface list: {}", e);
+                        }
+                    },
+                    FireWhalMessage::UpdateInterfaces(update) => {
+                        if update.source == "TUI" {
+                            info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
                         }
                     },
                     _ => {}

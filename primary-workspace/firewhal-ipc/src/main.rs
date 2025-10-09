@@ -121,6 +121,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            // Update Interfaces message processing
+            FireWhalMessage::UpdateInterfaces(update) => {
+                source_component = update.source.clone();
+                if source_component == "TUI" {
+                    if let Some(firewall_identity) = clients.get("Firewall") {
+                        println!("[ROUTER] Forwarding UpdateInterfaces command to firewall.");
+                        router.send(firewall_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?
+                    } else {
+                        eprintln!("[ROUTER] Received UpdateInterfaces command, but firewall client is not registered!");
+                    }
+                }
+            }
             _ => {
                 // For other messages, we might not know the source component unless it's registered.
                 // We'll just identify it by its raw identity for the debug message.

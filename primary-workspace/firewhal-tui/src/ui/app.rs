@@ -1,5 +1,5 @@
 use std::time::Instant;
-use crate::ui::{debug_print::DebugPrintState, main_menu::MainMenuState, interface_selection::InterfaceList};
+use crate::ui::{debug_print::DebugPrintState, interface_selection::{InterfaceList, InterfaceListState, ToggledInterfaces}, main_menu::MainMenuState};
 use tokio::sync::mpsc;
 use firewhal_core::FireWhalMessage;
 
@@ -11,9 +11,12 @@ pub struct App<'a> {
     pub to_zmq_tx: Option<mpsc::Sender<FireWhalMessage>>,
 
     // Screen-specific states
+    //Check and see if irrelevant data is being used on unreleated screens
     pub main_menu: MainMenuState,
     pub debug_print: DebugPrintState,
-    pub interface_selection: InterfaceList,
+    pub available_interfaces: InterfaceList,
+    pub interface_list_state: InterfaceListState,
+    pub toggled_interfaces: ToggledInterfaces
 }
 
 #[derive(Debug)]
@@ -54,7 +57,9 @@ impl Default for App<'_> {
             index: 0,
             main_menu: MainMenuState::default(),
             debug_print: DebugPrintState::default(),
-            interface_selection: InterfaceList::default()
+            available_interfaces: InterfaceList::default(),
+            interface_list_state: InterfaceListState::default(),
+            toggled_interfaces: ToggledInterfaces::default()
         }
     }
 }

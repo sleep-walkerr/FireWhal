@@ -82,7 +82,7 @@ async fn main() -> Result<(), io::Error> {
     match to_zmq_tx.send(ident_message).await {
         Ok(_) => {
             let mut app_guard = app_clone.lock().await;
-            app_guard.debug_print.add_message("[TUI]: Successfully sent ident message".to_string());
+            app_guard.debug_print.add_message("[TUI]: Identity Message Sent".to_string());
         },
         Err(e) => {
             let mut app_guard = app_clone.lock().await;
@@ -101,9 +101,9 @@ async fn main() -> Result<(), io::Error> {
                 FireWhalMessage::InterfaceResponse(response) => {
                     if response.source == "Firewall" {
                         // Clear vector entries
-                        app_guard.interface_selection.clear_interfaces();
+                        app_guard.available_interfaces.clear_interfaces();
                         // Add new entries
-                        for interface in response.interfaces {app_guard.interface_selection.add_interface(interface);}
+                        for interface in response.interfaces {app_guard.available_interfaces.add_interface(interface);}
                     }
                 }
                 _ => {}
@@ -136,9 +136,11 @@ async fn main() -> Result<(), io::Error> {
                                     source: "TUI".to_string(),
                                 });
                                 // Send request message
-                                if let Err(e) = to_zmq_tx.send(request_message).await {
-                                    eprintln!("Failed to send interface request: {}", e);
-                                }
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(request_message) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send InterfaceRequest message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Interface Selection found no zmq sender".to_string()); }
                             },
                             // AppScreen::MainMenu => {
                             //     if last_tick.elapsed() >= tick_rate {
@@ -147,10 +149,20 @@ async fn main() -> Result<(), io::Error> {
                             //     }
                                 
                             // },
-                            _ => {}
+                            _ => { 
+                            }
                         }
                     },
-                    _ => {}
+                    _ => { // For other keys used in specific interfaces
+                        match app_guard.screen {
+                                    AppScreen::InterfaceSelection => {
+                                        ui::interface_selection::handle_key_event(key.code, &mut app_guard);
+                                    },
+                                    AppScreen::MainMenu => {
+                                    },
+                                    _ => {}
+                                }
+                    }
                 }
             }
         }

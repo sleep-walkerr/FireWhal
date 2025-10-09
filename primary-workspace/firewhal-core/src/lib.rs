@@ -166,9 +166,17 @@ pub enum FireWhalMessage {
     Debug(DebugMessage),
     LoadRules(FirewallConfig),
     InterfaceRequest(NetInterfaceRequest),
-    InterfaceResponse(NetInterfaceResponse)
+    InterfaceResponse(NetInterfaceResponse),
+    UpdateInterfaces(UpdateInterfaces),
     // You can remove Ident(IdentityMessage) if Status handles registration
 }
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct UpdateInterfaces {
+    pub source: String,
+    pub interfaces: Vec<String>,
+}
+
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct NetInterfaceRequest {
