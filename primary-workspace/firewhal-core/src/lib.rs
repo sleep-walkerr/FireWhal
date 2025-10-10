@@ -37,6 +37,7 @@ impl std::error::Error for IpcError {}
 pub async fn zmq_client_connection(
     mut to_zmq_rx: mpsc::Receiver<FireWhalMessage>,
     from_zmq_tx: mpsc::Sender<FireWhalMessage>,
+    mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     let config = bincode::config::standard().with_big_endian();
@@ -53,7 +54,12 @@ pub async fn zmq_client_connection(
 
     loop {
         tokio::select! {
-            // Branch 1: Handle messages from the component TO the router
+            // Branch 1: Listen for shutdown signal.
+            _ = shutdown_rx.recv() => {
+                println!("[IPC Client] Shutdown signal received. Terminating.");
+                break; // Exit the loop
+            },
+            // Branch 2: Handle messages from the component TO the router
             Some(message) = to_zmq_rx.recv() => {
                 if let Ok(payload) = bincode::encode_to_vec(&message, config) {
                     if socket.send(&payload, 0).is_err() {
@@ -62,7 +68,7 @@ pub async fn zmq_client_connection(
                 }
             },
 
-            // Branch 2: Poll for messages FROM the router
+            // Branch 3: Poll for messages FROM the router
             _ = sleep(Duration::from_millis(1)) => {
                 // Use a loop to drain any messages that have queued up
                 loop {
@@ -96,6 +102,8 @@ pub async fn zmq_client_connection(
             }
         }
     }
+    println!("[IPC Client] Disconnected.");
+    Ok(())
 }
 
 /// Serializes and sends any AppMessage over a ZMQ socket using bincode 2.0.

@@ -43,11 +43,13 @@ async fn main() -> Result<(), io::Error> {
     // `from_zmq_rx` is for the TUI to receive messages FROM the ZMQ task.
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
 
     // Spawn the ZMQ task.
     // `to_zmq_rx` is the `outgoing_rx` for the ZMQ task.
     // `from_zmq_tx` is the `incoming_tx` for the ZMQ task.
-    let ipc_connection = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx));
+    let ipc_connection = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, shutdown_rx));
 
     // Setup terminal
     enable_raw_mode()?;
@@ -183,8 +185,11 @@ async fn main() -> Result<(), io::Error> {
 
     // 3. Send the shutdown signal
     println!("TUI exited. Shutting down ZMQ task...");
+    shutdown_tx.send(()).unwrap();
     drop(to_zmq_tx); // This will cause the zmq_client_connection to exit its loop.
 
+    //NOT WAITING ON THIS MEANS THAT THE ZMQ FUNCTION IS BEING FORCEFULLY SHUTDOWN
+    //This is happening everywhere and needs to be fixed
     // 4. Wait for the ZMQ task to finish cleanly
     if let Err(e) = ipc_connection.await {
         eprintln!("ZMQ task did not shut down cleanly: {:?}", e);

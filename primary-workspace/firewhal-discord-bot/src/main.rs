@@ -5,7 +5,7 @@ use serenity::model::gateway::{GatewayIntents, Ready};
 use serenity::model::id::UserId;
 use serenity::prelude::*;
 use dotenvy::dotenv;
-use tokio::sync::{mpsc, Mutex, oneshot};
+use tokio::sync::{mpsc, Mutex, oneshot, broadcast};
 
 // Import the necessary items from your shared core library
 use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, StatusUpdate};
@@ -65,9 +65,10 @@ impl EventHandler for Handler {
         // Create the channels required by the unified IPC function.
         let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
         let (from_zmq_tx, from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
         // Spawn the unified ZMQ connection task.
-        tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx));
+        tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, shutdown_rx));
 
         // Spawn our new message handler task.
         tokio::spawn(message_handler(from_zmq_rx, ctx.clone()));

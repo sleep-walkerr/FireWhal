@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::{
     signal,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Mutex, broadcast},
     task, time,
 };
 
@@ -110,7 +110,8 @@ async fn main() -> Result<(), anyhow::Error> {
     env_logger::Builder::new().filter_level(LevelFilter::Info).init();
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
-    let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone()));
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+    let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx));
     to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
     let bpf = Arc::new(Mutex::new(Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?));
     if let Err(e) = EbpfLogger::init(&mut *bpf.lock().await) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
@@ -249,7 +250,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
-    drop(to_zmq_tx);
+    shutdown_tx.send(()).unwrap();
     let _ = time::timeout(time::Duration::from_secs(2), zmq_handle).await;
 
     Ok(())

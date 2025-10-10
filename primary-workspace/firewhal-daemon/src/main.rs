@@ -167,7 +167,8 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
     let children = Arc::new(Mutex::new(HashMap::new()));
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
-    let zmq_task_handle = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx));
+    let (zmq_shutdown_tx, zmq_shutdown_rx) = broadcast::channel::<()>(1);
+    let zmq_task_handle = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, zmq_shutdown_rx));
     let ident_msg = FireWhalMessage::Status(StatusUpdate {
         component: "Daemon".to_string(),
         is_healthy: true,
@@ -273,7 +274,8 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
     println!("[Supervisor] Main loop exited. Cleaning up remaining tasks...");
 
     // 1. Abort the ZMQ connection task. This will forcefully cancel it.
-    zmq_task_handle.abort();
+    zmq_shutdown_tx.send(()).unwrap();
+
 
     // 2. We can optionally await the handle to ensure it has shut down.
     //    The result will be an error because we aborted it, which is expected.
