@@ -54,6 +54,30 @@ fn get_all_interfaces() -> Vec<String> {
         .collect()
 }
 
+async fn attach_programs(bpf: Arc<Mutex<Ebpf>>, interfaces: Vec<String>, cgroup_file: File) -> Result<(), anyhow::Error>{
+    let mut bpf_guard = bpf.lock().await;
+
+    // XDP 
+    info!("[Kernel] Applying XDP programs to interfaces {}...", interfaces.join(","));
+    let xdp_program: &mut Xdp = bpf_guard.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
+    xdp_program.load().unwrap();
+
+    for interface in interfaces {
+        xdp_program.attach(&interface, XdpFlags::SKB_MODE).unwrap();
+    }
+    info!("[Kernel] XDP programs applied.");
+
+
+    // CGROUP
+    info!("[Kernel] Applying CGROUP programs...");
+    let egress_connect4_program: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
+    egress_connect4_program.load().unwrap();
+    _ = egress_connect4_program.attach(&cgroup_file, CgroupAttachMode::Single);
+    info!("[Kernel] CGROUP programs applied.");
+
+    Ok(())
+}
+
 async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
     info!("[Kernel] [Rule] Applying ruleset...");
     let mut bpf_guard = bpf.lock().await;
@@ -117,22 +141,13 @@ async fn main() -> Result<(), anyhow::Error> {
     if let Err(e) = EbpfLogger::init(&mut *bpf.lock().await) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
 
     // Attach eBPF programs...
-    {
-        let mut bpf_guard = bpf.lock().await;
-        let prog: &mut Xdp = bpf_guard.program_mut("firewhal_xdp").unwrap().try_into()?;
-        prog.load()?;
-        //Test Changes
-        //prog.attach(&opt.iface, XdpFlags::default()).context("failed to attach XDP program")?;
-        prog.attach("wlp5s0", XdpFlags::SKB_MODE).context("failed to attach XDP program")?;
-        prog.attach("eth0", XdpFlags::SKB_MODE).context("failed to attach XDP program")?;
-    }
-    {
-        let cgroup_file = File::open(&opt.cgroup_path)?;
-        let mut bpf_guard = bpf.lock().await;
-        let prog: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_egress_connect4").unwrap().try_into()?;
-        prog.load()?;
-        prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
-    }
+    let bpf_clone = Arc::clone(&bpf);
+    let cgroup_file = File::open(&opt.cgroup_path)?;
+    // Fix to populate with list received from FireWhalConfig later
+    let interfaces = get_all_interfaces();
+
+    attach_programs(bpf_clone, interfaces, cgroup_file).await;
+
     
     let bpf_clone = Arc::clone(&bpf);
 // --- Block Event Handling ---
@@ -234,6 +249,10 @@ async fn main() -> Result<(), anyhow::Error> {
                     FireWhalMessage::UpdateInterfaces(update) => {
                         if update.source == "TUI" {
                             info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
+                            let cgroup_file = File::open(&opt.cgroup_path)?;
+                            if let Err(e) = attach_programs(Arc::clone(&bpf), update.interfaces, cgroup_file).await {
+                                warn!("[Kernel] Failed to attach programs: {}", e);
+                            }
                         }
                     },
                     _ => {}
