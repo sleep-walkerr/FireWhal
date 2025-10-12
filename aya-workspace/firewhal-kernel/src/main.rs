@@ -1,4 +1,3 @@
-use anyhow::Context;
 use aya::{
     include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{xdp::{XdpLink, XdpLinkId}, CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags}, util::online_cpus, Ebpf
 };
@@ -7,7 +6,7 @@ use clap::Parser;
 use log::{info, warn, LevelFilter};
 use core::borrow;
 use std::{
-    collections::{HashSet, HashMap}, fs::File, hash::Hash, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration
+    collections::{HashMap, HashSet}, fmt::format, fs::File, hash::Hash, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration
 };
 use bytes::BytesMut;
 use tokio::{
@@ -15,12 +14,9 @@ use tokio::{
     sync::{broadcast, mpsc, Mutex},
     task::{self}, time::{self, timeout},
 };
-use futures::{stream, StreamExt};
-use async_stream::stream;
-use std::boxed::Box;
 
 use firewhal_core::{
-    zmq_client_connection, BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, Rule,
+    BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, Rule,
     StatusUpdate, NetInterfaceRequest, NetInterfaceResponse,
 };
 use firewhal_kernel_common::{BlockEvent, RuleAction, RuleKey};
@@ -221,7 +217,23 @@ async fn main() -> Result<(), anyhow::Error> {
                     let events = buf.read_events(&mut buffers).await.unwrap();
                     for i in 0..events.read {
                         if let Ok(event) = read_from_buffer::<BlockEvent>(&buffers[i]) {
-                            info!("[Kernel] Event found");
+                            //Format event
+                            let formatted_event = format!(
+                                "Blocked {:?} -> PID: {}, Dest: {}:{}",
+                                event.reason,
+                                event.pid,
+                                event.dest_addr,
+                                event.dest_port
+
+                            );
+                            // Send event
+                            let debug_message = DebugMessage {
+                                source: "Firewall".to_string(),
+                                content: formatted_event,
+                            };
+                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::Debug(debug_message)).await {
+                                warn!("[Events] Failed to send block event: {}", e);
+                            }
                         }
                     }
                 }
