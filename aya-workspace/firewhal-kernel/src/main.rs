@@ -1,16 +1,13 @@
 use anyhow::Context;
 use aya::{
-    include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags}, util::online_cpus, Ebpf
+    include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{xdp::{XdpLink, XdpLinkId}, CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags}, util::online_cpus, Ebpf
 };
 use aya_log::EbpfLogger;
 use clap::Parser;
 use log::{info, warn, LevelFilter};
 use core::borrow;
 use std::{
-    fs::File,
-    mem::{self, MaybeUninit},
-    net::{IpAddr, Ipv4Addr},
-    sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration,
+    collections::{HashSet, HashMap}, fs::File, hash::Hash, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration
 };
 use bytes::BytesMut;
 use tokio::{
@@ -38,13 +35,11 @@ struct Opt {
     iface: String,
 }
 
-enum BpfCommand {
-    ApplyRuleset(FirewallConfig),
-    AttachPrograms {
-        interfaces: Vec<String>,
-        cgroup_file: File,
-    },
+pub struct ActiveXdpInterfaces {
+    active_links: HashMap<String, XdpLinkId>
 }
+
+
 
 fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
     let size = mem::size_of::<T>();
@@ -64,24 +59,72 @@ fn get_all_interfaces() -> Vec<String> {
         .collect()
 }
 
-async fn attach_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, interfaces: Vec<String>, cgroup_file: File) -> Result<(), anyhow::Error>{
+async fn attach_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>, active_xdp_programs: Arc<Mutex<ActiveXdpInterfaces>>, cgroup_file: File) -> Result<(), anyhow::Error>{
 
     let mut bpf = bpf.lock().await;
-    // XDP 
-    info!("[Kernel] Applying XDP programs to interfaces {}...", interfaces.join(","));
-    let xdp_program: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
-    xdp_program.load().unwrap();
+    let mut active_xdp_programs = active_xdp_programs.lock().await;
 
-    for interface in interfaces {
-        xdp_program.attach(&interface, XdpFlags::SKB_MODE).unwrap();
+
+    
+
+    // XDP 
+    info!("[Kernel] Applying XDP programs to interfaces {}...", updated_interfaces.join(","));
+    let xdp_program: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
+    let _ = xdp_program.load();
+
+
+
+    //Iterate
+    let new_set: HashSet<&String> = updated_interfaces.iter().collect();
+
+    // --- 1. Detach from interfaces that are no longer selected ---
+    
+    // First, find the names of all interfaces we need to detach from.
+    // let interfaces_to_remove: Vec<String> = active_xdp_programs.active_links
+    //     .keys()
+    //     .filter(|&iface_name| !new_set.contains(iface_name))
+    //     .cloned()
+    //     .collect();
+
+    let interfaces_to_remove: Vec<String> = active_xdp_programs.active_links.keys().filter(|&iface_name| !updated_interfaces.contains(iface_name)).cloned().collect();
+    
+    // Now, iterate through that list, remove each from the map, and detach.
+    info!("Interfaces to Remove: {:?}", interfaces_to_remove);
+    for iface in interfaces_to_remove {
+        // .remove() gives us ownership of the XdpLinkId.
+        if let Some(link_id) = active_xdp_programs.active_links.remove(&iface) {
+            info!("[Kernel] Detaching XDP from '{}'...", iface);
+            if let Err(e) = xdp_program.detach(link_id) {
+                warn!("[Kernel] Failed to detach from '{}': {}", iface, e);
+            }
+        }
     }
+
+    // --- 2. Attach to new interfaces that were not previously active ---
+    for iface in updated_interfaces {
+        // If our map of active links DOES NOT already contain this interface, attach it.
+        if !active_xdp_programs.active_links.contains_key(&iface) {
+            info!("[Kernel] Attaching XDP to '{}'...", iface);
+            match xdp_program.attach(&iface, XdpFlags::default()) {
+                Ok(link_id) => {
+                    // Success! Save the new link_id in our map.
+                    active_xdp_programs.active_links.insert(iface.clone(), link_id);
+                }
+                Err(e) => {
+                    warn!("[Kernel] Failed to attach to '{}': {}", iface, e);
+                }
+            }
+        }
+    }
+
+
     info!("[Kernel] XDP programs applied.");
 
 
     // CGROUP
     info!("[Kernel] Applying CGROUP programs...");
     let egress_connect4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
-    egress_connect4_program.load().unwrap();
+    let _ = egress_connect4_program.load();
     _ = egress_connect4_program.attach(&cgroup_file, CgroupAttachMode::Single);
     info!("[Kernel] CGROUP programs applied.");
 
@@ -148,6 +191,8 @@ async fn main() -> Result<(), anyhow::Error> {
     let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx));
     to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;
+    let active_xdp_interfaces: Arc<Mutex<ActiveXdpInterfaces>> = Arc::new(Mutex::new(ActiveXdpInterfaces { active_links: HashMap::new() }));
+
     if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
 
     // 1. Load the bpf object. Make it mutable.
@@ -184,7 +229,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let cgroup_file = File::open(&opt.cgroup_path)?;
     // Fix to populate with list received from FireWhalConfig later
     let interfaces = get_all_interfaces();
-    attach_programs(Arc::clone(&bpf), interfaces, cgroup_file).await;
+    attach_programs(Arc::clone(&bpf), interfaces, active_xdp_interfaces.clone(), cgroup_file).await;
 
     
     // --- Main Event Loop and Shutdown logic ---
@@ -221,7 +266,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         // if update.source == "TUI" {
                             info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
                             let cgroup_file = File::open(&opt.cgroup_path)?;
-                            attach_programs(Arc::clone(&bpf), update.interfaces, cgroup_file).await;
+                            attach_programs(Arc::clone(&bpf), update.interfaces, active_xdp_interfaces.clone(), cgroup_file).await;
                         //}
                     },
                     _ => {}
