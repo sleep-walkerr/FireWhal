@@ -59,7 +59,7 @@ fn get_all_interfaces() -> Vec<String> {
         .collect()
 }
 
-async fn attach_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>, active_xdp_programs: Arc<Mutex<ActiveXdpInterfaces>>, cgroup_file: File) -> Result<(), anyhow::Error>{
+async fn attach_xdp_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>, active_xdp_programs: Arc<Mutex<ActiveXdpInterfaces>>) -> Result<(), anyhow::Error>{
 
     let mut bpf = bpf.lock().await;
     let mut active_xdp_programs = active_xdp_programs.lock().await;
@@ -121,13 +121,19 @@ async fn attach_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces:
     info!("[Kernel] XDP programs applied.");
 
 
+
+
+    Ok(())
+}
+
+async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file: File) -> Result<(), anyhow::Error>{
+    let mut bpf = bpf.lock().await;
     // CGROUP
     info!("[Kernel] Applying CGROUP programs...");
     let egress_connect4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
     let _ = egress_connect4_program.load();
     _ = egress_connect4_program.attach(&cgroup_file, CgroupAttachMode::Single);
     info!("[Kernel] CGROUP programs applied.");
-
     Ok(())
 }
 
@@ -229,7 +235,8 @@ async fn main() -> Result<(), anyhow::Error> {
     let cgroup_file = File::open(&opt.cgroup_path)?;
     // Fix to populate with list received from FireWhalConfig later
     let interfaces = get_all_interfaces();
-    attach_programs(Arc::clone(&bpf), interfaces, active_xdp_interfaces.clone(), cgroup_file).await;
+    attach_xdp_programs(Arc::clone(&bpf), interfaces, active_xdp_interfaces.clone()).await;
+    attach_cgroup_programs(Arc::clone(&bpf), cgroup_file).await;
 
     
     // --- Main Event Loop and Shutdown logic ---
@@ -265,8 +272,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     FireWhalMessage::UpdateInterfaces(update) => {
                         // if update.source == "TUI" {
                             info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
-                            let cgroup_file = File::open(&opt.cgroup_path)?;
-                            attach_programs(Arc::clone(&bpf), update.interfaces, active_xdp_interfaces.clone(), cgroup_file).await;
+                            attach_xdp_programs(Arc::clone(&bpf), update.interfaces, active_xdp_interfaces.clone()).await;
                         //}
                     },
                     _ => {}
