@@ -1,24 +1,26 @@
 use anyhow::Context;
 use aya::{
-    include_bytes_aligned,
-    maps::{HashMap as AyaHashMap, RingBuf},
-    programs::{CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags},
-    Ebpf,
+    include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags}, util::online_cpus, Ebpf
 };
 use aya_log::EbpfLogger;
 use clap::Parser;
 use log::{info, warn, LevelFilter};
+use core::borrow;
 use std::{
     fs::File,
     mem::{self, MaybeUninit},
     net::{IpAddr, Ipv4Addr},
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration,
 };
+use bytes::BytesMut;
 use tokio::{
     signal,
-    sync::{mpsc, Mutex, broadcast},
-    task, time,
+    sync::{broadcast, mpsc, Mutex},
+    task::{self}, time::{self, timeout},
 };
+use futures::{stream, StreamExt};
+use async_stream::stream;
+use std::boxed::Box;
 
 use firewhal_core::{
     zmq_client_connection, BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, Rule,
@@ -34,6 +36,14 @@ struct Opt {
     cgroup_path: String,
     #[clap(short, long, default_value = "wlp5s0")]
     iface: String,
+}
+
+enum BpfCommand {
+    ApplyRuleset(FirewallConfig),
+    AttachPrograms {
+        interfaces: Vec<String>,
+        cgroup_file: File,
+    },
 }
 
 fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
@@ -54,12 +64,12 @@ fn get_all_interfaces() -> Vec<String> {
         .collect()
 }
 
-async fn attach_programs(bpf: Arc<Mutex<Ebpf>>, interfaces: Vec<String>, cgroup_file: File) -> Result<(), anyhow::Error>{
-    let mut bpf_guard = bpf.lock().await;
+async fn attach_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, interfaces: Vec<String>, cgroup_file: File) -> Result<(), anyhow::Error>{
 
+    let mut bpf = bpf.lock().await;
     // XDP 
     info!("[Kernel] Applying XDP programs to interfaces {}...", interfaces.join(","));
-    let xdp_program: &mut Xdp = bpf_guard.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
+    let xdp_program: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
     xdp_program.load().unwrap();
 
     for interface in interfaces {
@@ -70,7 +80,7 @@ async fn attach_programs(bpf: Arc<Mutex<Ebpf>>, interfaces: Vec<String>, cgroup_
 
     // CGROUP
     info!("[Kernel] Applying CGROUP programs...");
-    let egress_connect4_program: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
+    let egress_connect4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
     egress_connect4_program.load().unwrap();
     _ = egress_connect4_program.attach(&cgroup_file, CgroupAttachMode::Single);
     info!("[Kernel] CGROUP programs applied.");
@@ -78,11 +88,11 @@ async fn attach_programs(bpf: Arc<Mutex<Ebpf>>, interfaces: Vec<String>, cgroup_
     Ok(())
 }
 
-async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
+async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
+    let mut bpf = bpf.lock().await;
     info!("[Kernel] [Rule] Applying ruleset...");
-    let mut bpf_guard = bpf.lock().await;
 
-    if let Ok(mut blocklist) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf_guard.map_mut("RULES").unwrap()) {
+    if let Ok(mut blocklist) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("RULES").unwrap()) {
 
     for rule in config.rules {
         let dest_is_v4 = rule.dest_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
@@ -132,86 +142,49 @@ async fn apply_ruleset(bpf: Arc<Mutex<Ebpf>>, config: FirewallConfig) -> Result<
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
     env_logger::Builder::new().filter_level(LevelFilter::Info).init();
-    let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
+    let (mut to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
     let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx));
     to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
-    let bpf = Arc::new(Mutex::new(Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?));
-    if let Err(e) = EbpfLogger::init(&mut *bpf.lock().await) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
+    let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;
+    if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
 
-    // Attach eBPF programs...
-    let bpf_clone = Arc::clone(&bpf);
+    // 1. Load the bpf object. Make it mutable.
+    if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
+
+    // 2. Take ownership of the EVENTS map and move it to the event handler task.
+    let events_map = bpf.take_map("EVENTS").ok_or_else(|| anyhow::anyhow!("Failed to find EVENTS map"))?;
+    let zmq_tx_clone = to_zmq_tx.clone();
+    tokio::spawn(async move {
+        info!("[Events] Started listening for block events from the kernel.");
+        let mut perf_array = AsyncPerfEventArray::try_from(events_map).unwrap();
+
+        for cpu_id in online_cpus().unwrap() {
+            let mut buf = perf_array.open(cpu_id, None).unwrap();
+            let task_zmq_tx = zmq_tx_clone.clone();
+
+            tokio::spawn(async move {
+                let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
+                loop {
+                    let events = buf.read_events(&mut buffers).await.unwrap();
+                    for i in 0..events.read {
+                        if let Ok(event) = read_from_buffer::<BlockEvent>(&buffers[i]) {
+                            info!("[Kernel] Event found");
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    // 3. Wrap the remaining bpf object in Arc<Mutex> to be shared for rule application.
+    let bpf = Arc::new(Mutex::new(bpf));
+
     let cgroup_file = File::open(&opt.cgroup_path)?;
     // Fix to populate with list received from FireWhalConfig later
     let interfaces = get_all_interfaces();
-
-    attach_programs(bpf_clone, interfaces, cgroup_file).await;
-
-    
-    let bpf_clone = Arc::clone(&bpf);
-// --- Block Event Handling ---
-    
-        // --- Block Event Handling: Final Architecture ---
-
-    // 1. Create an internal channel to pass parsed events.
-    let (event_tx, mut event_rx) = mpsc::channel::<BlockEvent>(1024); // Increased buffer
-    
-    let shutting_down = Arc::new(AtomicBool::new(false));
-
-
-    // 2. Spawn the SENDER task (remains async).
-    // This task's only job is to receive events and send them over ZMQ.
-    let zmq_tx_clone_sender = to_zmq_tx.clone();
-    tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            let reason = event.reason;
-            let pid = event.pid;
-            let dest_ip = event.dest_addr;
-            let dest_port = u16::from_be(event.dest_port);
-            let content = format!("Blocked {:?} -> PID: {}, Dest: {}:{}", reason, pid, dest_ip, dest_port);
-            info!("[Events] {}", content);
-
-            let ipc_msg = FireWhalMessage::Debug(DebugMessage { source: "FirewallEvent".to_string(), content });
-            if zmq_tx_clone_sender.send(ipc_msg).await.is_err() {
-                warn!("[Events] ZMQ channel to router is closed, exiting sender task.");
-                break;
-            }
-        }
-    });
-
-
-// 3. Spawn the READER task in a dedicated blocking thread.
-    let bpf_clone_reader = Arc::clone(&bpf);
-    let reader_shutdown_flag = Arc::clone(&shutting_down);
-
-
-    let reader_handle = task::spawn_blocking(move || {
-        info!("[Reader] Started listening for block events from the kernel.");
-
-        // --- THIS IS THE FIX ---
-        // Acquire the lock and create the RingBuf handle ONCE, before the loop.
-        let mut bpf_guard = bpf_clone_reader.blocking_lock();
-        let map = aya::Ebpf::map_mut(&mut bpf_guard, "EVENTS").unwrap();
-        let mut events = RingBuf::try_from(map).unwrap();
-
-        // This loop now continuously uses the SAME `events` handle.
-        while !reader_shutdown_flag.load(Ordering::SeqCst) {
-            // Check for a single event. The `next()` call advances the internal
-            // state of the `events` handle (moves the bookmark).
-            if let Some(buf) = events.next() {
-                if let Ok(event) = read_from_buffer::<BlockEvent>(&buf) {
-                    if event_tx.blocking_send(event).is_err() {
-                        warn!("[Reader] Event channel is closed, exiting reader task.");
-                        break; // Exit the loop
-                    }
-                }
-            } else {
-                // If there are no events, sleep the THREAD briefly to prevent burning CPU.
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
-    });
+    attach_programs(Arc::clone(&bpf), interfaces, cgroup_file).await;
 
     
     // --- Main Event Loop and Shutdown logic ---
@@ -223,9 +196,7 @@ async fn main() -> Result<(), anyhow::Error> {
             Some(message) = from_zmq_rx.recv() => {
                 match message {
                     FireWhalMessage::LoadRules(config) => {
-                        if let Err(e) = apply_ruleset(Arc::clone(&bpf), config).await {
-                            warn!("[Kernel] Failed to apply ruleset: {}", e);
-                        }
+                        apply_ruleset(Arc::clone(&bpf), config).await?;
                     },
                     FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interfaces
                         info!("[Kernel] Received interface request from TUI.");
@@ -247,13 +218,11 @@ async fn main() -> Result<(), anyhow::Error> {
                         }
                     },
                     FireWhalMessage::UpdateInterfaces(update) => {
-                        if update.source == "TUI" {
+                        // if update.source == "TUI" {
                             info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
                             let cgroup_file = File::open(&opt.cgroup_path)?;
-                            if let Err(e) = attach_programs(Arc::clone(&bpf), update.interfaces, cgroup_file).await {
-                                warn!("[Kernel] Failed to attach programs: {}", e);
-                            }
-                        }
+                            attach_programs(Arc::clone(&bpf), update.interfaces, cgroup_file).await;
+                        //}
                     },
                     _ => {}
                 }
@@ -263,9 +232,9 @@ async fn main() -> Result<(), anyhow::Error> {
         };
     }
     info!("[Kernel] Shutting down tasks...");
-    shutting_down.store(true, Ordering::SeqCst);
+    //shutting_down.store(true, Ordering::SeqCst);
 
-    reader_handle.await?;
+    //reader_handle.await?;
 
 
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");

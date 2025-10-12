@@ -84,3 +84,5 @@ pub struct BlockEvent {
 
 // This part stays the same
 unsafe impl Plain for BlockEvent {}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for BlockEvent {}

@@ -11,7 +11,7 @@ use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_get_current_pid_tgid,
     macros::{cgroup_sock_addr, map, xdp},
-    maps::{HashMap, RingBuf}, // <-- NEW: Import RingBuf
+    maps::{HashMap, PerfEventArray, RingBuf}, // <-- NEW: Import RingBuf
     programs::{SockAddrContext, XdpContext}, EbpfContext,
 };
 use aya_log_ebpf::info;
@@ -33,7 +33,8 @@ static mut PORT_BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0)
 static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0);
 
 #[map]
-static mut EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0); // 256KB buffer
+static mut EVENTS: PerfEventArray<BlockEvent> = PerfEventArray::new(0);
+
 
 #[map]
 static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
@@ -83,7 +84,7 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
                     dest_addr: IpAddr::V4(ipv4_hdr.dst_addr()),
                     dest_port: 0,
                 };
-                unsafe { EVENTS.output(&event, 0) };
+                unsafe { EVENTS.output(&ctx,&event, 0) };
                 return Ok(xdp_action::XDP_DROP);
             }
         }
@@ -176,28 +177,24 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
         if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
             if matches!(action.action, Action::Block) {
                 info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
-                if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
-                    info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
-                }
+                unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
                 return Ok(0); // Block
             }
         } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
             if matches!(action.action, Action::Block) {
                 info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
-                if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
-                    info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
-                }
+                unsafe { EVENTS.output(&ctx, &block_report_event, 0) } {
                 return Ok(0); // Block
             }
         } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
             if matches!(action.action, Action::Block) {
                 info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
-                if let Err(_) = unsafe { EVENTS.output(&block_report_event, 0) } {
-                    info!(&ctx, "Failed to send block event to userspace (buffer may be full)");
-                }
+                unsafe { EVENTS.output(&ctx, &block_report_event, 0) } 
+
                 return Ok(0); // Block
             }
         }
+    }
         Ok(1) // Allow the connection
     }();
 
@@ -206,6 +203,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
         Err(ret) => ret,
     }
 }
+
 
 
 #[cgroup_sock_addr(sendmsg4)]
@@ -232,7 +230,7 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
                 dest_addr:IpAddr::V4(Ipv4Addr::from(dest_addr.to_be())),
                 dest_port: dest_port_host,
             };
-            unsafe { EVENTS.output(&block_report_event, 0) };
+            unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
             // info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
             return Ok(0); // Block the connection
         }
@@ -272,7 +270,7 @@ let result = || -> Result<i32, i32> {
                 dest_addr:IpAddr::V4(Ipv4Addr::from(dest_addr.to_be())),
                 dest_port: dest_port_host,
             };
-            unsafe { EVENTS.output(&block_event_message, 0) };
+            unsafe { EVENTS.output(&ctx, &block_event_message, 0) };
 
             info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
             return Ok(0); // Block the connection
