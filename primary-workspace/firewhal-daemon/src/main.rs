@@ -33,7 +33,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, StatusUpdate, FirewallConfig};
+use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, FirewallConfig, StatusPong, StatusUpdate};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -168,7 +168,7 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
     let (zmq_shutdown_tx, zmq_shutdown_rx) = broadcast::channel::<()>(1);
-    let zmq_task_handle = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, zmq_shutdown_rx));
+    let zmq_task_handle = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, zmq_shutdown_rx, "Daemon".to_string()));
     let ident_msg = FireWhalMessage::Status(StatusUpdate {
         component: "Daemon".to_string(),
         is_healthy: true,
@@ -176,6 +176,7 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
     });
     to_zmq_tx.send(ident_msg).await?;
     let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
+
     
     // ... all the code for launching child processes remains the same ...
     let mut children_guard = children.lock().await;
@@ -236,6 +237,7 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
     println!("[Supervisor] All components launched. Monitoring for messages and signals...");
 
     // 2. The main loop now only handles incoming messages and the shutdown signal.
+    // Clone receiver for receiving messages across arms
     loop {
         tokio::select! {
             // Biased select ensures we check for shutdown first if both are ready.
@@ -249,23 +251,36 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
 
             // Listen for incoming IPC messages.
             Some(message) = from_zmq_rx.recv() => {
-                if let FireWhalMessage::Status(status) = message {
-                    if status.component == "Firewall" && status.message == "Ready" {
-                        println!("[Supervisor] Firewall is ready. Loading and sending rules...");
-                        let rules_path = path::Path::new("/opt/firewhal/bin/firewall.rules");
-                        match load_rules(rules_path) {
-                            Ok(config) => {
-                                let msg = FireWhalMessage::LoadRules(config);
-                                if let Err(e) = to_zmq_tx.send(msg).await {
-                                    eprintln!("[Supervisor] FAILED to send rules: {}", e);
-                                } else {
-                                    println!("[Supervisor] Rules successfully sent to firewall.");
+                match message {
+                    FireWhalMessage::Status(status) => {
+                        if status.component == "Firewall" && status.message == "Ready" {
+                            println!("[Supervisor] Firewall is ready. Loading and sending rules...");
+                            let rules_path = path::Path::new("/opt/firewhal/bin/firewall.rules");
+                            match load_rules(rules_path) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::LoadRules(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send rules: {}", e);
+                                    } else {
+                                        println!("[Supervisor] Rules successfully sent to firewall.");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load firewall rules: {}", e);
                                 }
                             }
-                            Err(e) => {
-                                eprintln!("[Supervisor] FAILED to load firewall rules: {}", e);
-                            }
                         }
+                    }
+                    FireWhalMessage::Ping(_) => {
+                        let pong_message = FireWhalMessage::Pong( StatusPong {
+                            source: "Daemon".to_string()
+                        });
+                        if let Err(e) = to_zmq_tx.send(pong_message).await {
+                            eprintln!("[Supervisor] FAILED to send pong: {}", e);
+                        }
+                    }
+                    _ => {
+
                     }
                 }
             },

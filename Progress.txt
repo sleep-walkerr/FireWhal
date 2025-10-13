@@ -24,3 +24,8 @@ For Next Meeting: 10/17/2025
 Progress Made:
 -- Fixed issue with daemon launching components without subgroup awareness for the user running the program. This was blocking the discord bot from sending IPC messages
 -- Updated firewall to load complete rules instead of just destination IP addresses. This was done using a hashmap that accepts a predefined rule structure
+-- Fixed zmq ipc function to allow for graceful shutdown, this was causing  the TUI to hang when the shutdown command was sent
+-- Rewrote firewhal-kernel userspace loader to eliminate deadlocks with asynchronous logic when using mutexes
+-- Added interface selection to TUI
+-- userspace loader now applies incoming firewall rules to the list of interfaces it receives from the TUI
+ 

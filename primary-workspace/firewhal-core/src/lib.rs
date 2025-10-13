@@ -38,6 +38,7 @@ pub async fn zmq_client_connection(
     mut to_zmq_rx: mpsc::Receiver<FireWhalMessage>,
     from_zmq_tx: mpsc::Sender<FireWhalMessage>,
     mut shutdown_rx: broadcast::Receiver<()>,
+    component: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     let config = bincode::config::standard().with_big_endian();
@@ -50,20 +51,20 @@ pub async fn zmq_client_connection(
     socket.set_immediate(false)?;
     socket.connect("ipc:///tmp/firewhal_ipc.sock")?;
 
-    println!("[IPC Client] Connected to router.");
+    println!("[{component} IPC Client] Connected to IPC router.");
 
     loop {
         tokio::select! {
             // Branch 1: Listen for shutdown signal.
             _ = shutdown_rx.recv() => {
-                println!("[IPC Client] Shutdown signal received. Terminating.");
+                println!("[{component} IPC Client] Shutdown signal received. Terminating.");
                 break; // Exit the loop
             },
             // Branch 2: Handle messages from the component TO the router
             Some(message) = to_zmq_rx.recv() => {
                 if let Ok(payload) = bincode::encode_to_vec(&message, config) {
                     if socket.send(&payload, 0).is_err() {
-                        eprintln!("[IPC Client] Failed to send message to router.");
+                        eprintln!("[{component} IPC Client] Failed to send message to router.");
                     }
                 }
             },
@@ -85,7 +86,7 @@ pub async fn zmq_client_connection(
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("[IPC Client] Received malformed message, discarding. Error: {}", e);
+                                    eprintln!("[{component} IPC Client] Received malformed message, discarding. Error: {}", e);
                                 }
                             }
                         },
@@ -94,7 +95,7 @@ pub async fn zmq_client_connection(
                             break;
                         },
                          Err(e) => {
-                            eprintln!("[IPC Client] ZMQ receive error: {}", e);
+                            eprintln!("[{component} IPC Client] ZMQ receive error: {}", e);
                             break;
                         }
                     }
@@ -102,7 +103,7 @@ pub async fn zmq_client_connection(
             }
         }
     }
-    println!("[IPC Client] Disconnected.");
+    println!("[{component} IPC Client] Disconnected.");
     Ok(())
 }
 
@@ -176,7 +177,18 @@ pub enum FireWhalMessage {
     InterfaceRequest(NetInterfaceRequest),
     InterfaceResponse(NetInterfaceResponse),
     UpdateInterfaces(UpdateInterfaces),
-    // You can remove Ident(IdentityMessage) if Status handles registration
+    Ping(StatusPing),
+    Pong(StatusPong)
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct StatusPing {
+    pub source: String,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct StatusPong {
+    pub source: String,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

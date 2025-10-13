@@ -49,7 +49,7 @@ async fn main() -> Result<(), io::Error> {
     // Spawn the ZMQ task.
     // `to_zmq_rx` is the `outgoing_rx` for the ZMQ task.
     // `from_zmq_tx` is the `incoming_tx` for the ZMQ task.
-    let ipc_connection = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, shutdown_rx));
+    let ipc_connection = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, shutdown_rx, "TUI".to_string()));
 
     // Setup terminal
     enable_raw_mode()?;
@@ -108,6 +108,9 @@ async fn main() -> Result<(), io::Error> {
                         for interface in response.interfaces {app_guard.available_interfaces.add_interface(interface);}
                     }
                 }
+                FireWhalMessage::Pong(pong) => {   
+                    app_guard.debug_print.add_message(format!("[{}]: Pong Received", pong.source));
+                }
                 _ => {}
             }
         }
@@ -144,13 +147,14 @@ async fn main() -> Result<(), io::Error> {
                                     }
                                 } else { _ = &app_guard.debug_print.add_message("Interface Selection found no zmq sender".to_string()); }
                             },
-                            // AppScreen::MainMenu => {
-                            //     if last_tick.elapsed() >= tick_rate {
-                            //         app.main_menu.update_progress();
-                            //         last_tick = Instant::now();
-                            //     }
-                                
-                            // },
+                            AppScreen::MainMenu => {
+                                // Send ping to components
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(FireWhalMessage::Ping(firewhal_core::StatusPing { source: "TUI".to_string() })) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send Ping message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Main Menu found no zmq sender".to_string()); }
+                            },
                             _ => { 
                             }
                         }

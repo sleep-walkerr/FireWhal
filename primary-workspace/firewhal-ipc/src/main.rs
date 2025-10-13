@@ -8,7 +8,7 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 // Import the necessary items from your common library
-use firewhal_core::{DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, StatusUpdate};
+use firewhal_core::{DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, StatusPing, StatusUpdate};
 use bincode::{self, config};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -81,6 +81,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Debug Message processing
             FireWhalMessage::Debug(DebugMessage { source, .. }) => {
                 source_component = source.clone();
+                // If a message somehow came from the TUI, don't forward it to itself
+                if source_component != "TUI" {
+                    // Check if the TUI client has registered itself yet.
+                    if let Some(tui_id) = clients.get("TUI") {
+                        // Create a new DebugMessage to forward. This ensures all forwarded
+                        // messages have a consistent, debug-friendly format.
+                        let debug_forward = FireWhalMessage::Debug(DebugMessage {
+                            source: source_component,
+                            content: format!("{:?}", message), // The content is the debug view of the original message
+                        });
+
+                        // Re-encode the new debug message to send to the TUI.
+                        if let Ok(forward_payload) = bincode::encode_to_vec(&debug_forward, bincode_config) {
+                            // Send as [tui_identity, payload]
+                            router.send(tui_id, zmq::SNDMORE)?;
+                            router.send(&forward_payload, 0)?;
+                        }
+                    }
+                }
             }
             // FireWall Config message processing
             FireWhalMessage::LoadRules(_) => {
@@ -134,31 +153,39 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            // Ping message processing
+            FireWhalMessage::Ping(StatusPing {source}) => {
+                source_component = source.clone();
+                if source_component == "TUI" {
+                    if let Some(firewall_identity) = clients.get("Firewall") {
+                        println!("[ROUTER] Forwarding Ping command to firewall.");
+                        router.send(firewall_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?
+                    } 
+                    if let Some(daemon_identity) = clients.get("Daemon") {
+                        println!("[ROUTER] Forwarding Ping command to daemon.");
+                        router.send(daemon_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?
+                    }
+                    if let Some(discord_identity) = clients.get("DiscordBot") {
+                        println!("[ROUTER] Forwarding Ping command to DiscordBot.");
+                        router.send(discord_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?
+                    }
+                }
+            }
+            // Pong message processing
+            FireWhalMessage::Pong(_) => {
+                if let Some(tui_identity) = clients.get("TUI") {
+                    println!("[ROUTER] Forwarding Pong command to TUI.");
+                    router.send(tui_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0)?
+                }
+            }
             _ => {
                 // For other messages, we might not know the source component unless it's registered.
                 // We'll just identify it by its raw identity for the debug message.
                 source_component = format!("{:?}", identity);
-            }
-        }
-        
-        // --- FORWARD DEBUG INFO TO TUI ---
-        // Don't forward messages that came from the TUI back to itself.
-        if source_component != "TUI" {
-            // Check if the TUI client has registered itself yet.
-            if let Some(tui_id) = clients.get("TUI") {
-                // Create a new DebugMessage to forward. This ensures all forwarded
-                // messages have a consistent, debug-friendly format.
-                let debug_forward = FireWhalMessage::Debug(DebugMessage {
-                    source: source_component,
-                    content: format!("{:?}", message), // The content is the debug view of the original message
-                });
-
-                // Re-encode the new debug message to send to the TUI.
-                if let Ok(forward_payload) = bincode::encode_to_vec(&debug_forward, bincode_config) {
-                    // Send as [tui_identity, payload]
-                    router.send(tui_id, zmq::SNDMORE)?;
-                    router.send(&forward_payload, 0)?;
-                }
             }
         }
     }

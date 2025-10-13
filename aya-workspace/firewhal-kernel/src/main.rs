@@ -16,8 +16,7 @@ use tokio::{
 };
 
 use firewhal_core::{
-    BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, Rule,
-    StatusUpdate, NetInterfaceRequest, NetInterfaceResponse,
+    BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate
 };
 use firewhal_kernel_common::{BlockEvent, RuleAction, RuleKey};
 
@@ -190,7 +189,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let (mut to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-    let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx));
+    let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx, "Firewall".to_string()));
     to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;
     let active_xdp_interfaces: Arc<Mutex<ActiveXdpInterfaces>> = Arc::new(Mutex::new(ActiveXdpInterfaces { active_links: HashMap::new() }));
@@ -286,6 +285,17 @@ async fn main() -> Result<(), anyhow::Error> {
                             info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
                             attach_xdp_programs(Arc::clone(&bpf), update.interfaces, active_xdp_interfaces.clone()).await;
                         //}
+                    },
+                    FireWhalMessage::Ping(ping) => {
+                        if ping.source == "TUI" {
+                            info!("[Kernel] Received status ping from TUI.");
+                            let response = FireWhalMessage::Pong(StatusPong {
+                                source: "Firewall".to_string()
+                            } );
+                            if let Err(e) = to_zmq_tx.send(response).await {
+                                warn!("[Kernel] Failed to send status update: {}", e);
+                            }
+                        }
                     },
                     _ => {}
                 }

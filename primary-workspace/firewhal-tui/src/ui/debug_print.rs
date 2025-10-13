@@ -44,7 +44,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             let source_style = match source {
                 "[Daemon]" => Style::default().fg(Color::Cyan),
                 "[Firewall]" => Style::default().fg(Color::Red),
-                "[Discord]" => Style::default().fg(Color::Blue),
+                "[DiscordBot]" => Style::default().fg(Color::Blue),
                 _ => Style::default().fg(Color::Yellow),
             };
 
