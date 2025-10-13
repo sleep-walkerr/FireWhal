@@ -8,7 +8,7 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 // Import the necessary items from your common library
-use firewhal_core::{DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, StatusPing, StatusUpdate};
+use firewhal_core::{DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, StatusPing, StatusPong, StatusUpdate};
 use bincode::{self, config};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -157,6 +157,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             FireWhalMessage::Ping(StatusPing {source}) => {
                 source_component = source.clone();
                 if source_component == "TUI" {
+                    if let Some(tui_identity) = clients.get("TUI") {
+                        println!("[ROUTER] Sending Pong command to TUI.");
+                        let pong_message = FireWhalMessage::Pong( StatusPong {
+                            source: "IPC".to_string()
+                        });
+                        let pong_payload = bincode::encode_to_vec(&pong_message, bincode_config)?;
+                        router.send(tui_identity, zmq::SNDMORE)?;
+                        router.send(&pong_payload, 0)?
+                    } 
+                    
                     if let Some(firewall_identity) = clients.get("Firewall") {
                         println!("[ROUTER] Forwarding Ping command to firewall.");
                         router.send(firewall_identity, zmq::SNDMORE)?;
@@ -172,7 +182,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         router.send(discord_identity, zmq::SNDMORE)?;
                         router.send(payload, 0)?
                     }
-                }
+                } else { println!("[Router] Received Ping message, but source is not TUI.")}
             }
             // Pong message processing
             FireWhalMessage::Pong(_) => {

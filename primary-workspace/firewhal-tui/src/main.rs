@@ -9,14 +9,10 @@ use crossterm::{
 
 use ratatui::{prelude::*, widgets::*, Terminal};
 use std::{
-    error::Error,
-    io::{self,stdout},
-    ops::{self, RangeBounds, RangeTo},
-    sync::{
+    error::Error, f32::consts::E, io::{self,stdout}, ops::{self, RangeBounds, RangeTo}, sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
-    },
-    time::{Duration, Instant},
+    }, time::{Duration, Instant}
 };
 
 use tokio::{
@@ -25,7 +21,7 @@ use tokio::{
     sync::{broadcast, mpsc},
 };
 use zmq;
-use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate};
+use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate, StatusPing};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::Mutex;
 
@@ -84,11 +80,28 @@ async fn main() -> Result<(), io::Error> {
     match to_zmq_tx.send(ident_message).await {
         Ok(_) => {
             let mut app_guard = app_clone.lock().await;
-            app_guard.debug_print.add_message("[TUI]: Identity Message Sent".to_string());
+            app_guard.debug_print.add_message("[TUI]: StatusUpdate Message Sent".to_string());
         },
         Err(e) => {
             let mut app_guard = app_clone.lock().await;
-            app_guard.debug_print.add_message(format!("[TUI]: Failed to send ident message with error {}", e));
+            app_guard.debug_print.add_message(format!("[TUI]: Failed to send StatusMessage with error {}", e));
+        }
+    }
+
+    // Craft component ping 
+    let ping_message = FireWhalMessage::Ping(StatusPing {
+        source: "TUI".to_string(),
+    });
+
+    // Send component ping
+    match to_zmq_tx.send(ping_message).await {
+        Ok(_) => {
+            let mut app_guard = app_clone.lock().await;
+            app_guard.debug_print.add_message("[TUI]: StatusPing Message Sent".to_string());
+        },
+        Err(e) => {
+            let mut app_guard = app_clone.lock().await;
+            app_guard.debug_print.add_message(format!("[TUI]: Failed to send StatusPing with error {}", e));
         }
     }
     
@@ -110,6 +123,22 @@ async fn main() -> Result<(), io::Error> {
                 }
                 FireWhalMessage::Pong(pong) => {   
                     app_guard.debug_print.add_message(format!("[{}]: Pong Received", pong.source));
+                    match pong.source.as_str() {
+                        "Daemon" => {
+                            app_guard.main_menu.set_daemon_status(true)
+                        }
+                        "Firewall" => {
+                            app_guard.main_menu.set_firewall_status(true)
+                        }
+                        "DiscordBot" => {
+                            app_guard.main_menu.set_discord_bot_status(true)
+                        }
+                        "IPC" => {
+                            app_guard.main_menu.set_ipc_status(true)
+                        }
+                        _ => {}
+                    
+                    }
                 }
                 _ => {}
             }

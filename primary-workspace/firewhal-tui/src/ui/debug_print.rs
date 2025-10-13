@@ -45,6 +45,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
                 "[Daemon]" => Style::default().fg(Color::Cyan),
                 "[Firewall]" => Style::default().fg(Color::Red),
                 "[DiscordBot]" => Style::default().fg(Color::Blue),
+                "[IPC]" => Style::default().fg(Color::Magenta),
+                "[TUI]" => Style::default().fg(Color::LightGreen),
                 _ => Style::default().fg(Color::Yellow),
             };
 
