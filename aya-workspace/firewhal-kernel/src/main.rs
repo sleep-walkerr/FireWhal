@@ -16,11 +16,11 @@ use tokio::{
 };
 
 use firewhal_core::{
-    BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate
+    BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate, DiscordBlockNotification
 };
 use firewhal_kernel_common::{BlockEvent, RuleAction, RuleKey};
 
-use pnet::datalink;
+use pnet::{datalink, packet::ip::IpNextHeaderProtocols::Fire};
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -228,10 +228,18 @@ async fn main() -> Result<(), anyhow::Error> {
                             // Send event
                             let debug_message = DebugMessage {
                                 source: "Firewall".to_string(),
-                                content: formatted_event,
+                                content: formatted_event.clone(),
                             };
                             if let Err(e) = task_zmq_tx.send(FireWhalMessage::Debug(debug_message)).await {
                                 warn!("[Events] Failed to send block event: {}", e);
+                            }
+                            // Test sending event to discord bot
+                            let discord_block_message = DiscordBlockNotification {
+                                component: "Firewall".to_string(),
+                                content: formatted_event.clone(),
+                            };
+                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::DiscordBlockNotify(discord_block_message)).await {
+                                warn!("[Events] Failed to send block event to Discord: {}", e);
                             }
                         }
                     }
@@ -305,6 +313,13 @@ async fn main() -> Result<(), anyhow::Error> {
         };
     }
     info!("[Kernel] Shutting down tasks...");
+    // Send message to TUI indicating inactive status
+    let pong_message = FireWhalMessage::Pong( StatusPong {
+        source: "Firewall".to_string()
+    });
+    if let Err(e) = to_zmq_tx.send(pong_message).await {
+        
+    }
     //shutting_down.store(true, Ordering::SeqCst);
 
     //reader_handle.await?;

@@ -136,6 +136,8 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
 
 
 // DATA STRUCTURES
+
+
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum Action {
     Allow,
@@ -178,7 +180,14 @@ pub enum FireWhalMessage {
     InterfaceResponse(NetInterfaceResponse),
     UpdateInterfaces(UpdateInterfaces),
     Ping(StatusPing),
-    Pong(StatusPong)
+    Pong(StatusPong),
+    DiscordBlockNotify(DiscordBlockNotification),
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct DiscordBlockNotification {
+    pub component: String,
+    pub content: String
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

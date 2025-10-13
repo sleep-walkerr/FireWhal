@@ -10,7 +10,7 @@ use tokio::net::unix::pipe::Sender;
 use tokio::sync::{mpsc, Mutex, oneshot, broadcast};
 
 // Import the necessary items from your shared core library
-use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, StatusPong, StatusUpdate};
+use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, StatusPong, StatusUpdate, DiscordBlockNotification};
 
 struct Handler;
 
@@ -24,10 +24,8 @@ impl TypeMapKey for ZmqTxKey {
 
 /// This task handles incoming messages from the IPC router.
 async fn message_handler(to_zmq_tx: Arc<Mutex<mpsc::Sender<FireWhalMessage>>>, mut from_zmq_rx: mpsc::Receiver<FireWhalMessage>, http: Arc<Http>) {
-    println!("[Handler] Message handler task started.");
     // This loop waits for messages from the zmq_client_connection task.
     while let Some(message) = from_zmq_rx.recv().await {
-        println!("[Handler] Received message: {:?}", message);
 
         // Match on the message type to decide what to do.
         match message {
@@ -46,6 +44,9 @@ async fn message_handler(to_zmq_tx: Arc<Mutex<mpsc::Sender<FireWhalMessage>>>, m
                 } else {
                     println!("[DiscordBot IPC] Successfully sent Pong message to router.");
                 }
+            }
+            FireWhalMessage::DiscordBlockNotify(notification) => {
+                send_dm_to_target(&http, format!("[{}]: {}", notification.component, notification.content).as_str()).await;
             }
             _ => {
                 // Ignore other message types for now.
