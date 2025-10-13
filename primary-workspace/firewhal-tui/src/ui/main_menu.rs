@@ -60,6 +60,12 @@ impl MainMenuState {
     pub fn set_discord_bot_status(&mut self, status: bool) {
         self.discord_bot_status = status
     }
+    pub fn reset_status_values(&mut self) {
+        self.ipc_status = false;
+        self.daemon_status = false;
+        self.firewall_status = false;
+        self.discord_bot_status = false;
+    }
 }
 
 

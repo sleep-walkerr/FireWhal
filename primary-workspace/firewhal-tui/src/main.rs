@@ -177,6 +177,8 @@ async fn main() -> Result<(), io::Error> {
                                 } else { _ = &app_guard.debug_print.add_message("Interface Selection found no zmq sender".to_string()); }
                             },
                             AppScreen::MainMenu => {
+                                // Reset Status Values
+                                app_guard.main_menu.reset_status_values();
                                 // Send ping to components
                                 if let Some(zmq_sender) = &app_guard.to_zmq_tx {
                                     if let Err(e) = zmq_sender.try_send(FireWhalMessage::Ping(firewhal_core::StatusPing { source: "TUI".to_string() })) {
