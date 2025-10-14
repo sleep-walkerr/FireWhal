@@ -20,10 +20,11 @@ use core::fmt::{self, Debug};
 #[repr(u8)]
 #[derive(Clone, Copy)]
 pub enum Action {
-    Block = 0,
-    Allow = 1
+    Block,
+    Allow
 }
-
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for Action {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
@@ -34,6 +35,8 @@ pub struct RuleKey {
     pub source_ip: u32,
     pub dest_ip: u32,
 }
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for RuleKey {}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -41,14 +44,11 @@ pub struct RuleAction {
     pub action: Action,
     pub rule_id: u32,
 }
-
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for RuleKey {}
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for RuleAction {}
-// Also add it for your Action enum
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for Action {}
+
+
+
 
 
 #[repr(u8)]
@@ -86,3 +86,12 @@ pub struct BlockEvent {
 unsafe impl Plain for BlockEvent {}
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for BlockEvent {}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct LpmIpKey {
+    pub prefix_len: u32,
+    pub ip_data: u32, // The IP address in big-endian
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for LpmIpKey {}

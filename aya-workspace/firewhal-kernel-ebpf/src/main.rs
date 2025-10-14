@@ -11,12 +11,12 @@ use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_get_current_pid_tgid,
     macros::{cgroup_sock_addr, map, xdp},
-    maps::{HashMap, PerfEventArray, RingBuf}, // <-- NEW: Import RingBuf
+    maps::{HashMap, LpmTrie, PerfEventArray, RingBuf}, // <-- NEW: Import RingBuf
     programs::{SockAddrContext, XdpContext}, EbpfContext,
 };
 use aya_log_ebpf::info;
 
-use firewhal_kernel_common::{BlockEvent, BlockReason, RuleKey, RuleAction, Action};
+use firewhal_kernel_common::{BlockEvent, BlockReason, RuleKey, RuleAction, Action, LpmIpKey};
 
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -32,12 +32,26 @@ static mut PORT_BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0)
 #[map]
 static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0);
 
+
+// NEW MAPS
 #[map]
 static mut EVENTS: PerfEventArray<BlockEvent> = PerfEventArray::new(0);
 
-
 #[map]
 static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
+
+#[map]
+static mut IPV4_RULES: LpmTrie<LpmIpKey, RuleAction> =
+    LpmTrie::with_max_entries(1024, 0);
+
+#[map]
+static mut PORT_RULES: HashMap<u16, u32> =
+    HashMap::with_max_entries(256, 0);
+
+#[map]
+static mut PROTOCOL_RULES: HashMap<u8, u32> =
+    HashMap::with_max_entries(16, 0);
+
 
 // INGRESS PROGRAMS
 #[xdp]
