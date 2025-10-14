@@ -1,31 +1,26 @@
-use aya::maps::RingBuf;
-use firewhal_kernel_common::{BlockEvent, BlockReason};
-use anyhow::Context;
 use aya::{
-    maps::{HashMap as AyaHashMap, perf::AsyncPerfEventArray},
-    include_bytes_aligned,
-    programs::{CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags},
-    Ebpf, 
-    util::online_cpus,
+    include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{xdp::{XdpLink, XdpLinkId}, CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags}, util::online_cpus, Ebpf
 };
 use aya_log::EbpfLogger;
-use bytes::BytesMut;
 use clap::Parser;
 use log::{info, warn, LevelFilter};
+use core::borrow;
 use std::{
-    fs::File,
-    net::Ipv4Addr,
-    sync::Arc,
+    collections::{HashMap, HashSet}, fmt::format, fs::File, hash::Hash, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration
 };
+use bytes::BytesMut;
 use tokio::{
     signal,
-    sync::{mpsc, Mutex},
+    sync::{broadcast, mpsc, Mutex},
+    task::{self}, time::{self, timeout},
 };
 
 use firewhal_core::{
-    BlockAddressRule, DebugMessage, FireWhalMessage, StatusUpdate,
+    BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate, DiscordBlockNotification
 };
-use firewhal_kernel_common::LogRecord;
+use firewhal_kernel_common::{BlockEvent, RuleAction, RuleKey};
+
+use pnet::{datalink, packet::ip::IpNextHeaderProtocols::Fire};
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -35,204 +30,304 @@ struct Opt {
     iface: String,
 }
 
+pub struct ActiveXdpInterfaces {
+    active_links: HashMap<String, XdpLinkId>
+}
+
+
+
+fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
+    let size = mem::size_of::<T>();
+    if buf.len() < size { return Err("Buffer is smaller than the struct size"); }
+    let mut data = MaybeUninit::<T>::uninit();
+    let ptr = data.as_mut_ptr() as *mut u8;
+    unsafe {
+        std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, size);
+        Ok(data.assume_init())
+    }
+}
+
+fn get_all_interfaces() -> Vec<String> {
+    datalink::interfaces()
+        .into_iter()
+        .map(|iface| iface.name)
+        .collect()
+}
+
+async fn attach_xdp_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>, active_xdp_programs: Arc<Mutex<ActiveXdpInterfaces>>) -> Result<(), anyhow::Error>{
+
+    let mut bpf = bpf.lock().await;
+    let mut active_xdp_programs = active_xdp_programs.lock().await;
+
+
+    
+
+    // XDP 
+    info!("[Kernel] Applying XDP programs to interfaces {}...", updated_interfaces.join(","));
+    let xdp_program: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
+    let _ = xdp_program.load();
+
+
+
+    //Iterate
+    let new_set: HashSet<&String> = updated_interfaces.iter().collect();
+
+    // --- 1. Detach from interfaces that are no longer selected ---
+    
+    // First, find the names of all interfaces we need to detach from.
+    // let interfaces_to_remove: Vec<String> = active_xdp_programs.active_links
+    //     .keys()
+    //     .filter(|&iface_name| !new_set.contains(iface_name))
+    //     .cloned()
+    //     .collect();
+
+    let interfaces_to_remove: Vec<String> = active_xdp_programs.active_links.keys().filter(|&iface_name| !updated_interfaces.contains(iface_name)).cloned().collect();
+    
+    // Now, iterate through that list, remove each from the map, and detach.
+    info!("Interfaces to Remove: {:?}", interfaces_to_remove);
+    for iface in interfaces_to_remove {
+        // .remove() gives us ownership of the XdpLinkId.
+        if let Some(link_id) = active_xdp_programs.active_links.remove(&iface) {
+            info!("[Kernel] Detaching XDP from '{}'...", iface);
+            if let Err(e) = xdp_program.detach(link_id) {
+                warn!("[Kernel] Failed to detach from '{}': {}", iface, e);
+            }
+        }
+    }
+
+    // --- 2. Attach to new interfaces that were not previously active ---
+    for iface in updated_interfaces {
+        // If our map of active links DOES NOT already contain this interface, attach it.
+        if !active_xdp_programs.active_links.contains_key(&iface) {
+            info!("[Kernel] Attaching XDP to '{}'...", iface);
+            match xdp_program.attach(&iface, XdpFlags::default()) {
+                Ok(link_id) => {
+                    // Success! Save the new link_id in our map.
+                    active_xdp_programs.active_links.insert(iface.clone(), link_id);
+                }
+                Err(e) => {
+                    warn!("[Kernel] Failed to attach to '{}': {}", iface, e);
+                }
+            }
+        }
+    }
+
+
+    info!("[Kernel] XDP programs applied.");
+
+
+
+
+    Ok(())
+}
+
+async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file: File) -> Result<(), anyhow::Error>{
+    let mut bpf = bpf.lock().await;
+    // CGROUP
+    info!("[Kernel] Applying CGROUP programs...");
+    let egress_connect4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
+    let _ = egress_connect4_program.load();
+    _ = egress_connect4_program.attach(&cgroup_file, CgroupAttachMode::Single);
+    info!("[Kernel] CGROUP programs applied.");
+    Ok(())
+}
+
+async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
+    let mut bpf = bpf.lock().await;
+    info!("[Kernel] [Rule] Applying ruleset...");
+
+    if let Ok(mut blocklist) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("RULES").unwrap()) {
+
+    for rule in config.rules {
+        let dest_is_v4 = rule.dest_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
+        let src_is_v4 = rule.source_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
+
+        if dest_is_v4 || src_is_v4 { //This will be used to decide which map to insert the rule into in the future
+            // Convert src and dst IP addresses
+            let src_ip_u32: u32;
+            let dst_ip_u32: u32;
+            if let Some(IpAddr::V4(source_ip)) = rule.source_ip {
+                src_ip_u32 = u32::from_le_bytes(source_ip.octets());
+            } else { src_ip_u32 = 0; }
+            if let Some(IpAddr::V4(destination_ip)) = rule.dest_ip {
+                dst_ip_u32 = u32::from_le_bytes(destination_ip.octets());
+            } else { dst_ip_u32 = 0; }
+            
+
+            // Create Key from Rule
+            let new_key = RuleKey {
+                protocol: rule.protocol as u32,
+                dest_ip: dst_ip_u32, 
+                dest_port: rule.dest_port.unwrap_or(0), // Wildcard port if not specified
+                source_ip: src_ip_u32,
+                source_port: rule.source_port.unwrap_or(0), // Wildcard port if not specified,
+            };
+
+            let action = RuleAction {
+                action: firewhal_kernel_common::Action::Block,
+                rule_id: 123,
+            };
+
+            if matches!(rule.action, firewhal_core::Action::Deny) {
+                if let Err(e) = blocklist.insert(&new_key, &action, 0) {
+                    warn!("[Kernel] Failed to insert rule: {}", e);
+                } else {
+                    info!("[Kernel] [Rule] Applied: Block traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}",
+                    new_key.protocol, Ipv4Addr::from(u32::from_be(new_key.dest_ip)), new_key.dest_port, Ipv4Addr::from(u32::from_be(new_key.source_ip)), new_key.source_port);
+                }
+            }
+        }
+    }
+}
+    Ok(()) // Return Ok to signify success.
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
-
-    env_logger::Builder::new()
-        .filter_level(LevelFilter::Info)
-        .init();
-
-    // --- ZMQ IPC Setup ---
-    let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
+    env_logger::Builder::new().filter_level(LevelFilter::Info).init();
+    let (mut to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
-    let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone()));
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+    let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx, "Firewall".to_string()));
+    to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
+    let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;
+    let active_xdp_interfaces: Arc<Mutex<ActiveXdpInterfaces>> = Arc::new(Mutex::new(ActiveXdpInterfaces { active_links: HashMap::new() }));
 
-    let ident_msg = FireWhalMessage::Status(StatusUpdate {
-        component: "Firewall".to_string(),
-        is_healthy: true,
-        message: "Ready".to_string(),
-    });
-    to_zmq_tx.send(ident_msg).await?;
+    if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
 
-    // --- eBPF Setup ---
-    info!("[Kernel] Loading and attaching eBPF programs...");
-    let bpf = Arc::new(Mutex::new(Ebpf::load(include_bytes_aligned!(concat!( // <-- CHANGED
-        env!("OUT_DIR"),
-        "/firewhal-kernel"
-    )))?));
+    // 1. Load the bpf object. Make it mutable.
+    if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
 
-    if let Err(e) = EbpfLogger::init(&mut *bpf.lock().await) { // <-- THE FIX IS HERE
-        warn!("[Kernel] Failed to initialize eBPF logger: {}", e);
-    }
-
-    // --- Attach eBPF Programs ---
-    {
-        let mut bpf_guard = bpf.lock().await;
-        let prog: &mut Xdp = bpf_guard.program_mut("firewhal_xdp").unwrap().try_into()?;
-        prog.load()?;
-        prog.attach(&opt.iface, XdpFlags::default())
-            .context("failed to attach XDP program")?;
-    }
-    info!("[Kernel] Attached XDP filter program to interface {}.", opt.iface);
-
-    {
-        let cgroup_file = File::open(&opt.cgroup_path)?;
-        let mut bpf_guard = bpf.lock().await;
-        let prog: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_ingress_recvmsg4").unwrap().try_into()?;
-        prog.load()?;
-        prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
-    }
-    info!("[Kernel] Attached cgroup ingress recvmsg4 program.");
-
-    {
-        let cgroup_file = File::open(&opt.cgroup_path)?;
-        let mut bpf_guard = bpf.lock().await;
-        let prog: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_egress_connect4").unwrap().try_into()?;
-        prog.load()?;
-        prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
-    }
-    info!("[Kernel] Attached cgroup egress connect4 program.");
-
-    {
-        let cgroup_file = File::open(&opt.cgroup_path)?;
-        let mut bpf_guard = bpf.lock().await;
-        let prog: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_egress_bind4").unwrap().try_into()?;
-        prog.load()?;
-        prog.attach(&cgroup_file, CgroupAttachMode::Single)?;
-    }
-    info!("[Kernel] Attached cgroup egress bind4 program.");
-    
-    {
-        let cgroup_file = File::open(&opt.cgroup_path)?;
-        let mut bpf_guard = bpf.lock().await;
-        let prog: &mut CgroupSockAddr = bpf_guard.program_mut("firewhal_egress_sendmsg4").unwrap().try_into()?;
-        prog.load()?;
-        prog.attach(cgroup_file, CgroupAttachMode::Single)?;
-    }
-    info!("[Kernel] Attached cgroup egress sendmsg4 program.");
-
-
-    // --- Initial Rule Setup ---
-    {
-        let mut bpf_guard = bpf.lock().await;
-        let icmp_map = bpf_guard.map_mut("ICMP_BLOCK_ENABLED").unwrap();
-        let mut icmp_block: AyaHashMap<_, u8, u8> = AyaHashMap::try_from(icmp_map)?;
-        icmp_block.insert(1, 1, 0)?;
-        info!("[Kernel] [Rule] Blocking all incoming ICMP traffic via XDP.");
-
-        let blocklist_map = bpf_guard.map_mut("BLOCKLIST").unwrap();
-        let mut blocklist: AyaHashMap<_, u32, u32> = AyaHashMap::try_from(blocklist_map)?;
-        let block_addr: u32 = Ipv4Addr::new(9, 9, 9, 9).into();
-        blocklist.insert(block_addr, 0, 0)?;
-        info!("[Kernel] [Rule] Blocking outgoing connections to 9.9.9.9");
-    }
-
-    // --- ADD THIS NEW BLOCK ---
-    // --- Block Event Handling ---
-    let bpf_clone = Arc::clone(&bpf);
+    // 2. Take ownership of the EVENTS map and move it to the event handler task.
+    let events_map = bpf.take_map("EVENTS").ok_or_else(|| anyhow::anyhow!("Failed to find EVENTS map"))?;
     let zmq_tx_clone = to_zmq_tx.clone();
-
     tokio::spawn(async move {
-        // We need to keep the BPF guard alive to access the map.
-        let mut bpf_guard = bpf_clone.lock().await;
-
-        // Get a handle to the EVENTS RingBuf map.
-        let mut events_map = bpf_guard.map_mut("EVENTS").unwrap();
-        let mut events = RingBuf::try_from(events_map).unwrap();
-
         info!("[Events] Started listening for block events from the kernel.");
-        loop {
-            // Wait for an event from the RingBuf
-            if let Some(buf) = events.next() {
-                // The buffer contains the raw bytes of our BlockEvent struct.
-                // We read it directly from the pointer.
-                let ptr = buf.as_ptr() as *const BlockEvent;
-                let event = unsafe { ptr.read_unaligned() };
+        let mut perf_array = AsyncPerfEventArray::try_from(events_map).unwrap();
 
-                // Convert the data into a human-readable format.
-                let dest_ip = event.dest_addr;
-                let dest_port = u16::from_be(event.dest_port);
+        for cpu_id in online_cpus().unwrap() {
+            let mut buf = perf_array.open(cpu_id, None).unwrap();
+            let task_zmq_tx = zmq_tx_clone.clone();
 
-                let content = format!(
-                    "Blocked {:?} -> PID: {}, Dest: {}:{}",
-                    event.reason,
-                    event.pid,
-                    dest_ip,
-                    dest_port,
-                );
+            tokio::spawn(async move {
+                let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
+                loop {
+                    let events = buf.read_events(&mut buffers).await.unwrap();
+                    for i in 0..events.read {
+                        if let Ok(event) = read_from_buffer::<BlockEvent>(&buffers[i]) {
+                            //Format event
+                            let formatted_event = format!(
+                                "Blocked {:?} -> PID: {}, Dest: {}:{}",
+                                event.reason,
+                                event.pid,
+                                event.dest_addr,
+                                event.dest_port
 
-                info!("[Events] {}", content);
-
-                // Create a message and send it over ZMQ to your UI.
-                // You might want to create a new `FireWhalMessage` variant for this
-                // instead of using `Debug`, but this works for now.
-                let ipc_msg = FireWhalMessage::Debug(DebugMessage {
-                    source: "FirewallEvent".to_string(),
-                    content,
-                });
-
-                if zmq_tx_clone.send(ipc_msg).await.is_err() {
-                    warn!("[Events] ZMQ channel closed, cannot send block event. Exiting task.");
-                    break; // Exit the loop and the task.
-                }
-            } else {
-                // If there are no events, yield to the scheduler briefly.
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }
-    });
-
-    info!("[Kernel] ✅ Firewall is active. Waiting for shutdown signal...");
-
-    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
-
-    // --- Main Event Loop ---
-    loop {
-        tokio::select! {
-            // Handle incoming commands from TUI/Discord/etc.
-            Some(message) = from_zmq_rx.recv() => {
-                match message {
-                    FireWhalMessage::RuleAddBlock(BlockAddressRule { address, .. }) => {
-                        info!("[Kernel] Received command to block address: {}", address);
-                        match address.parse::<Ipv4Addr>() {
-                            Ok(ip) => {
-                                let mut bpf_guard = bpf.lock().await;
-                                let blocklist_map = bpf_guard.map_mut("BLOCKLIST").unwrap();
-                                let mut blocklist: AyaHashMap<_, u32, u32> = AyaHashMap::try_from(blocklist_map).unwrap();
-                                
-                                let ip_u32: u32 = ip.into();
-                                if let Err(e) = blocklist.insert(ip_u32, 1, 0) {
-                                    warn!("[Kernel] Failed to update BLOCKLIST map: {}", e);
-                                } else {
-                                    info!("[Kernel] Successfully blocked {}", ip);
-                                }
+                            );
+                            // Send event
+                            let debug_message = DebugMessage {
+                                source: "Firewall".to_string(),
+                                content: formatted_event.clone(),
+                            };
+                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::Debug(debug_message)).await {
+                                warn!("[Events] Failed to send block event: {}", e);
                             }
-                            Err(e) => {
-                                warn!("[Kernel] Could not parse IP address '{}': {}", address, e);
+                            // Test sending event to discord bot
+                            let discord_block_message = DiscordBlockNotification {
+                                component: "Firewall".to_string(),
+                                content: formatted_event.clone(),
+                            };
+                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::DiscordBlockNotify(discord_block_message)).await {
+                                warn!("[Events] Failed to send block event to Discord: {}", e);
                             }
                         }
                     }
-                    _ => { /* Ignore other message types for now. */ }
+                }
+            });
+        }
+    });
+
+    // 3. Wrap the remaining bpf object in Arc<Mutex> to be shared for rule application.
+    let bpf = Arc::new(Mutex::new(bpf));
+
+    let cgroup_file = File::open(&opt.cgroup_path)?;
+    // Fix to populate with list received from FireWhalConfig later
+    let interfaces = get_all_interfaces();
+    attach_xdp_programs(Arc::clone(&bpf), interfaces, active_xdp_interfaces.clone()).await;
+    attach_cgroup_programs(Arc::clone(&bpf), cgroup_file).await;
+
+    
+    // --- Main Event Loop and Shutdown logic ---
+    info!("[Kernel] ✅ Firewall is active. Waiting for shutdown signal...");
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+    loop {
+        tokio::select! {
+            // Message processing
+            Some(message) = from_zmq_rx.recv() => {
+                match message {
+                    FireWhalMessage::LoadRules(config) => {
+                        apply_ruleset(Arc::clone(&bpf), config).await?;
+                    },
+                    FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interfaces
+                        info!("[Kernel] Received interface request from TUI.");
+                        let interface_list = match task::spawn_blocking(get_all_interfaces).await {
+                            Ok(list) => list,
+                            Err(e) => {
+                                warn!("[Kernel] Failed to spawn blocking task for interfaces: {}", e);
+                                vec![] // Send back an empty list on error
+                            }
+                        };
+                        
+                        let response = FireWhalMessage::InterfaceResponse(NetInterfaceResponse {
+                            source: "Firewall".to_string(), // The firewall is the source of the list
+                            interfaces: interface_list,
+                        });
+                        
+                        if let Err(e) = to_zmq_tx.send(response).await {
+                            warn!("[Kernel] Failed to send interface list: {}", e);
+                        }
+                    },
+                    FireWhalMessage::UpdateInterfaces(update) => {
+                        // if update.source == "TUI" {
+                            info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
+                            attach_xdp_programs(Arc::clone(&bpf), update.interfaces, active_xdp_interfaces.clone()).await;
+                        //}
+                    },
+                    FireWhalMessage::Ping(ping) => {
+                        if ping.source == "TUI" {
+                            info!("[Kernel] Received status ping from TUI.");
+                            let response = FireWhalMessage::Pong(StatusPong {
+                                source: "Firewall".to_string()
+                            } );
+                            if let Err(e) = to_zmq_tx.send(response).await {
+                                warn!("[Kernel] Failed to send status update: {}", e);
+                            }
+                        }
+                    },
+                    _ => {}
                 }
             }
-
-            // Handle shutdown signals
-            _ = signal::ctrl_c() => {
-                info!("[Kernel] Ctrl-C (SIGINT) received. Shutting down.");
-                break;
-            },
-            _ = sigterm.recv() => {
-                info!("[Kernel] SIGTERM received. Shutting down.");
-                break;
-            },
+            _ = signal::ctrl_c() => { info!("[Kernel] Ctrl-C received. Shutting down."); break; },
+            _ = sigterm.recv() => { info!("[Kernel] SIGTERM received. Shutting down."); break; },
         };
     }
+    info!("[Kernel] Shutting down tasks...");
+    // Send message to TUI indicating inactive status
+    let pong_message = FireWhalMessage::Pong( StatusPong {
+        source: "Firewall".to_string()
+    });
+    if let Err(e) = to_zmq_tx.send(pong_message).await {
+        
+    }
+    //shutting_down.store(true, Ordering::SeqCst);
 
-    // --- Shutdown ---
+    //reader_handle.await?;
+
+
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
-    drop(to_zmq_tx);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), zmq_handle).await;
+    shutdown_tx.send(()).unwrap();
+    let _ = time::timeout(time::Duration::from_secs(2), zmq_handle).await;
 
     Ok(())
 }

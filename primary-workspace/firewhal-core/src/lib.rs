@@ -1,12 +1,13 @@
-use std::fmt;
+use std::{fmt, fs};
+use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use bincode::{config, Encode, Decode};
-use serde::de::{value, Error};
-use serde::{Serialize, Deserialize};
-use tokio::sync::{broadcast, mpsc, Mutex};
+//use serde::de::{value, Error};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::task;
 use zmq::Context;
 use tokio::time::{sleep, Duration, timeout};
-
 
 //Test error implementation for Zero Message Queue related functionalities
 #[derive(Debug)]
@@ -34,73 +35,82 @@ impl std::error::Error for IpcError {}
 // One function instead of have a separate implementation inside of each subprogram
 /// A task that handles two-way ZMQ communication.
 pub async fn zmq_client_connection(
-    // For sending messages TO the ZMQ router
-    mut outgoing_rx: mpsc::Receiver<FireWhalMessage>,
-    // For sending messages FROM the ZMQ router back to our app
-    incoming_tx: mpsc::Sender<FireWhalMessage>,
-) {
-    let task = task::spawn_blocking(move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let context = zmq::Context::new();
-        let dealer = context.socket(zmq::DEALER)?;
-        dealer.connect("ipc:///tmp/firewhal_ipc.sock")?;
-        //println!("[ZMQ-Bidi-Client] Successfully connected to IPC router.");
+    mut to_zmq_rx: mpsc::Receiver<FireWhalMessage>,
+    from_zmq_tx: mpsc::Sender<FireWhalMessage>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    component: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    
+    let config = bincode::config::standard().with_big_endian();
+    let context = zmq::Context::new();
+    let socket = context.socket(zmq::DEALER)?;
 
-        // 1. Set up poll item for the ZMQ socket to listen for incoming messages.
-        let mut poll_items = [dealer.as_poll_item(zmq::POLLIN)];
+    // Set ZMQ_IMMEDIATE to 0. This makes the .connect() call block until the
+    // connection is fully established, preventing the "slow joiner" problem where
+    // the first message can be silently dropped.
+    socket.set_immediate(false)?;
+    socket.connect("ipc:///tmp/firewhal_ipc.sock")?;
 
-        loop {
-            // 2. Handle outgoing messages first (non-blocking).
-            // This drains any queued messages before we wait.
-            while let Ok(msg) = outgoing_rx.try_recv() {
-                //println!("[ZMQ-Bidi-Client] Sending message: {:?}", msg);
-                if let Err(e) = send_message(&dealer, &msg) {
-                    eprintln!("[ZMQ-Bidi-Client] Failed to send message: {}", e);
-                    return Err(e.into()); // Exit on error
+    println!("[{component} IPC Client] Connected to IPC router.");
+
+    loop {
+        tokio::select! {
+            // Branch 1: Listen for shutdown signal.
+            _ = shutdown_rx.recv() => {
+                println!("[{component} IPC Client] Shutdown signal received. Terminating.");
+                break; // Exit the loop
+            },
+            // Branch 2: Handle messages from the component TO the router
+            Some(message) = to_zmq_rx.recv() => {
+                if let Ok(payload) = bincode::encode_to_vec(&message, config) {
+                    if socket.send(&payload, 0).is_err() {
+                        eprintln!("[{component} IPC Client] Failed to send message to router.");
+                    }
                 }
-            }
+            },
 
-            // 3. Poll for incoming ZMQ messages with a timeout (e.g., 100ms).
-            // This is the only part that blocks, and only for a short time.
-            let rc = zmq::poll(&mut poll_items, 100)?;
+            // Branch 3: Poll for messages FROM the router
+            _ = sleep(Duration::from_millis(1)) => {
+                // Use a loop to drain any messages that have queued up
+                loop {
+                    // Poll the socket without blocking
+                    match socket.recv_multipart(zmq::DONTWAIT) {
+                        Ok(multipart) => {
+                            if multipart.is_empty() { continue; }
+                            let payload = &multipart[0];
 
-            if rc > 0 {
-                if poll_items[0].is_readable() {
-                    // 4. If a message is ready, receive it.
-                    match recv_message(&dealer) {
-                        Ok(msg) => {
-                            //println!("[ZMQ-Bidi-Client] Received message: {:?}", msg);
-                            // 5. Send it back to the main app via the incoming channel.
-                            if incoming_tx.blocking_send(msg).is_err() {
-                                // Main app has shut down the receiver, so we can exit.
-                                break;
+                            match bincode::decode_from_slice::<FireWhalMessage, _>(payload, config) {
+                                Ok((message, _)) => {
+                                    if from_zmq_tx.send(message).await.is_err() {
+                                        return Ok(()); // Component is gone, shut down.
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[{component} IPC Client] Received malformed message, discarding. Error: {}", e);
+                                }
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("[ZMQ-Bidi-Client] Error receiving message: {}", e);
-                            break; // Exit on receive error
+                        },
+                        Err(zmq::Error::EAGAIN) => {
+                            // No message was waiting, so we break the inner loop.
+                            break;
+                        },
+                         Err(e) => {
+                            eprintln!("[{component} IPC Client] ZMQ receive error: {}", e);
+                            break;
                         }
                     }
                 }
             }
-
-            // Check if the outgoing channel has been closed. If so, we are done sending.
-            if outgoing_rx.is_closed() {
-                println!("[ZMQ-Bidi-Client] Outgoing channel closed. Shutting down.");
-                break;
-            }
         }
-        Ok(())
-    });
-
-    if let Err(e) = task.await {
-        eprintln!("[ZMQ-Bidi-Client] Task failed: {}", e);
     }
+    println!("[{component} IPC Client] Disconnected.");
+    Ok(())
 }
 
 /// Serializes and sends any AppMessage over a ZMQ socket using bincode 2.0.
 pub fn send_message(socket: &zmq::Socket, message: &FireWhalMessage) -> Result<(), zmq::Error> {
     // 1. Get the standard bincode configuration.
-    let config = config::standard();
+    let config = bincode::config::standard().with_big_endian();
     // 2. Encode the message directly into a Vec<u8>.
     let bytes = bincode::encode_to_vec(message, config)
         .expect("Failed to encode AppMessage");
@@ -112,7 +122,7 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
     let bytes = socket.recv_bytes(0).map_err(IpcError::Zmq)?;
 
     // 1. Get the standard bincode configuration.
-    let config = config::standard();
+    let config = bincode::config::standard().with_big_endian();
     // 2. Decode the message from the received byte slice.
     let (message, len) = bincode::decode_from_slice(&bytes, config)
             .map_err(|e| IpcError::Deserialization(e.to_string()))?;
@@ -124,16 +134,89 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
     Ok(message)
 }
 
+
+// DATA STRUCTURES
+
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub enum Action {
+    Allow,
+    Deny
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub enum Protocol {
+    Tcp = 6,
+    Udp = 17,
+    Icmp = 1
+}
+
+
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct Rule {
+    pub action: Action,
+    pub protocol: Protocol,
+    pub source_ip: Option<IpAddr>,
+    pub source_port: Option<u16>,
+    pub dest_ip: Option<IpAddr>,
+    pub dest_port: Option<u16>,
+    pub description: String,
+}
+
+#[derive(Debug, Encode, Decode, Clone)]
+pub struct FirewallConfig {
+    pub rules: Vec<Rule>,
+}
+
+
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum FireWhalMessage {
     CommandShutdown(ShutdownCommand),
     RuleAddBlock(BlockAddressRule),
     Status(StatusUpdate),
     Debug(DebugMessage),
-    // You can remove Ident(IdentityMessage) if Status handles registration
+    LoadRules(FirewallConfig),
+    InterfaceRequest(NetInterfaceRequest),
+    InterfaceResponse(NetInterfaceResponse),
+    UpdateInterfaces(UpdateInterfaces),
+    Ping(StatusPing),
+    Pong(StatusPong),
+    DiscordBlockNotify(DiscordBlockNotification),
 }
 
-// ... other structs like ShutdownCommand and BlockAddressRule are fine ...
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct DiscordBlockNotification {
+    pub component: String,
+    pub content: String
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct StatusPing {
+    pub source: String,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct StatusPong {
+    pub source: String,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct UpdateInterfaces {
+    pub source: String,
+    pub interfaces: Vec<String>,
+}
+
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct NetInterfaceRequest {
+    pub source: String,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct NetInterfaceResponse {
+    pub source: String,
+    pub interfaces: Vec<String>,
+}
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct StatusUpdate {
@@ -159,102 +242,4 @@ pub struct ShutdownCommand {
 pub struct BlockAddressRule {
     pub source: String,
     pub address: String,
-}
-
-// *** This is a sample, change me later
-// Example in firewhal-core/src/lib.rs
-#[derive(Debug, Clone, Copy, PartialEq, Eq)] // Added Serialize, Deserialize if needed for config
-// #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum Action {
-    Allow,
-    Deny,
-    Log,
-}
-
-#[derive(Debug, Clone, PartialEq)] // Added Serialize, Deserialize if rules are stored/transferred
-// #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct FirewallRule {
-    pub id: u32,
-    pub source_ip: Option<std::net::IpAddr>,
-    pub destination_ip: Option<std::net::IpAddr>,
-    pub source_port: Option<u16>,
-    pub destination_port: Option<u16>,
-    pub protocol: Option<String>, // e.g., "TCP", "UDP", "ICMP"
-    pub action: Action,
-    pub description: String,
-    pub enabled: bool,
-}
-// Example in firewhal-core/src/lib.rs
-#[derive(Debug, Clone, PartialEq)] // Added Serialize, Deserialize if events are stored/transferred
-// #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum DaemonEvent {
-    RuleTriggered { rule_id: u32, details: String },
-    ConnectionBlocked { source_ip: std::net::IpAddr, destination_port: u16 },
-    StatusUpdate { message: String },
-    // ... other event types
-}
-// Example in firewhal-core/src/lib.rs
-#[derive(Debug, Clone, PartialEq)] // Add Serialize, Deserialize from serde for config
-// #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct DaemonConfig {
-    pub log_level: String,
-    pub default_policy: Action,
-    // ... other daemon settings
-}
-
-#[derive(Debug, Clone, PartialEq)] // Add Serialize, Deserialize from serde for config
-// #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct AppConfig {
-    pub daemon: DaemonConfig,
-    pub discord_bot_token: Option<String>, // Or handle this separately
-    // ... other global settings
-}
-// Example in firewhal-core/src/lib.rs
-#[derive(Debug)]
-pub enum FirewhalError {
-    ConfigError(String),
-    RuleParseError(String),
-    IoError(std::io::Error),
-    DaemonCommunicationError(String),
-    // ... other error types
-    #[cfg(feature = "serde_json")]
-    SerializationError(serde_json::Error),
-}
-
-// Implement From traits for easier error conversion
-impl From<std::io::Error> for FirewhalError {
-    fn from(err: std::io::Error) -> Self {
-        FirewhalError::IoError(err)
-    }
-}
-
-#[cfg(feature = "serde_json")]
-impl From<serde_json::Error> for FirewhalError {
-    fn from(err: serde_json::Error) -> Self {
-        FirewhalError::SerializationError(err)
-    }
-}
-
-impl fmt::Display for FirewhalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FirewhalError::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
-            FirewhalError::RuleParseError(msg) => write!(f, "Rule parsing error: {}", msg),
-            FirewhalError::IoError(err) => write!(f, "IO error: {}", err),
-            FirewhalError::DaemonCommunicationError(msg) => write!(f, "Daemon communication error: {}", msg),
-            #[cfg(feature = "serde_json")]
-            FirewhalError::SerializationError(err) => write!(f, "Serialization error: {}", err),
-        }
-    }
-}
-
-impl std::error::Error for FirewhalError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            FirewhalError::IoError(err) => Some(err),
-            #[cfg(feature = "serde_json")]
-            FirewhalError::SerializationError(err) => Some(err),
-            _ => None,
-        }
-    }
 }

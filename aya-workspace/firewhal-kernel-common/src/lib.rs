@@ -6,7 +6,8 @@ pub struct LogRecord {
     pub pid: u32,
     pub message: [u8; 128],
 }
-use core::net::Ipv4Addr;
+use core::net::{IpAddr, Ipv4Addr};
+use plain::Plain;
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for LogRecord {}
@@ -15,7 +16,42 @@ unsafe impl aya::Pod for LogRecord {}
 
 use core::fmt::{self, Debug};
 
-#[repr(u32)]
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub enum Action {
+    Block = 0,
+    Allow = 1
+}
+
+
+#[repr(C)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
+pub struct RuleKey {
+    pub protocol: u32,
+    pub source_port: u16,
+    pub dest_port: u16,
+    pub source_ip: u32,
+    pub dest_ip: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RuleAction {
+    pub action: Action,
+    pub rule_id: u32,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for RuleKey {}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for RuleAction {}
+// Also add it for your Action enum
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for Action {}
+
+
+#[repr(u8)]
 #[derive(Clone, Copy)]
 pub enum BlockReason {
     IcmpBlocked = 1,
@@ -37,10 +73,16 @@ impl Debug for BlockReason {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Copy, Clone)]
 pub struct BlockEvent {
-    pub reason: BlockReason,
-    pub pid: u32,       // Process ID that initiated the connection
-    pub dest_addr: Ipv4Addr, // The blocked destination address (in big-endian format)
-    pub dest_port: u16, // Destination port (in big-endian format)
-}
+    // Reordered from largest to smallest
+    pub pid: u32,                  // 4 bytes
+    pub dest_addr: IpAddr,       // 4 bytes
+    pub dest_port: u16,            // 2 bytes
+    pub reason: BlockReason,       // 1 byte (now guaranteed by repr(u8))
+} // Total size should now be 11 bytes + 1 padding byte = 12 bytes
+
+// This part stays the same
+unsafe impl Plain for BlockEvent {}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for BlockEvent {}

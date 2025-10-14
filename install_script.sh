@@ -11,21 +11,26 @@ else
 
 fi
 
+
+# Need to add check to see if nobody is part of the firewhal-admin group, and if not add them
+
 current_user=$(whoami)
 
 
-echo "Checking if current user is already part of firewhal-admin group"
-if [ id -nG $current_user | grep -qw firewhal-admin ]; then
-	echo "$current_user is not part of the group"
-
-
-	echo "Would you like to add the current user $current_user to the group? y/n"
-	read user_response
-
-	if [ $user_response == y ]; then
-		echo "Adding $current_user to the group"
-		sudo usermod -aG firewhal-admin $current_user
-	fi
+if ! id -nG "$current_user" | grep -qw 'firewhal-admin'; then
+    echo "-> User '$current_user' is not part of the 'firewhal-admin' group."
+    echo
+    read -p "Would you like to add '$current_user' to the group? (y/n) " -r user_response
+	
+    if [[ "$user_response" == "y" || "$user_response" == "Y" ]]; then
+        echo "Adding '$current_user' to the group..."
+        sudo usermod -aG firewhal-admin "$current_user"
+        echo "-> Done. Please log out and log back in for the changes to take effect."
+    else
+        echo "-> No changes made."
+    fi
+else
+    echo "-> User '$current_user' is already a member of the 'firewhal-admin' group."
 fi
 
 echo "Killing previous instances of FireWhal"

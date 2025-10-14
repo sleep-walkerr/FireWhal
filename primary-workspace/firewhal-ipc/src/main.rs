@@ -8,8 +8,8 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 // Import the necessary items from your common library
-use firewhal_core::{FireWhalMessage, DebugMessage, StatusUpdate};
-use bincode;
+use firewhal_core::{DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, StatusPing, StatusPong, StatusUpdate};
+use bincode::{self, config};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let context = zmq::Context::new();
@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Use a HashMap to store client identities for scalability.
     let mut clients: HashMap<String, Vec<u8>> = HashMap::new();
-    let bincode_config = bincode::config::standard();
+    let bincode_config = bincode::config::standard().with_big_endian();
 
     println!("[ROUTER] Waiting for clients to connect...");
     loop {
@@ -61,41 +61,148 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // --- CLIENT IDENTIFICATION & MESSAGE HANDLING ---
         match &message {
-            // We'll use a specific Status message for client registration.
+            // Status registration message processing
             FireWhalMessage::Status(StatusUpdate { component, message, .. }) if message == "Ready" => {
                 println!("[ROUTER] Registered client '{}' with identity {:?}", component, identity);
                 source_component = component.clone();
                 clients.insert(component.clone(), identity);
+
+
+                // Forward the registration message to the Daemon so it knows the Firewall is ready.
+                if component != "Daemon" { // Don't forward the daemon's own ready message back to itself
+                    if let Some(daemon_id) = clients.get("Daemon") {
+                        // `payload` is the original, raw byte slice of the message
+                        router.send(daemon_id, zmq::SNDMORE)?;
+                        router.send(payload, 0)?;
+                    }
+                }
+                
             }
+            // Debug Message processing
             FireWhalMessage::Debug(DebugMessage { source, .. }) => {
                 source_component = source.clone();
+                // If a message somehow came from the TUI, don't forward it to itself
+                if source_component != "TUI" {
+                    // Check if the TUI client has registered itself yet.
+                    if let Some(tui_id) = clients.get("TUI") {
+                        // Create a new DebugMessage to forward. This ensures all forwarded
+                        // messages have a consistent, debug-friendly format.
+                        let debug_forward = FireWhalMessage::Debug(DebugMessage {
+                            source: source_component,
+                            content: format!("{:?}", message), // The content is the debug view of the original message
+                        });
+
+                        // Re-encode the new debug message to send to the TUI.
+                        if let Ok(forward_payload) = bincode::encode_to_vec(&debug_forward, bincode_config) {
+                            // Send as [tui_identity, payload]
+                            router.send(tui_id, zmq::SNDMORE)?;
+                            router.send(&forward_payload, 0)?;
+                        }
+                    }
+                }
             }
-            // Add other message types if the router needs to act on them.
+            // FireWall Config message processing
+            FireWhalMessage::LoadRules(_) => {
+                source_component = "Daemon".to_string();
+
+                if let Some(firewall_identity) = clients.get("Firewall") {
+                    println!("[ROUTER] Forwarding LoadRules command to firewall.");
+                    router.send(firewall_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0)?;
+                } else {
+                    eprintln!("[ROUTER] Received LoadRules command, but firewall client is not registered!");
+
+                }
+            }
+            // Interface Request message processing
+            FireWhalMessage::InterfaceRequest(NetInterfaceRequest {source}) => {
+                source_component = source.clone();
+                if &source_component == "TUI" {
+                    if let Some(firewall_identity) = clients.get("Firewall") {
+                        println!("[ROUTER] Forwarding InterfaceRequest command to firewall.");
+                        router.send(firewall_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?;
+                    } else {
+                        eprintln!("[ROUTER] Received InterfaceRequest command, but firewall client is not registered!");
+                    }
+                }
+            }
+            // Interface Response message processing
+            FireWhalMessage::InterfaceResponse(NetInterfaceResponse {source, ..}) => {
+                source_component = source.clone();
+                if source_component == "Firewall" {
+                    println!("[ROUTER] Forwarding InterfaceResponse from firewall to TUI.");
+                    if let Some(tui_identity) = clients.get("TUI") {
+                        router.send(tui_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?;
+                    } else {
+                        eprintln!("[ROUTER] Received InterfaceResponse, but TUI client is not registered!");
+                    }
+                }
+            }
+            // Update Interfaces message processing
+            FireWhalMessage::UpdateInterfaces(update) => {
+                source_component = update.source.clone();
+                if source_component == "TUI" {
+                    if let Some(firewall_identity) = clients.get("Firewall") {
+                        println!("[ROUTER] Forwarding UpdateInterfaces command to firewall.");
+                        router.send(firewall_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?
+                    } else {
+                        eprintln!("[ROUTER] Received UpdateInterfaces command, but firewall client is not registered!");
+                    }
+                }
+            }
+            // Ping message processing
+            FireWhalMessage::Ping(StatusPing {source}) => {
+                source_component = source.clone();
+                if source_component == "TUI" {
+                    if let Some(tui_identity) = clients.get("TUI") {
+                        println!("[ROUTER] Sending Pong command to TUI.");
+                        let pong_message = FireWhalMessage::Pong( StatusPong {
+                            source: "IPC".to_string()
+                        });
+                        let pong_payload = bincode::encode_to_vec(&pong_message, bincode_config)?;
+                        router.send(tui_identity, zmq::SNDMORE)?;
+                        router.send(&pong_payload, 0)?
+                    } 
+                    
+                    if let Some(firewall_identity) = clients.get("Firewall") {
+                        println!("[ROUTER] Forwarding Ping command to firewall.");
+                        router.send(firewall_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?
+                    } 
+                    if let Some(daemon_identity) = clients.get("Daemon") {
+                        println!("[ROUTER] Forwarding Ping command to daemon.");
+                        router.send(daemon_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?
+                    }
+                    if let Some(discord_identity) = clients.get("DiscordBot") {
+                        println!("[ROUTER] Forwarding Ping command to DiscordBot.");
+                        router.send(discord_identity, zmq::SNDMORE)?;
+                        router.send(payload, 0)?
+                    }
+                } else { println!("[Router] Received Ping message, but source is not TUI.")}
+            }
+            // Pong message processing
+            FireWhalMessage::Pong(_) => {
+                if let Some(tui_identity) = clients.get("TUI") {
+                    println!("[ROUTER] Forwarding Pong command to TUI.");
+                    router.send(tui_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0)?
+                }
+            }
+            FireWhalMessage::DiscordBlockNotify(_) => {
+                if let Some(discord_identity) = clients.get("DiscordBot") {
+                    println!("[ROUTER] Forwarding DiscordBlockNotify command to DiscordBot.");
+                    router.send(discord_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0)?;
+                }
+            }
             _ => {
                 // For other messages, we might not know the source component unless it's registered.
                 // We'll just identify it by its raw identity for the debug message.
                 source_component = format!("{:?}", identity);
-            }
-        }
-        
-        // --- FORWARD DEBUG INFO TO TUI ---
-        // Don't forward messages that came from the TUI back to itself.
-        if source_component != "TUI" {
-            // Check if the TUI client has registered itself yet.
-            if let Some(tui_id) = clients.get("TUI") {
-                // Create a new DebugMessage to forward. This ensures all forwarded
-                // messages have a consistent, debug-friendly format.
-                let debug_forward = FireWhalMessage::Debug(DebugMessage {
-                    source: source_component,
-                    content: format!("{:?}", message), // The content is the debug view of the original message
-                });
-
-                // Re-encode the new debug message to send to the TUI.
-                if let Ok(forward_payload) = bincode::encode_to_vec(&debug_forward, bincode_config) {
-                    // Send as [tui_identity, payload]
-                    router.send(tui_id, zmq::SNDMORE)?;
-                    router.send(&forward_payload, 0)?;
-                }
             }
         }
     }

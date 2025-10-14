@@ -1,6 +1,6 @@
 // import UI screens
 mod ui;
-use ui::app;
+use ui::app::{App, AppScreen};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -9,14 +9,10 @@ use crossterm::{
 
 use ratatui::{prelude::*, widgets::*, Terminal};
 use std::{
-    error::Error,
-    io::{self,stdout},
-    ops::{self, RangeBounds, RangeTo},
-    sync::{
+    error::Error, f32::consts::E, io::{self,stdout}, ops::{self, RangeBounds, RangeTo}, sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
-    },
-    time::{Duration, Instant},
+    }, time::{Duration, Instant}
 };
 
 use tokio::{
@@ -25,17 +21,16 @@ use tokio::{
     sync::{broadcast, mpsc},
 };
 use zmq;
-use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate};
+use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate, StatusPing};
 use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::Mutex;
 
-/// Holds the application's state
-struct App<> {
-    titles: Vec<String>,
-    index: usize,
-    progress: f64, // New: Current progress for the gauge (0.0 to 1.0)
-    progress_direction: i8, // New: 1 for increasing, -1 for decreasing
-    last_tick: Instant, // New: To control animation speed
-}
+use crate::ui::app;
+
+// Upon entering the interface selection menu, have the TUI send a message requesting the interface list
+// The userspace loader receives the message, scans for interfaces, and then sends a request response
+// The TUI then populates the list with the message it receives containing the available interfaces
+
 
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
@@ -44,21 +39,13 @@ async fn main() -> Result<(), io::Error> {
     // `from_zmq_rx` is for the TUI to receive messages FROM the ZMQ task.
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
 
     // Spawn the ZMQ task.
     // `to_zmq_rx` is the `outgoing_rx` for the ZMQ task.
     // `from_zmq_tx` is the `incoming_tx` for the ZMQ task.
-    let ipc_connection = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx));
-
-    let ident_message = FireWhalMessage::Status(StatusUpdate {
-        component: "TUI".to_string(),
-        is_healthy: true,
-        message: "Ready".to_string(),
-    }
-    );
-    
-    // Unhandled error, needs to be fixed later
-    _ = to_zmq_tx.send(ident_message).await;
+    let ipc_connection = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, shutdown_rx, "TUI".to_string()));
 
     // Setup terminal
     enable_raw_mode()?;
@@ -68,48 +55,161 @@ async fn main() -> Result<(), io::Error> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?; // ⬅ clear screen before drawing
 
-    let mut app = app::App::default();
+    // Main app variable needs multiple ownership, accomplished by Arc and Mutex
+    // Arc allows for multiple owners for a piece of data, and mutex is used to lock usage to one owner at a time
+    let app= Arc::new(Mutex::new(App::default())); 
+    // Add sender channel to app to allow interfaces to send IPC messages
+    app.lock().await.to_zmq_tx = Some(to_zmq_tx.clone());
+
     let tick_rate = Duration::from_millis(100);
+    let mut last_tick = Instant::now();
+
+    // Incoming Message Processing
+    //--Clone reference to use in subroutine
+    let app_clone  = Arc::clone(&app);
+
+    // Craft Ident message
+    let ident_message = FireWhalMessage::Status(StatusUpdate {
+        component: "TUI".to_string(),
+        is_healthy: true,
+        message: "Ready".to_string(),
+    }
+    );
+    
+    // Send Ident Message
+    match to_zmq_tx.send(ident_message).await {
+        Ok(_) => {
+            let mut app_guard = app_clone.lock().await;
+            app_guard.debug_print.add_message("[TUI]: StatusUpdate Message Sent".to_string());
+        },
+        Err(e) => {
+            let mut app_guard = app_clone.lock().await;
+            app_guard.debug_print.add_message(format!("[TUI]: Failed to send StatusMessage with error {}", e));
+        }
+    }
+
+    // Craft component ping 
+    let ping_message = FireWhalMessage::Ping(StatusPing {
+        source: "TUI".to_string(),
+    });
+
+    // Send component ping
+    match to_zmq_tx.send(ping_message).await {
+        Ok(_) => {
+            let mut app_guard = app_clone.lock().await;
+            app_guard.debug_print.add_message("[TUI]: StatusPing Message Sent".to_string());
+        },
+        Err(e) => {
+            let mut app_guard = app_clone.lock().await;
+            app_guard.debug_print.add_message(format!("[TUI]: Failed to send StatusPing with error {}", e));
+        }
+    }
+    
+    tokio::spawn(async move {
+        while let Some(message) = from_zmq_rx.recv().await {
+            let mut app_guard = app_clone.lock().await;
+            match message {
+                FireWhalMessage::Debug(msg) => {
+                    let formatted_msg = format!("[{}]: {}", msg.source, msg.content);
+                    app_guard.debug_print.add_message(formatted_msg);
+                }
+                FireWhalMessage::InterfaceResponse(response) => {
+                    if response.source == "Firewall" {
+                        // Clear vector entries
+                        app_guard.available_interfaces.clear_interfaces();
+                        // Add new entries
+                        for interface in response.interfaces {app_guard.available_interfaces.add_interface(interface);}
+                    }
+                }
+                FireWhalMessage::Pong(pong) => {   
+                    app_guard.debug_print.add_message(format!("[{}]: Pong Received", pong.source));
+                    match pong.source.as_str() {
+                        "Daemon" => {
+                            app_guard.main_menu.set_daemon_status(true)
+                        }
+                        "Firewall" => {
+                            app_guard.main_menu.set_firewall_status(true)
+                        }
+                        "DiscordBot" => {
+                            app_guard.main_menu.set_discord_bot_status(true)
+                        }
+                        "IPC" => {
+                            app_guard.main_menu.set_ipc_status(true)
+                        }
+                        _ => {}
+                    
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
 
     loop {
-        terminal.draw(|f| ui::render(f, &app))?;
+        let mut app_guard = app.lock().await;
+
+        terminal.draw(|f| ui::render(f, &mut app_guard))?;
 
         let timeout = tick_rate
-            .checked_sub(app.last_tick.elapsed())
+            .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Tab => app.next_screen(),
-                    _ => {}
+                    KeyCode::Tab => {
+                        app_guard.next_screen();
+                        // THIS CODE CAUSES BUSY WAITING
+                        // Match to correct interface and then perform relevant operations
+                        match app_guard.screen {
+                            AppScreen::InterfaceSelection => {
+                                // Send a interface request message to firewhal-kernel if screen is interface selection
+                                // Craft request message
+                                let request_message = FireWhalMessage::InterfaceRequest(firewhal_core::NetInterfaceRequest {
+                                    source: "TUI".to_string(),
+                                });
+                                // Send request message
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(request_message) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send InterfaceRequest message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Interface Selection found no zmq sender".to_string()); }
+                            },
+                            AppScreen::MainMenu => {
+                                // Reset Status Values
+                                app_guard.main_menu.reset_status_values();
+                                // Send ping to components
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(FireWhalMessage::Ping(firewhal_core::StatusPing { source: "TUI".to_string() })) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send Ping message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Main Menu found no zmq sender".to_string()); }
+                            },
+                            _ => { 
+                            }
+                        }
+                    },
+                    _ => { // For other keys used in specific interfaces
+                        match app_guard.screen {
+                                    AppScreen::InterfaceSelection => {
+                                        ui::interface_selection::handle_key_event(key.code, &mut app_guard);
+                                    },
+                                    AppScreen::MainMenu => {
+                                    },
+                                    _ => {}
+                                }
+                    }
                 }
             }
         }
-        if app.last_tick.elapsed() >= tick_rate {
-            app.update_progress();
-            app.last_tick = Instant::now();
-        }
-
-        // Process all pending messages from the ZMQ task.
-        loop {
-            match from_zmq_rx.try_recv() {
-                Ok(FireWhalMessage::Debug(msg)) => {
-                    // Add the formatted message to the app's state.
-                    let formatted_msg = format!("[{}]: {}", msg.source, msg.content);
-                    app.debug_messages.push(formatted_msg);
-                }
-                Ok(_) => { /* Ignore other message types for now */ }
-                Err(TryRecvError::Empty) => {
-                    // No more messages in the queue.
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    // The ZMQ task has shut down, so we should exit.
-                    break;
-                }
+        if last_tick.elapsed() >= tick_rate {
+            // Delegate updates to the active screen's state
+            match app_guard.screen {
+                AppScreen::MainMenu => app_guard.main_menu.update_progress(),
+                _ => { /* Other screens might have their own updates here */ }
             }
+            last_tick = Instant::now();
         }
     }
 
@@ -120,8 +220,11 @@ async fn main() -> Result<(), io::Error> {
 
     // 3. Send the shutdown signal
     println!("TUI exited. Shutting down ZMQ task...");
+    shutdown_tx.send(()).unwrap();
     drop(to_zmq_tx); // This will cause the zmq_client_connection to exit its loop.
 
+    //NOT WAITING ON THIS MEANS THAT THE ZMQ FUNCTION IS BEING FORCEFULLY SHUTDOWN
+    //This is happening everywhere and needs to be fixed
     // 4. Wait for the ZMQ task to finish cleanly
     if let Err(e) = ipc_connection.await {
         eprintln!("ZMQ task did not shut down cleanly: {:?}", e);

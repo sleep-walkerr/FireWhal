@@ -1,19 +1,29 @@
 use std::time::Instant;
+use crate::ui::{debug_print::DebugPrintState, interface_selection::{InterfaceList, InterfaceListState, ToggledInterfaces}, main_menu::MainMenuState};
+use tokio::sync::mpsc;
+use firewhal_core::FireWhalMessage;
+
 #[derive(Debug)]
 pub struct App<'a> {
     pub titles: Vec<&'a str>,
     pub screen: AppScreen,
     pub index: usize,
-    pub progress: f64, // New: Current progress for the gauge (0.0 to 1.0)
-    pub progress_direction: i8, // New: 1 for increasing, -1 for decreasing
-    pub last_tick: Instant, // New: To control animation speed
-    pub debug_messages: Vec<String>, // To store messages from IPC
+    pub to_zmq_tx: Option<mpsc::Sender<FireWhalMessage>>,
+
+    // Screen-specific states
+    //Check and see if irrelevant data is being used on unreleated screens
+    pub main_menu: MainMenuState,
+    pub debug_print: DebugPrintState,
+    pub available_interfaces: InterfaceList,
+    pub interface_list_state: InterfaceListState,
+    pub toggled_interfaces: ToggledInterfaces
 }
 
 #[derive(Debug)]
 pub enum AppScreen {
     MainMenu,
     DebugPrint,
+    InterfaceSelection
 }
 
 impl Default for AppScreen {
@@ -26,38 +36,17 @@ impl<'a> App<'a> {
     pub fn next_screen(&mut self) {
         self.screen = match self.screen {
             AppScreen::MainMenu => AppScreen::DebugPrint,
-            AppScreen::DebugPrint => AppScreen::MainMenu,
+            AppScreen::DebugPrint => AppScreen::InterfaceSelection,
+            AppScreen::InterfaceSelection => AppScreen::MainMenu
         };
         self.index = (self.index + 1) % self.titles.len();
-    }
-
-    pub fn add_debug_message(&mut self, message: String) {
-        self.debug_messages.push(message);
-        // To prevent the list from growing indefinitely, we can cap its size.
-        const MAX_MESSAGES: usize = 100;
-        if self.debug_messages.len() > MAX_MESSAGES {
-            // Removes the oldest message
-            self.debug_messages.remove(0);
-        }
-    }
-
-    pub fn update_progress(&mut self) {
-        self.progress += (self.progress_direction as f64) * 0.01; // Adjust speed as needed
-
-        // make this random later
-        if self.progress >= 1.0 {
-            self.progress = 1.0;
-            self.progress_direction = -1;
-        } else if self.progress <= 0.0 {
-            self.progress = 0.0;
-            self.progress_direction = 1;
-        }
     }
 }
 
 impl Default for App<'_> {
     fn default() -> Self {
         App {
+            to_zmq_tx: None,
             screen: AppScreen::default(),
             titles: vec![
                 "Status",
@@ -66,10 +55,11 @@ impl Default for App<'_> {
                 "Active Connections",
             ],
             index: 0,
-            progress: 0.0,
-            progress_direction: 1,
-            last_tick: Instant::now(), // Manually initialize `last_tick`
-            debug_messages: Vec::new(),
+            main_menu: MainMenuState::default(),
+            debug_print: DebugPrintState::default(),
+            available_interfaces: InterfaceList::default(),
+            interface_list_state: InterfaceListState::default(),
+            toggled_interfaces: ToggledInterfaces::default()
         }
     }
 }

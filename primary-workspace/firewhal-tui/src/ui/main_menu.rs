@@ -5,10 +5,72 @@ Show basic status of each subapp, for now each will show inactive
 
 */
 use ratatui::{prelude::*, widgets::*};
-use crate::app::App;
+use crate::ui::app::App;
 
 
-pub fn render(f: &mut Frame, app: &App) {
+/// Holds the state for the Main Menu screen.
+#[derive(Debug)]
+pub struct MainMenuState {
+    pub progress: f64,
+    pub progress_direction: i8,
+    pub last_tick: std::time::Instant,
+    ipc_status: bool,
+    daemon_status: bool,
+    firewall_status: bool,
+    discord_bot_status: bool
+}
+
+impl Default for MainMenuState {
+    fn default() -> Self {
+        Self {
+            progress: 0.0,
+            progress_direction: 1,
+            last_tick: std::time::Instant::now(),
+            ipc_status: false,
+            daemon_status: false,
+            firewall_status: false,
+            discord_bot_status: false
+        }
+    }
+}
+
+impl MainMenuState {
+    pub fn update_progress(&mut self) {
+        self.progress += (self.progress_direction as f64) * 0.01; // Adjust speed as needed
+
+        // make this random later
+        if self.progress >= 1.0 {
+            self.progress = 1.0;
+            self.progress_direction = -1; // Reverse direction
+        } else if self.progress <= 0.0 {
+            self.progress = 0.0;
+            self.progress_direction = 1; // Reverse direction
+        }
+        self.last_tick = std::time::Instant::now();
+    }
+    pub fn set_ipc_status(&mut self, status: bool) {
+        self.ipc_status = status;
+    }
+    pub fn set_daemon_status(&mut self, status: bool) {
+        self.daemon_status = status;
+    }
+    pub fn set_firewall_status(&mut self, status: bool) {
+        self.firewall_status = status;
+    }
+    pub fn set_discord_bot_status(&mut self, status: bool) {
+        self.discord_bot_status = status
+    }
+    pub fn reset_status_values(&mut self) {
+        self.ipc_status = false;
+        self.daemon_status = false;
+        self.firewall_status = false;
+        self.discord_bot_status = false;
+    }
+}
+
+
+
+pub fn render(f: &mut Frame, app: &mut App) {
     // --- TITLE ---
     let firewhal_span = Span::styled(
         "FireWhal ",
@@ -56,23 +118,6 @@ pub fn render(f: &mut Frame, app: &App) {
 
     f.render_widget(tabs, chunks[0]);
 
-    // --- CONTENT ---
-    let status_title = Span::raw("Firewall Status: ");
-    let status_state = Span::styled(
-        "Active",
-        Style::default().fg(Color::Black).bg(Color::Green),
-    );
-    let content_title = Line::from(vec![status_title, status_state]);
-
-    let content_block = Block::default()
-        .title(content_title)
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded);
-
-    let content_inner_area = content_block.inner(chunks[1]);
-    f.render_widget(content_block, chunks[1]);
-
-
     // // --- INNER CONTENT LAYOUT (FOR CENTERING) ---
 
     // // 1. Define the fixed size of the status box.
@@ -87,11 +132,12 @@ pub fn render(f: &mut Frame, app: &App) {
     // let status_box_area = centered_rect(content_inner_area, STATUS_BOX_WIDTH, STATUS_BOX_HEIGHT, 0.3); // 30% from top
     // let gauge_area = centered_rect(content_inner_area, GAUGE_WIDTH, GAUGE_HEIGHT, 0.6); // 60% from top
 
+    // --- CONTENT ---
+
     //Create a vertical (maybe horizontal too) alignment layout 
     let main_vertical_content_layout = Layout::vertical([
-        Constraint::Length(25),
-        Constraint::Length(30),
-        Constraint::Min(0)
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
     ]).split(chunks[1]);
 
     // --- STATUS PANEL (CENTERED) ---
@@ -99,28 +145,61 @@ pub fn render(f: &mut Frame, app: &App) {
         .title("System Status")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
+    
+    let inner_area = status_box_block.inner(main_vertical_content_layout[0]);
+
+    f.render_widget(status_box_block, main_vertical_content_layout[0]);
 
     let active_style = Style::default().fg(Color::Black).bg(Color::Green);
+
+    // Changes
+
+    // Capture area being used and split it in half
+    let system_status_area = Layout::horizontal(
+        [
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+        Constraint::Min(0)
+        ]
+    ).split(inner_area);
+
+        let component_text = vec![
+        Line::from(vec![
+            Span::styled("Firewall:", Style::default().fg(Color::Rgb(255, 165, 0))),
+            Span::raw(" "),
+        ]).right_aligned(),
+        Line::from(vec![
+            Span::styled("IPC:", Style::default().fg(Color::Magenta)),
+            Span::raw(" "),
+        ]).right_aligned(),
+        Line::from(vec![
+            Span::styled("Daemon:", Style::default().fg(Color::Cyan)),
+        ]).right_aligned(),
+        Line::from(vec![
+            Span::styled("Discord Bot:", Style::default().fg(Color::Blue)),
+        ]).right_aligned(),
+        ];
+
     let status_text = vec![
         Line::from(vec![
-            Span::raw("Daemon:   "),
-            Span::styled("Active", active_style),
-        ]),
+            if app.main_menu.firewall_status {Span::styled("Active", active_style)} else {Span::styled("Inactive", Style::default().fg(Color::Red))} 
+        ]).left_aligned(),
         Line::from(vec![
-            Span::raw("Notifier: "),
-            Span::styled("Active", active_style),
-        ]),
+            if app.main_menu.ipc_status {Span::styled("Active", active_style)} else {Span::styled("Inactive", Style::default().fg(Color::Red))}
+        ]).left_aligned(),
         Line::from(vec![
-            Span::raw("eBPF:     "),
-            Span::styled("Active", active_style),
-        ]),
+            if app.main_menu.daemon_status {Span::styled("Active", active_style)} else {Span::styled("Inactive", Style::default().fg(Color::Red))}
+        ]).left_aligned(),
+        Line::from(vec![
+            if app.main_menu.discord_bot_status {Span::styled("Active", active_style)} else {Span::styled("Inactive", Style::default().fg(Color::Red))}
+        ]).left_aligned(),
     ];
 
-    let status_paragraph = Paragraph::new(status_text)
-        .block(status_box_block)
-        .alignment(Alignment::Center);
+    let component_paragraph = Paragraph::new(component_text);
+    let status_paragraph = Paragraph::new(status_text);
 
-    f.render_widget(status_paragraph, main_vertical_content_layout[0]);
+    f.render_widget(component_paragraph, system_status_area[0]);
+    f.render_widget(status_paragraph, system_status_area[1]);
 
 
     //Network Usage One time Position Calculation
@@ -146,8 +225,8 @@ pub fn render(f: &mut Frame, app: &App) {
     let network_usage_bar = Gauge::default()
         .block(Block::default().title("Network Usage").borders(Borders::ALL))
         .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-        .percent((app.progress * 100.0) as u16) // Use app.progress
-        .label(format!("{:.0}%", app.progress * 100.0)); // Display percentage
+        .percent((app.main_menu.progress * 100.0) as u16) // Use progress from MainMenuState
+        .label(format!("{:.0}%", app.main_menu.progress * 100.0)); // Display percentage
 
     f.render_widget(network_usage_bar,main_vertical_content_layout[1])
 }
@@ -172,68 +251,3 @@ fn centered_rect(r: Rect, width: u16, height: u16, v_offset_percent: f32) -> Rec
 
     popup_layout_horizontal[1]
 }
-
-// pub fn render(f: &mut Frame) {
-//     // 1. Create individual styled parts of the title
-//     let firewhal_span = Span::styled(
-//         "FireWhal ",
-//         Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-//     );
-//     let icon_span = Span::styled(
-//         "",
-//         Style::default().fg(Color::Rgb(255, 165, 0)), // A nice orange color
-//     );
-
-//     // 2. Combine the parts into a single `Line`
-//     let title = Line::from(vec![firewhal_span, icon_span]);
-
-//     // 3. Use the `Line` as the title for the main block
-//     let main_block = Block::default()
-//         .title(title) // The multi-colored title is now used here
-//         .borders(Borders::ALL)
-//         .title_alignment(Alignment::Center)
-//         .border_type(BorderType::Rounded);
-
-//     // Get the inner area from main_block *before* it's moved.
-//     let main_inner_area = main_block.inner(f.area());
-//     // Now, render the main_block.
-//     f.render_widget(main_block, f.area());
-
-//     // Create a layout to split the area inside the main block
-//     let chunks = Layout::vertical([
-//         Constraint::Length(3), // A fixed-height chunk for the tabs
-//         Constraint::Min(0),    // The rest of the space for content
-//     ])
-//     .split(main_inner_area);
-
-//     // Define the tab titles
-//     let titles = vec!["Status", "Rule Management", "Notifications", "Active Connections"];
-//     let tabs = Tabs::new(titles)
-//         .block(Block::default().title("Navigation").borders(Borders::ALL))
-//         .style(Style::default().fg(Color::White))
-//         .highlight_style(
-//             Style::default()
-//                 .fg(Color::Yellow)
-//                 .add_modifier(Modifier::BOLD),
-//         )
-//         .select(0);
-
-//     // Render the tabs in the top chunk
-//     f.render_widget(tabs, chunks[0]);
-
-//     // Your existing content block
-//     let content_block = Block::default()
-//         .title("Content")
-//         .borders(Borders::ALL)
-//         .border_type(BorderType::Rounded);
-
-//     let content_inner_area = content_block.inner(chunks[1]);
-//     f.render_widget(content_block, chunks[1]); // Render the content block in the bottom chunk
-
-//     // Your existing paragraph
-//     let paragraph_text = "Look at this graph\n";
-//     let paragraph = Paragraph::new(paragraph_text).wrap(Wrap { trim: true });
-
-//     // Render the paragraph inside the content area
-//     f.render_widget(paragraph, content_inner_area);
-// }
