@@ -1,5 +1,5 @@
 use aya::{
-    include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{xdp::{XdpLink, XdpLinkId}, CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags}, util::online_cpus, Ebpf
+    include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{xdp::{XdpLink, XdpLinkId}, CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags, SchedClassifier, TcAttachType}, util::online_cpus, Ebpf
 };
 use aya_log::EbpfLogger;
 use clap::Parser;
@@ -54,32 +54,44 @@ fn get_all_interfaces() -> Vec<String> {
         .collect()
 }
 
-async fn attach_xdp_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>, active_xdp_programs: Arc<Mutex<ActiveXdpInterfaces>>) -> Result<(), anyhow::Error>{
+async fn attach_tc_programs(bpf_arc: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>) -> Result<(), anyhow::Error>{
+    let mut bpf = bpf_arc.lock().await;    
+    
 
+
+    info!("[Kernel] Applying TC programs to interfaces {}...", updated_interfaces.join(","));
+
+
+    for iface in updated_interfaces {
+        info!("[Kernel] Attaching TC egress to '{}'...", iface);
+        {
+        let prog_egress: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into().unwrap(); // Use correct program name
+        let _ = prog_egress.load();
+        let _ = prog_egress.attach(&iface, TcAttachType::Egress);
+        }
+
+        {
+        let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into().unwrap(); // Use correct program name
+        _ = prog_ingress.load();
+        _ = prog_ingress.attach(&iface, TcAttachType::Ingress);
+        }
+    }
+
+    info!("[Kernel] TC programs applied.");
+    Ok(())
+}
+
+async fn attach_xdp_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>, active_xdp_programs: Arc<Mutex<ActiveXdpInterfaces>>) -> Result<(), anyhow::Error>{ // This should be renamed to represent TC program attachment
     let mut bpf = bpf.lock().await;
     let mut active_xdp_programs = active_xdp_programs.lock().await;
-
-
-    
 
     // XDP 
     info!("[Kernel] Applying XDP programs to interfaces {}...", updated_interfaces.join(","));
     let xdp_program: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
     let _ = xdp_program.load();
 
-
-
     //Iterate
     let new_set: HashSet<&String> = updated_interfaces.iter().collect();
-
-    // --- 1. Detach from interfaces that are no longer selected ---
-    
-    // First, find the names of all interfaces we need to detach from.
-    // let interfaces_to_remove: Vec<String> = active_xdp_programs.active_links
-    //     .keys()
-    //     .filter(|&iface_name| !new_set.contains(iface_name))
-    //     .cloned()
-    //     .collect();
 
     let interfaces_to_remove: Vec<String> = active_xdp_programs.active_links.keys().filter(|&iface_name| !updated_interfaces.contains(iface_name)).cloned().collect();
     
@@ -111,13 +123,7 @@ async fn attach_xdp_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfa
             }
         }
     }
-
-
     info!("[Kernel] XDP programs applied.");
-
-
-
-
     Ok(())
 }
 
@@ -125,10 +131,27 @@ async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file:
     let mut bpf = bpf.lock().await;
     // CGROUP
     info!("[Kernel] Applying CGROUP programs...");
+    // INGRESS PROGRAMS
+    //
+    // let ingress_recvmsg4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_ingress_recvmsg4").unwrap().try_into().unwrap();
+    // ingress_recvmsg4_program.load();
+    // _ = ingress_recvmsg4_program.attach(&cgroup_file, CgroupAttachMode::Single);
+    // EGRESS PROGRAMS
+    //
     let egress_connect4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
     let _ = egress_connect4_program.load();
     _ = egress_connect4_program.attach(&cgroup_file, CgroupAttachMode::Single);
+    //
+    let firewhal_egress_sendmsg4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_sendmsg4").unwrap().try_into().unwrap();
+    let _ = firewhal_egress_sendmsg4_program.load();
+    _ = firewhal_egress_sendmsg4_program.attach(&cgroup_file, CgroupAttachMode::Single);
+    //
+    let firewhal_egress_bind4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_bind4").unwrap().try_into().unwrap();
+    let _ = firewhal_egress_bind4_program.load();
+    _ = firewhal_egress_bind4_program.attach(&cgroup_file, CgroupAttachMode::Single);
+    
     info!("[Kernel] CGROUP programs applied.");
+
     Ok(())
 }
 
@@ -136,9 +159,36 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FirewallConfi
     let mut bpf = bpf.lock().await;
     info!("[Kernel] [Rule] Applying ruleset...");
 
-    if let Ok(mut blocklist) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("RULES").unwrap()) {
+    if let Ok(mut rulelist) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("RULES").unwrap()) {
 
     for rule in config.rules {
+            // Create Key from Rule
+            let mut new_key = RuleKey {
+                protocol: rule.protocol as u32,
+                dest_ip: 0, // Set placeholder IPs for now
+                dest_port: rule.dest_port.unwrap_or(0), // Wildcard port if not specified
+                source_ip: 0, // Set placeholder IPs for now
+                source_port: rule.source_port.unwrap_or(0), // Wildcard port if not specified,
+            };
+
+            
+            // Allow/Block matching to build RuleAction
+            let action: firewhal_kernel_common::RuleAction;
+            match(rule.action) {
+                firewhal_core::Action::Allow => {
+                    action = firewhal_kernel_common::RuleAction {
+                        action: firewhal_kernel_common::Action::Allow,
+                        rule_id: 127 // Placeholder value for now
+                    };
+                }
+                firewhal_core::Action::Deny => {
+                    action = firewhal_kernel_common::RuleAction {
+                        action: firewhal_kernel_common::Action::Deny,
+                        rule_id: 127 // Placeholder value for now
+                    };
+                }
+            }
+
         let dest_is_v4 = rule.dest_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
         let src_is_v4 = rule.source_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
 
@@ -151,31 +201,18 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FirewallConfi
             } else { src_ip_u32 = 0; }
             if let Some(IpAddr::V4(destination_ip)) = rule.dest_ip {
                 dst_ip_u32 = u32::from_le_bytes(destination_ip.octets());
-            } else { dst_ip_u32 = 0; }
-            
+            } else { dst_ip_u32 = 0; } 
+            // Add them to the key
+            new_key.source_ip = src_ip_u32;
+            new_key.dest_ip = dst_ip_u32;
+        } else {} // IPv6 Logic
 
-            // Create Key from Rule
-            let new_key = RuleKey {
-                protocol: rule.protocol as u32,
-                dest_ip: dst_ip_u32, 
-                dest_port: rule.dest_port.unwrap_or(0), // Wildcard port if not specified
-                source_ip: src_ip_u32,
-                source_port: rule.source_port.unwrap_or(0), // Wildcard port if not specified,
-            };
-
-            let action = RuleAction {
-                action: firewhal_kernel_common::Action::Block,
-                rule_id: 123,
-            };
-
-            if matches!(rule.action, firewhal_core::Action::Deny) {
-                if let Err(e) = blocklist.insert(&new_key, &action, 0) {
-                    warn!("[Kernel] Failed to insert rule: {}", e);
-                } else {
-                    info!("[Kernel] [Rule] Applied: Block traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}",
-                    new_key.protocol, Ipv4Addr::from(u32::from_be(new_key.dest_ip)), new_key.dest_port, Ipv4Addr::from(u32::from_be(new_key.source_ip)), new_key.source_port);
-                }
-            }
+        // Insertion of completed key
+        if let Err(e) = rulelist.insert(&new_key, action, 0) {
+            warn!("[Kernel] Failed to insert rule: {}", e);
+        } else {
+            info!("[Kernel] [Rule] Applied: {:?} traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}",
+            if action.action as u32 == 0 { "Allow" } else { "Deny" }, new_key.protocol, Ipv4Addr::from(u32::from_be(new_key.dest_ip)), new_key.dest_port, Ipv4Addr::from(u32::from_be(new_key.source_ip)), new_key.source_port);
         }
     }
 }
@@ -194,9 +231,6 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;
     let active_xdp_interfaces: Arc<Mutex<ActiveXdpInterfaces>> = Arc::new(Mutex::new(ActiveXdpInterfaces { active_links: HashMap::new() }));
 
-    if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
-
-    // 1. Load the bpf object. Make it mutable.
     if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
 
     // 2. Take ownership of the EVENTS map and move it to the event handler task.
@@ -253,10 +287,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let cgroup_file = File::open(&opt.cgroup_path)?;
     // Fix to populate with list received from FireWhalConfig later
-    let interfaces = get_all_interfaces();
-    attach_xdp_programs(Arc::clone(&bpf), interfaces, active_xdp_interfaces.clone()).await;
+    attach_xdp_programs(Arc::clone(&bpf), get_all_interfaces(), active_xdp_interfaces.clone()).await;
     attach_cgroup_programs(Arc::clone(&bpf), cgroup_file).await;
-
+    // Attach TC programs
+    //attach_tc_programs(Arc::clone(&bpf), get_all_interfaces()).await;
     
     // --- Main Event Loop and Shutdown logic ---
     info!("[Kernel] ✅ Firewall is active. Waiting for shutdown signal...");

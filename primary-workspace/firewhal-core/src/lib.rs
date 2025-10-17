@@ -154,6 +154,7 @@ pub enum Protocol {
 
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct Rule {
+    // Consider adding rule ids to rules for debugging purposes
     pub action: Action,
     pub protocol: Protocol,
     pub source_ip: Option<IpAddr>,

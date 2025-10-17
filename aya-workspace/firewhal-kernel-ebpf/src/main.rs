@@ -8,20 +8,22 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 use core::{mem, net::{IpAddr,Ipv4Addr}};
 
 use aya_ebpf::{
-    bindings::xdp_action,
-    helpers::bpf_get_current_pid_tgid,
-    macros::{cgroup_sock_addr, map, xdp},
-    maps::{HashMap, LpmTrie, PerfEventArray, RingBuf}, // <-- NEW: Import RingBuf
-    programs::{SockAddrContext, XdpContext}, EbpfContext,
+    bindings::{sockaddr, xdp_action, TC_ACT_OK, TC_ACT_SHOT},
+    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns},
+    macros::{cgroup_sock_addr, classifier, map, xdp},
+    maps::{HashMap, LpmTrie, PerfEventArray, RingBuf, LruHashMap}, // <-- NEW: Import RingBuf
+    programs::{tc, SockAddrContext, TcContext, XdpContext}, EbpfContext, 
 };
 use aya_log_ebpf::info;
 
-use firewhal_kernel_common::{BlockEvent, BlockReason, RuleKey, RuleAction, Action, LpmIpKey};
+use firewhal_kernel_common::{BlockEvent, BlockReason, RuleKey, RuleAction, Action, LpmIpKey, ConnectionTuple, ConnectionInfo, parse_packet_tuple};
 
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
 };
+
+
 
 #[map]
 static mut BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
@@ -40,18 +42,18 @@ static mut EVENTS: PerfEventArray<BlockEvent> = PerfEventArray::new(0);
 #[map]
 static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
 
-#[map]
-static mut IPV4_RULES: LpmTrie<LpmIpKey, RuleAction> =
-    LpmTrie::with_max_entries(1024, 0);
+#[map] // Connection Tracking Map for Stateful
+static mut CONNECTION_MAP: LruHashMap<ConnectionTuple, ConnectionInfo> =
+    LruHashMap::with_max_entries(4096, 0);
 
-#[map]
-static mut PORT_RULES: HashMap<u16, u32> =
-    HashMap::with_max_entries(256, 0);
-
-#[map]
-static mut PROTOCOL_RULES: HashMap<u8, u32> =
-    HashMap::with_max_entries(16, 0);
-
+// The following maps were for the map-in-map implementation and are no longer needed.
+//
+// #[map]
+// static mut PROTOCOL_RULES: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
+// #[map(pinned)]
+// static mut PORT_RULES_TEMPLATE: HashMap<u16, u32> = HashMap::with_max_entries(256, 0);
+// #[map(pinned)]
+// static mut IP_RULES_TEMPLATE: LpmTrie<LpmIpKey, RuleAction> = LpmTrie::with_max_entries(1024, 0);
 
 // INGRESS PROGRAMS
 #[xdp]
@@ -112,31 +114,85 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
     }
 }
 
-#[cgroup_sock_addr(recvmsg4)]
-pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
-    let result = || -> Result<i32, i32> {
-        let sockaddr_pointer = ctx.sock_addr;
-        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-        let user_port = unsafe { (*sockaddr_pointer).user_port };
-
-        // Convert to readable format
-        let user_ip_converted = u32::from_be(user_ip4);
-        let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
-
-        Ok(1)
-        }();
-
-    match result {
+#[classifier] // Replaces primary use of XDP for all incoming packets, uses a map of current connections to implement stateful filtering
+pub fn firewall_ingress_tc(ctx: TcContext) -> i32 {
+    match try_firewall_ingress_tc(ctx) {
         Ok(ret) => ret,
-        Err(ret) => ret,
+        Err(_) => TC_ACT_SHOT, // Default to drop if parsing fails
     }
 }
+
+fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
+    let incoming_tuple = parse_packet_tuple(&ctx)?;
+
+    // For ingress, we need to check for the REVERSE tuple, since we are
+    // looking for the return path of an outgoing connection.
+    let expected_tuple = ConnectionTuple {
+        saddr: incoming_tuple.daddr, // Swapped
+        daddr: incoming_tuple.saddr, // Swapped
+        sport: incoming_tuple.dport, // Swapped
+        dport: incoming_tuple.sport, // Swapped
+        protocol: incoming_tuple.protocol,
+    };
+    
+    // For logging, convert network-order (big-endian) values to host-order.
+    // Ipv4Addr::from() expects a big-endian u32, so we don't convert IPs.
+    // The info! macro handles the u16 endianness for printing.
+    let source_address = Ipv4Addr::from(expected_tuple.saddr);
+    let destination_address = Ipv4Addr::from(expected_tuple.daddr);
+    let source_port = expected_tuple.sport;
+    let destination_port = expected_tuple.dport;
+    let protocol = expected_tuple.protocol;
+
+    // Check if this connection is in our tracking map.
+    if let Some(info) = unsafe { CONNECTION_MAP.get(&expected_tuple) } {
+        info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
+        //
+        Ok(TC_ACT_OK)
+    } else {
+        info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+        Ok(TC_ACT_SHOT)
+    }
+}
+
+// #[cgroup_sock_addr(recvmsg4)] 
+// pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
+//     let result = || -> Result<i32, i32> {
+//         //Consider changing these back to safe "ctx.user_ipv" and the like if you can
+//         let sockaddr_pointer = ctx.sock_addr;
+//         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+//         let source_ip4 = unsafe { (*sockaddr_pointer).msg_src_ip4 };
+//         let user_port = unsafe { (*sockaddr_pointer).user_port }; 
+//         let protocol = unsafe { (*sockaddr_pointer).protocol };
+
+//         //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
+//         // They need to be converted to be used first
+//         let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
+//         let destination_port = (u32::from_be(user_port) >> 16) as u16;
+
+
+//         //Convert to readable format for error logging
+//         let source_ip_converted = Ipv4Addr::from(u32::from_be(user_ip4));
+//         let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
+        
+//         // Print all allowed traffic
+//         info!(&ctx, "Allowed incoming connection Protocol {}, Source: {}:{}, Destination: {}:{}", protocol, source_ip4, source_port, source_ip_converted, destination_port);
+        
+//         Ok(1) // Allow the connection
+//     }();
+
+//     match result {
+//         Ok(ret) => ret,
+//         Err(ret) => ret,
+//     }
+// }
 
 // EGRESS PROGRAMS
 #[cgroup_sock_addr(connect4)]
 pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
         //Consider changing these back to safe "ctx.user_ipv" and the like if you can
+        let pid = ctx.pid();
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
         let user_port = unsafe { (*sockaddr_pointer).user_port }; 
@@ -145,7 +201,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
         //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
         // They need to be converted to be used first
         let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
-        let destination_port = unsafe { ((*sockaddr_pointer).user_port >> 16) as u16};
+        let destination_port = (u32::from_be(user_port) >> 16) as u16;
 
 
         //Convert to readable format for error logging
@@ -155,7 +211,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
         // Get a reference to the RULES hashmap
         let rules_ptr =  core::ptr::addr_of_mut!(RULES);
 
-        // Create keys to check for block
+        // Create keys to check for Rule Match
         // Specific Match
         let full_key = RuleKey {
             protocol: protocol, // Don't forget about wild card for protocol
@@ -189,26 +245,46 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
         };
         // Check all keys
         if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
-            if matches!(action.action, Action::Block) {
-                info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
-                unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
-                return Ok(0); // Block
+            // New matching 
+            match action.action {
+                Action::Deny => {
+                    info!(&ctx, "[Kernel] [connect4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                    return Ok(0); // Block
+                }
+                Action::Allow => {
+                    info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    return Ok(1);
+                }
             }
         } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
-            if matches!(action.action, Action::Block) {
-                info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
-                unsafe { EVENTS.output(&ctx, &block_report_event, 0) } {
-                return Ok(0); // Block
+            match action.action {
+                Action::Deny => {
+                    info!(&ctx, "[Kernel] [connect4] Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
+                    unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                    return Ok(0); // Block
+                }
+                Action::Allow => {
+                    info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    return Ok(1);
+                }
             }
         } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
-            if matches!(action.action, Action::Block) {
-                info!(&ctx, "Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
-                unsafe { EVENTS.output(&ctx, &block_report_event, 0) } 
-
-                return Ok(0); // Block
+            match action.action {
+                Action::Deny => {
+                    info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                    return Ok(0); // Block
+                }
+                Action::Allow => {
+                    info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    return Ok(1);
+                }
             }
         }
-    }
+        // Print all allowed traffic
+        //info!(&ctx, "Allowed connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
+        
         Ok(1) // Allow the connection
     }();
 
@@ -225,30 +301,23 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-        let user_port = unsafe { (*sockaddr_pointer).user_port };
-        let dest_ip_host = u32::from_be(user_ip4);
-        let dest_port_host = (u32::from_be(user_port) >> 16) as u16;
-        // info!(
-        //     &ctx,
-        //     "UDP EGRESS Connection Attempt to: {}, port: {}",
-        //     dest_ip_host, dest_port_host,
-        // );
+        let user_port = unsafe { (*sockaddr_pointer).user_port }; 
+        let protocol = unsafe { (*sockaddr_pointer).protocol };
 
-        let dest_addr = user_ip4;
-        let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
-        if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
-            let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-            let block_report_event = BlockEvent {
-                reason: BlockReason::IpBlockedEgressUdp,
-                pid: ctx.pid(),
-                dest_addr:IpAddr::V4(Ipv4Addr::from(dest_addr.to_be())),
-                dest_port: dest_port_host,
-            };
-            unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
-            // info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
-            return Ok(0); // Block the connection
-        }
+        //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
+        // They need to be converted to be used first
+        let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
+        let destination_port = (u32::from_be(user_port) >> 16) as u16;
 
+
+        //Convert to readable format for error logging
+        let user_ip_converted = Ipv4Addr::from(u32::from_be(user_ip4));
+        let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
+
+        
+        // Print all allowed traffic
+        //info!(&ctx, "[Kernel] [sendmsg4] Allowed connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
+        
         Ok(1) // Allow the connection
     }();
 
@@ -261,35 +330,26 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 
 #[cgroup_sock_addr(bind4)]
 pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
-let result = || -> Result<i32, i32> {
+    let result = || -> Result<i32, i32> {
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-        let user_port = unsafe { (*sockaddr_pointer).user_port };
-        let dest_ip_host = u32::from_be(user_ip4);
-        let dest_port_host = (u32::from_be(user_port) >> 16) as u16;
-        // info!(
-        //     &ctx,
-        //     "UDP EGRESS Connection Attempt to: {}, port: {}",
-        //     dest_ip_host, dest_port_host,
-        // );
+        let user_port = unsafe { (*sockaddr_pointer).user_port }; 
+        let protocol = unsafe { (*sockaddr_pointer).protocol };
 
-        let dest_addr = user_ip4;
-        let blocklist_ptr = core::ptr::addr_of_mut!(BLOCKLIST);
-        if unsafe { (*blocklist_ptr).get(&dest_addr).is_some() } {
-            let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+        //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
+        // They need to be converted to be used first
+        let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
+        let destination_port = (u32::from_be(user_port) >> 16) as u16;
 
-            let block_event_message = BlockEvent {
-                reason : BlockReason::BindBlocked,
-                pid: ctx.pid(),
-                dest_addr:IpAddr::V4(Ipv4Addr::from(dest_addr.to_be())),
-                dest_port: dest_port_host,
-            };
-            unsafe { EVENTS.output(&ctx, &block_event_message, 0) };
 
-            info!(&ctx, "Cgroup Egress: BLOCKED PID {}, dest addr {}", pid, dest_addr);
-            return Ok(0); // Block the connection
-        }
+        //Convert to readable format for error logging
+        let user_ip_converted = Ipv4Addr::from(u32::from_be(user_ip4));
+        let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
 
+        
+        // Print all allowed traffic
+        //info!(&ctx, "[Kernel] [bind4] Allowed connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
+        
         Ok(1) // Allow the connection
     }();
 
@@ -297,6 +357,47 @@ let result = || -> Result<i32, i32> {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
+}
+
+#[classifier] // Used for connection tracking when an outgoing connection is allowed
+pub fn firewall_egress_tc(ctx: TcContext) -> i32 {
+    match try_firewall_egress_tc(ctx) {
+        Ok(ret) => ret,
+        Err(_) => TC_ACT_OK,
+    }
+}
+
+fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
+    let tuple = parse_packet_tuple(&ctx)?;
+
+    // This is where you would track the new outgoing connection.
+    // TODO: A real implementation would check if this egress is from an approved PID.
+    // For now, we'll add any outgoing connection to the map to allow its return traffic.
+    let info = ConnectionInfo {
+        pid: 0, // In TC we don't know the PID, this would be set by the cgroup program
+        last_seen: unsafe { bpf_ktime_get_ns() },
+    };
+    unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) }.map_err(|_| ())?; // Use info to check incoming traffic to see if there is a corresponding entry for a valid pid
+    // For logging, convert network-order (big-endian) values to host-order.
+    // Ipv4Addr::from() expects a big-endian u32, so we don't convert IPs.
+    // The info! macro handles the u16 endianness for printing.
+    let source_address = Ipv4Addr::from(tuple.saddr);
+    let destination_address = Ipv4Addr::from(tuple.daddr);
+    let source_port = tuple.sport;
+    let destination_port = tuple.dport;
+    let protocol = tuple.protocol;
+    info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+
+    Ok(TC_ACT_OK)
+    /*
+    pub struct ConnectionTuple {
+    pub saddr: u32,
+    pub daddr: u32,
+    pub sport: u16,
+    pub dport: u16,
+    pub protocol: u8,
+    }
+     */
 }
 
 #[cfg(not(test))]

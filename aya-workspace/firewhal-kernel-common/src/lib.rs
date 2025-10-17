@@ -1,5 +1,12 @@
 #![no_std]
 
+use aya_ebpf::{bindings::TC_ACT_OK, programs::TcContext};
+use core::mem;
+use network_types::eth::{EthHdr, EtherType};
+use network_types::ip::{IpProto, Ipv4Hdr};
+use network_types::tcp::TcpHdr;
+use network_types::udp::UdpHdr;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LogRecord {
@@ -12,16 +19,83 @@ use plain::Plain;
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for LogRecord {}
 
-// Add these to your existing common file. You'll likely have `LogRecord` here already.
+
 
 use core::fmt::{self, Debug};
 
+// TC Program Connection Handling and Tracking 
+
+// Connection info
+#[derive(Copy, Clone)]
+pub struct ConnectionInfo {
+    pub pid: u32,
+    pub last_seen: u64,
+}
+
+// Connection Map Key for Statful
+#[derive(Copy, Clone, Hash, Eq, PartialEq)]
+pub struct ConnectionTuple {
+    pub saddr: u32,
+    pub daddr: u32,
+    pub sport: u16,
+    pub dport: u16,
+    pub protocol: u8,
+}
+
+// TC Program Packet Parser
+#[inline(always)]
+pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
+    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+    // The ether_type from the packet is big-endian. The EtherType::Ipv4 enum
+    // has the value 0x0800. We must ensure the comparison is correct.
+    // The simplest way is to use the `into()` conversion provided by network-types.
+    if eth_hdr.ether_type != EtherType::Ipv4.into() {
+        return Err(());
+    }
+
+    let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
+    let l4_hdr_offset = EthHdr::LEN + (ipv4_hdr.ihl() as usize * 4);
+    
+    // --- Convert IP addresses from [u8; 4] to u32 in Network Byte Order ---
+    // The [u8; 4] is already big-endian, so u32::from_be_bytes() is the correct way
+    // to get a u32 that represents this big-endian value, regardless of host endianness.
+    let saddr_net = u32::from_be_bytes(ipv4_hdr.src_addr);
+    let daddr_net = u32::from_be_bytes(ipv4_hdr.dst_addr);
+
+    // THIS IS WHERE THE ISSUE IS
+    let (source_port_bytes, dest_port_bytes) = match ipv4_hdr.proto {
+        IpProto::Tcp => {
+            let tcp_hdr: TcpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?; // Use dynamic offset
+            (tcp_hdr.source, tcp_hdr.dest) // These are [u8; 2] in network byte order
+        }
+        IpProto::Udp => {
+            let udp_hdr: UdpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?; // Use dynamic offset
+            (udp_hdr.src, udp_hdr.dst) // These are [u8; 2] in network byte order
+        }
+        _ => return Err(()),
+    };
+
+    // --- Convert ports from [u8; 2] to u16 in Network Byte Order ---
+    // The [u8; 2] is already big-endian, so u16::from_be_bytes() is the correct way
+    // to get a u16 that represents this big-endian value.
+    let sport_net = u16::from_be_bytes(source_port_bytes);
+    let dport_net = u16::from_be_bytes(dest_port_bytes);
+    
+
+    Ok(ConnectionTuple {
+        saddr: saddr_net,     // u32 in network byte order
+        daddr: daddr_net,     // u32 in network byte order
+        sport: sport_net,     // u16 in network byte order
+        dport: dport_net,     // u16 in network byte order
+        protocol: ipv4_hdr.proto as u8,
+    })
+}
 
 #[repr(u8)]
 #[derive(Clone, Copy)]
 pub enum Action {
-    Block,
-    Allow
+    Allow,
+    Deny
 }
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for Action {}
