@@ -31,8 +31,11 @@ pub struct ConnectionInfo {
     pub pid: u32,
     pub last_seen: u64,
 }
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for ConnectionInfo {}
 
 // Connection Map Key for Statful
+#[repr(C)]
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct ConnectionTuple {
     pub saddr: u32,
@@ -40,7 +43,10 @@ pub struct ConnectionTuple {
     pub sport: u16,
     pub dport: u16,
     pub protocol: u8,
+    pub _pad: [u8; 3], // Explicit padding
 }
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for ConnectionTuple {}
 
 // TC Program Packet Parser
 #[inline(always)]
@@ -81,14 +87,21 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
     let sport_net = u16::from_be_bytes(source_port_bytes);
     let dport_net = u16::from_be_bytes(dest_port_bytes);
     
-
     Ok(ConnectionTuple {
         saddr: saddr_net,     // u32 in network byte order
         daddr: daddr_net,     // u32 in network byte order
         sport: sport_net,     // u16 in network byte order
         dport: dport_net,     // u16 in network byte order
         protocol: ipv4_hdr.proto as u8,
+        _pad: [0; 3],
     })
+    // Ok(ConnectionTuple {
+    //     saddr: saddr_net,     // u32 in network byte order
+    //     daddr: daddr_net,     // u32 in network byte order
+    //     sport: sport_net,     // u16 in network byte order
+    //     dport: dport_net,     // u16 in network byte order
+    //     protocol: ipv4_hdr.proto as u8,
+    // })
 }
 
 #[repr(u8)]

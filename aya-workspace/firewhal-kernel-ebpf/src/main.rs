@@ -5,7 +5,7 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 #![no_std]
 #![no_main]
 
-use core::{mem, net::{IpAddr,Ipv4Addr}};
+use core::{hash::Hash, mem, net::{IpAddr,Ipv4Addr}};
 
 use aya_ebpf::{
     bindings::{sockaddr, xdp_action, TC_ACT_OK, TC_ACT_SHOT},
@@ -14,7 +14,7 @@ use aya_ebpf::{
     maps::{HashMap, LpmTrie, PerfEventArray, RingBuf, LruHashMap}, // <-- NEW: Import RingBuf
     programs::{tc, SockAddrContext, TcContext, XdpContext}, EbpfContext, 
 };
-use aya_log_ebpf::info;
+use aya_log_ebpf::{info, error, warn};
 
 use firewhal_kernel_common::{BlockEvent, BlockReason, RuleKey, RuleAction, Action, LpmIpKey, ConnectionTuple, ConnectionInfo, parse_packet_tuple};
 
@@ -118,74 +118,73 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
 pub fn firewall_ingress_tc(ctx: TcContext) -> i32 {
     match try_firewall_ingress_tc(ctx) {
         Ok(ret) => ret,
-        Err(_) => TC_ACT_SHOT, // Default to drop if parsing fails
+        Err(_) => {
+            TC_ACT_SHOT
+        }, // Default to drop if parsing fails
     }
 }
 
 fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
-    let incoming_tuple = parse_packet_tuple(&ctx)?;
 
-    //For ingress, we need to check for the REVERSE tuple, since we are
-    //looking for the return path of an outgoing connection.
-    let expected_tuple = ConnectionTuple {
-        saddr: incoming_tuple.daddr, // Swapped
-        daddr: incoming_tuple.saddr, // Swapped
-        sport: incoming_tuple.dport, // Swapped
-        dport: incoming_tuple.sport, // Swapped
-        protocol: incoming_tuple.protocol,
-    };
-    
-    // For logging, convert network-order (big-endian) values to host-order.
-    // Ipv4Addr::from() expects a big-endian u32, so we don't convert IPs.
-    // The info! macro handles the u16 endianness for printing.
-    let source_address = Ipv4Addr::from(expected_tuple.saddr);
-    let destination_address = Ipv4Addr::from(expected_tuple.daddr);
-    let source_port = expected_tuple.sport;
-    let destination_port = expected_tuple.dport;
-    let protocol = expected_tuple.protocol;
+        let result = || -> Result<i32, i32> {
+            if let Ok(incoming_tuple) = parse_packet_tuple(&ctx) {
+                //For ingress, we need to check for the REVERSE tuple, since we are
+                //looking for the return path of an outgoing connection.
+                let expected_tuple = ConnectionTuple {
+                    saddr: incoming_tuple.daddr, // Swapped
+                    daddr: incoming_tuple.saddr, // Swapped
+                    sport: incoming_tuple.dport, // Swapped
+                    dport: incoming_tuple.sport, // Swapped
+                    protocol: incoming_tuple.protocol,
+                    _pad: [0; 3],
+                };
 
-    // Check if this connection is in our tracking map.
-    if let Some(info) = unsafe { CONNECTION_MAP.get(&expected_tuple) } {
-        info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
-        //
-        Ok(TC_ACT_OK)
-    } else {
-        info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
-        Ok(TC_ACT_SHOT)
+                // Fuzzy matching keys for DHCP
+                let dhcp_response = ConnectionTuple {
+                    saddr: 0, // Swapped
+                    daddr: 0, // Swapped
+                    sport: incoming_tuple.dport, // Swapped
+                    dport: incoming_tuple.sport, // Swapped
+                    protocol: incoming_tuple.protocol,
+                    _pad: [0; 3],
+                };
+
+                // For logging, convert network-order (big-endian) values to host-order.
+                // Ipv4Addr::from() expects a big-endian u32, so we don't convert IPs.
+                // The info! macro handles the u16 endianness for printing.
+                let source_address = Ipv4Addr::from(expected_tuple.saddr);
+                let destination_address = Ipv4Addr::from(expected_tuple.daddr);
+                let source_port = expected_tuple.sport;
+                let destination_port = expected_tuple.dport;
+                let protocol = expected_tuple.protocol;
+
+                // Check if this connection is in our tracking map.
+                if unsafe { CONNECTION_MAP.get(&expected_tuple).is_some() } {
+                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
+                    //
+                    return Ok(TC_ACT_OK)
+                } else if unsafe { CONNECTION_MAP.get(&dhcp_response).is_some() } {
+                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
+                    //
+                    return Ok(TC_ACT_OK)
+                } else {
+                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+                    return Ok(TC_ACT_SHOT)
+                }
+            } else {
+                info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
+                return Err(TC_ACT_SHOT)
+            }
+        }();
+
+    match result {
+        Ok(ret) => Ok(ret),
+        Err(ret) => {
+            Err(())
+        },
     }
 }
 
-// #[cgroup_sock_addr(recvmsg4)] 
-// pub fn firewhal_ingress_recvmsg4(ctx: SockAddrContext) -> i32 {
-//     let result = || -> Result<i32, i32> {
-//         //Consider changing these back to safe "ctx.user_ipv" and the like if you can
-//         let sockaddr_pointer = ctx.sock_addr;
-//         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-//         let source_ip4 = unsafe { (*sockaddr_pointer).msg_src_ip4 };
-//         let user_port = unsafe { (*sockaddr_pointer).user_port }; 
-//         let protocol = unsafe { (*sockaddr_pointer).protocol };
-
-//         //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
-//         // They need to be converted to be used first
-//         let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
-//         let destination_port = (u32::from_be(user_port) >> 16) as u16;
-
-
-//         //Convert to readable format for error logging
-//         let source_ip_converted = Ipv4Addr::from(u32::from_be(user_ip4));
-//         let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
-        
-//         // Print all allowed traffic
-//         info!(&ctx, "Allowed incoming connection Protocol {}, Source: {}:{}, Destination: {}:{}", protocol, source_ip4, source_port, source_ip_converted, destination_port);
-        
-//         Ok(1) // Allow the connection
-//     }();
-
-//     match result {
-//         Ok(ret) => ret,
-//         Err(ret) => ret,
-//     }
-// }
 
 // EGRESS PROGRAMS
 #[cgroup_sock_addr(connect4)]
@@ -368,7 +367,7 @@ pub fn firewall_egress_tc(ctx: TcContext) -> i32 {
 }
 
 fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
-    let tuple = parse_packet_tuple(&ctx)?;
+    let mut tuple = parse_packet_tuple(&ctx)?;
 
     // This is where you would track the new outgoing connection.
     // TODO: A real implementation would check if this egress is from an approved PID.
@@ -377,7 +376,25 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         pid: 0, // In TC we don't know the PID, this would be set by the cgroup program
         last_seen: unsafe { bpf_ktime_get_ns() },
     };
-    unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) }.map_err(|_| ())?; // Use info to check incoming traffic to see if there is a corresponding entry for a valid pid
+
+    // Check to see if broadcast for DHCP
+    if tuple.saddr == Ipv4Addr::from([0,0,0,0]).into() && tuple.daddr == Ipv4Addr::from([255,255,255,255]).into() {
+        let broadcast_rule = ConnectionTuple {
+        saddr: 0,
+        daddr: 0,
+        sport: tuple.sport,
+        dport: tuple.dport,
+        protocol: tuple.protocol,
+        _pad: [0; 3],
+        };
+        tuple = broadcast_rule;
+    }
+    
+    let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
+    if result.is_err() {
+        info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+    } // Use info to check incoming traffic to see if there is a corresponding entry for a valid pid
+
     // For logging, convert network-order (big-endian) values to host-order.
     // Ipv4Addr::from() expects a big-endian u32, so we don't convert IPs.
     // The info! macro handles the u16 endianness for printing.
@@ -389,15 +406,6 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
 
     Ok(TC_ACT_OK)
-    /*
-    pub struct ConnectionTuple {
-    pub saddr: u32,
-    pub daddr: u32,
-    pub sport: u16,
-    pub dport: u16,
-    pub protocol: u8,
-    }
-     */
 }
 
 #[cfg(not(test))]
