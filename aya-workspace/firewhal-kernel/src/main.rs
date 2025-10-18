@@ -290,7 +290,7 @@ async fn main() -> Result<(), anyhow::Error> {
     attach_xdp_programs(Arc::clone(&bpf), get_all_interfaces(), active_xdp_interfaces.clone()).await;
     attach_cgroup_programs(Arc::clone(&bpf), cgroup_file).await;
     // Attach TC programs
-    //attach_tc_programs(Arc::clone(&bpf), get_all_interfaces()).await;
+    attach_tc_programs(Arc::clone(&bpf), get_all_interfaces()).await;
     
     // --- Main Event Loop and Shutdown logic ---
     info!("[Kernel] ✅ Firewall is active. Waiting for shutdown signal...");

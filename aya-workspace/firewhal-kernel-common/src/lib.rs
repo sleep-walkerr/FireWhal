@@ -54,8 +54,8 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
     }
 
     let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
-    let l4_hdr_offset = EthHdr::LEN + (ipv4_hdr.ihl() as usize * 4);
-    
+    let l4_hdr_offset = EthHdr::LEN + Ipv4Hdr::LEN;
+
     // --- Convert IP addresses from [u8; 4] to u32 in Network Byte Order ---
     // The [u8; 4] is already big-endian, so u32::from_be_bytes() is the correct way
     // to get a u32 that represents this big-endian value, regardless of host endianness.

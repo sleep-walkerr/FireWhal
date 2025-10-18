@@ -125,8 +125,8 @@ pub fn firewall_ingress_tc(ctx: TcContext) -> i32 {
 fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
     let incoming_tuple = parse_packet_tuple(&ctx)?;
 
-    // For ingress, we need to check for the REVERSE tuple, since we are
-    // looking for the return path of an outgoing connection.
+    //For ingress, we need to check for the REVERSE tuple, since we are
+    //looking for the return path of an outgoing connection.
     let expected_tuple = ConnectionTuple {
         saddr: incoming_tuple.daddr, // Swapped
         daddr: incoming_tuple.saddr, // Swapped

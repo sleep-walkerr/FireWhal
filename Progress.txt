@@ -29,4 +29,5 @@ Progress Made:
 -- Added interface selection to TUI
 -- userspace loader now applies incoming firewall rules to the list of interfaces it receives from the TUI
 -- Added fuzzy matching for rules so that wildcards are fully handled
+-- Added systemd unit file for Firewhal
 
