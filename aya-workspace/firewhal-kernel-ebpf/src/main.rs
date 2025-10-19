@@ -128,51 +128,61 @@ fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
 
         let result = || -> Result<i32, i32> {
             if let Ok(incoming_tuple) = parse_packet_tuple(&ctx) {
-                //For ingress, we need to check for the REVERSE tuple, since we are
-                //looking for the return path of an outgoing connection.
-                let expected_tuple = ConnectionTuple {
+                // For ingress, we need to check for the REVERSE tuple, since we are
+                // looking for the return path of an outgoing connection.
+                let reversed_tuple = ConnectionTuple {
                     saddr: incoming_tuple.daddr, // Swapped
                     daddr: incoming_tuple.saddr, // Swapped
                     sport: incoming_tuple.dport, // Swapped
                     dport: incoming_tuple.sport, // Swapped
                     protocol: incoming_tuple.protocol,
-                    _pad: [0; 3],
+                    ..incoming_tuple
                 };
 
-                // Fuzzy matching keys for DHCP
-                let dhcp_response = ConnectionTuple {
-                    saddr: 0, // Swapped
-                    daddr: 0, // Swapped
-                    sport: incoming_tuple.dport, // Swapped
-                    dport: incoming_tuple.sport, // Swapped
-                    protocol: incoming_tuple.protocol,
-                    _pad: [0; 3],
+                // Also check for a portless version for protocols like ICMP
+                let portless_tuple = ConnectionTuple {
+                    sport: 0,
+                    dport: 0,
+                    ..reversed_tuple
                 };
+
+                let dhcp_response = ConnectionTuple {
+                    saddr: 0,
+                    daddr: 0,
+                    sport: 68,
+                    dport: 67,
+                    protocol: 17,
+                    ..reversed_tuple
+                };
+
 
                 // For logging, convert network-order (big-endian) values to host-order.
                 // Ipv4Addr::from() expects a big-endian u32, so we don't convert IPs.
                 // The info! macro handles the u16 endianness for printing.
-                let source_address = Ipv4Addr::from(expected_tuple.saddr);
-                let destination_address = Ipv4Addr::from(expected_tuple.daddr);
-                let source_port = expected_tuple.sport;
-                let destination_port = expected_tuple.dport;
-                let protocol = expected_tuple.protocol;
+                let source_address = Ipv4Addr::from(reversed_tuple.saddr);
+                let destination_address = Ipv4Addr::from(reversed_tuple.daddr);
+                let source_port = reversed_tuple.sport;
+                let destination_port = reversed_tuple.dport;
+                let protocol = reversed_tuple.protocol;
 
                 // Check if this connection is in our tracking map.
-                if unsafe { CONNECTION_MAP.get(&expected_tuple).is_some() } {
-                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
+                if unsafe { CONNECTION_MAP.get(&reversed_tuple).is_some() } {
+                    //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
                     //
                     return Ok(TC_ACT_OK)
                 } else if unsafe { CONNECTION_MAP.get(&dhcp_response).is_some() } {
-                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
+                    //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
                     //
                     return Ok(TC_ACT_OK)
+                } else if unsafe { CONNECTION_MAP.get(&portless_tuple).is_some() } {
+                    //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed portless tuple found: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+                    return Ok(TC_ACT_OK);
                 } else {
-                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+                    //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
                     return Ok(TC_ACT_SHOT)
                 }
             } else {
-                info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
+                //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
                 return Err(TC_ACT_SHOT)
             }
         }();
@@ -403,7 +413,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let source_port = tuple.sport;
     let destination_port = tuple.dport;
     let protocol = tuple.protocol;
-    info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+    //info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
 
     Ok(TC_ACT_OK)
 }

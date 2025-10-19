@@ -13,6 +13,7 @@ aya = ["dep:aya"]
 [dependencies]
 aya = { workspace = true, optional = true }
 aya-ebpf.workspace = true
+aya-log-ebpf.workspace = true
 network-types = "0.1.0"
 plain = "0.2.3"
 

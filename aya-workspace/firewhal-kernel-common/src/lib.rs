@@ -1,11 +1,14 @@
 #![no_std]
 
 use aya_ebpf::{bindings::TC_ACT_OK, programs::TcContext};
+use aya_log_ebpf::{error, info, warn};
+use network_types::icmp::Icmp;
 use core::mem;
 use network_types::eth::{EthHdr, EtherType};
 use network_types::ip::{IpProto, Ipv4Hdr};
 use network_types::tcp::TcpHdr;
 use network_types::udp::UdpHdr;
+use network_types::icmp::IcmpHdr;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -55,43 +58,48 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
     // The ether_type from the packet is big-endian. The EtherType::Ipv4 enum
     // has the value 0x0800. We must ensure the comparison is correct.
     // The simplest way is to use the `into()` conversion provided by network-types.
-    if eth_hdr.ether_type != EtherType::Ipv4.into() {
+    // LOOK HERE
+    if eth_hdr.ether_type == EtherType::Ipv4.into() {
+        //info!(ctx, "IPv4 packet found. Continuing");
+    } else if eth_hdr.ether_type == EtherType::Ipv6.into() {
+        //info!(ctx, "IPv6 Packet found. Continuing");
         return Err(());
     }
 
     let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
     let l4_hdr_offset = EthHdr::LEN + Ipv4Hdr::LEN;
-
+    //info!(ctx, "Successfully loaded Ipv4 header");
     // --- Convert IP addresses from [u8; 4] to u32 in Network Byte Order ---
     // The [u8; 4] is already big-endian, so u32::from_be_bytes() is the correct way
     // to get a u32 that represents this big-endian value, regardless of host endianness.
     let saddr_net = u32::from_be_bytes(ipv4_hdr.src_addr);
     let daddr_net = u32::from_be_bytes(ipv4_hdr.dst_addr);
 
-    // THIS IS WHERE THE ISSUE IS
-    let (source_port_bytes, dest_port_bytes) = match ipv4_hdr.proto {
+    let (sport, dport) = match ipv4_hdr.proto {
         IpProto::Tcp => {
             let tcp_hdr: TcpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?; // Use dynamic offset
-            (tcp_hdr.source, tcp_hdr.dest) // These are [u8; 2] in network byte order
+            (u16::from_be_bytes(tcp_hdr.source), u16::from_be_bytes(tcp_hdr.dest))
         }
         IpProto::Udp => {
             let udp_hdr: UdpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?; // Use dynamic offset
-            (udp_hdr.src, udp_hdr.dst) // These are [u8; 2] in network byte order
+            (u16::from_be_bytes(udp_hdr.src), u16::from_be_bytes(udp_hdr.dst))
         }
-        _ => return Err(()),
+        IpProto::Icmp => {
+            let icmp_hdr: IcmpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?;
+            // For ICMP, we can use type and code as pseudo-ports for more specific tracking.
+            (icmp_hdr.type_.into(), icmp_hdr.code.into())
+        }
+        _ => {
+            //info!(ctx, "Ports not supported for protocol: {}", ipv4_hdr.proto as u8);
+            (0,0)
+        }
     };
 
-    // --- Convert ports from [u8; 2] to u16 in Network Byte Order ---
-    // The [u8; 2] is already big-endian, so u16::from_be_bytes() is the correct way
-    // to get a u16 that represents this big-endian value.
-    let sport_net = u16::from_be_bytes(source_port_bytes);
-    let dport_net = u16::from_be_bytes(dest_port_bytes);
-    
     Ok(ConnectionTuple {
         saddr: saddr_net,     // u32 in network byte order
         daddr: daddr_net,     // u32 in network byte order
-        sport: sport_net,     // u16 in network byte order
-        dport: dport_net,     // u16 in network byte order
+        sport: sport,     // u16 in network byte order
+        dport: dport,     // u16 in network byte order
         protocol: ipv4_hdr.proto as u8,
         _pad: [0; 3],
     })
