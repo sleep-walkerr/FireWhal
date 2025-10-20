@@ -1,5 +1,5 @@
 use aya::{
-    include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{xdp::{XdpLink, XdpLinkId}, CgroupAttachMode, CgroupSockAddr, Xdp, XdpFlags, SchedClassifier, TcAttachType}, util::online_cpus, Ebpf
+    include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}, CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, XdpFlags}, util::online_cpus, Ebpf
 };
 use aya_log::EbpfLogger;
 use clap::Parser;
@@ -34,7 +34,9 @@ pub struct ActiveXdpInterfaces {
     active_links: HashMap<String, XdpLinkId>
 }
 
-
+pub struct ActiveTcInterfaces {
+    active_links: HashMap<String, (SchedClassifierLinkId, SchedClassifierLinkId)> // (Ingress, Egress)
+}
 
 fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
     let size = mem::size_of::<T>();
@@ -54,27 +56,84 @@ fn get_all_interfaces() -> Vec<String> {
         .collect()
 }
 
-async fn attach_tc_programs(bpf_arc: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>) -> Result<(), anyhow::Error>{
-    let mut bpf = bpf_arc.lock().await;    
-    
+async fn attach_tc_programs(
+    bpf_arc: Arc<tokio::sync::Mutex<Ebpf>>,
+    updated_interfaces: Vec<String>,
+    active_tc_interfaces: Arc<Mutex<ActiveTcInterfaces>>,
+) -> Result<(), anyhow::Error> {
+    let mut bpf = bpf_arc.lock().await;
+    let mut active_tc = active_tc_interfaces.lock().await;
+    let new_interfaces_set: HashSet<String> = updated_interfaces.into_iter().collect();
 
+    info!("[Kernel] Applying TC programs to interfaces: {}", new_interfaces_set.iter().cloned().collect::<Vec<_>>().join(", "));
 
-    info!("[Kernel] Applying TC programs to interfaces {}...", updated_interfaces.join(","));
+    // Detach from interfaces that are no longer in the list
+    let to_detach: Vec<String> = active_tc.active_links.keys()
+        .filter(|&iface_name| !new_interfaces_set.contains(iface_name))
+        .cloned()
+        .collect();
 
+    for iface in to_detach {
+        if let Some((ingress_id, egress_id)) = active_tc.active_links.remove(&iface) {
+            info!("[Kernel] Detaching TC programs from '{}'...", iface);
+            {
+                let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into()?;
+                if let Err(e) = prog_ingress.detach(ingress_id) {
+                    warn!("[Kernel] Failed to detach TC ingress from '{}': {}", iface, e);
+                }
+            }
+            {
+                let prog_egress: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into()?;
+                if let Err(e) = prog_egress.detach(egress_id) {
+                    warn!("[Kernel] Failed to detach TC egress from '{}': {}", iface, e);
+                }
+            }
+        }
+    }
 
-    for iface in updated_interfaces {
-        info!("[Kernel] Attaching TC egress to '{}'...", iface);
+    // Load programs once before the loop, scoping the mutable borrows.
+    {
+        let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into()?;
+        prog_ingress.load();
+    }
+    {
+        let prog_egress: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into()?;
+        prog_egress.load();
+    }
+
+    // Attach to new interfaces
+    for iface in new_interfaces_set.iter() {
+        if active_tc.active_links.contains_key(iface) {
+            continue; // Already attached, skip
+        }
+        let mut ingress_id: Option<SchedClassifierLinkId> = None;
+        let mut egress_id: Option<SchedClassifierLinkId> = None;
+        info!("[Kernel] Attaching TC programs to '{}'...", iface);
         {
-        let prog_egress: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into().unwrap(); // Use correct program name
-        let _ = prog_egress.load();
-        let _ = prog_egress.attach(&iface, TcAttachType::Egress);
+            let ingress_prog: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into().unwrap();
+            if let Ok(ingress_identifier) = ingress_prog.attach(&iface, TcAttachType::Ingress) {
+                ingress_id = Some(ingress_identifier);
+            } else {
+                warn!("[Kernel] Failed to attach TC ingress to '{}'", iface)
+            }
         }
 
         {
-        let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into().unwrap(); // Use correct program name
-        _ = prog_ingress.load();
-        _ = prog_ingress.attach(&iface, TcAttachType::Ingress);
+            let egress_prog: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into().unwrap();
+            if let Ok(egress_identifier) = egress_prog.attach(&iface, TcAttachType::Ingress) {
+                egress_id = Some(egress_identifier);
+            } else {
+                warn!("[Kernel] Failed to attach TC ingress to '{}'", iface)
+            }
         }
+        if let Some(ingress_id) = ingress_id{
+            if let Some(egress_id) = egress_id {
+                active_tc.active_links.insert(iface.clone(), (ingress_id, egress_id));
+            } else {
+                warn!("[Kernel] Failed to get attach ID for either ingress or egress '{}'", iface);
+            }
+        }
+        
     }
 
     info!("[Kernel] TC programs applied.");
@@ -230,15 +289,17 @@ async fn main() -> Result<(), anyhow::Error> {
     to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;
     let active_xdp_interfaces: Arc<Mutex<ActiveXdpInterfaces>> = Arc::new(Mutex::new(ActiveXdpInterfaces { active_links: HashMap::new() }));
+    let active_tc_interfaces: Arc<Mutex<ActiveTcInterfaces>> = Arc::new(Mutex::new(ActiveTcInterfaces { active_links: HashMap::new() }));
 
     if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
 
     // 2. Take ownership of the EVENTS map and move it to the event handler task.
     let events_map = bpf.take_map("EVENTS").ok_or_else(|| anyhow::anyhow!("Failed to find EVENTS map"))?;
     let zmq_tx_clone = to_zmq_tx.clone();
+
     tokio::spawn(async move {
         info!("[Events] Started listening for block events from the kernel.");
-        let mut perf_array = AsyncPerfEventArray::try_from(events_map).unwrap();
+        let mut perf_array = AsyncPerfEventArray::try_from(events_map)?;
 
         for cpu_id in online_cpus().unwrap() {
             let mut buf = perf_array.open(cpu_id, None).unwrap();
@@ -280,17 +341,17 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
             });
         }
+        Ok::<(), anyhow::Error>(())
     });
 
     // 3. Wrap the remaining bpf object in Arc<Mutex> to be shared for rule application.
     let bpf = Arc::new(Mutex::new(bpf));
 
     let cgroup_file = File::open(&opt.cgroup_path)?;
-    // Fix to populate with list received from FireWhalConfig later
-    attach_xdp_programs(Arc::clone(&bpf), get_all_interfaces(), active_xdp_interfaces.clone()).await;
-    attach_cgroup_programs(Arc::clone(&bpf), cgroup_file).await;
-    // Attach TC programs
-    attach_tc_programs(Arc::clone(&bpf), get_all_interfaces()).await; // Changing this to temporarily only be wlp5s0
+    let initial_interfaces = get_all_interfaces();
+    attach_xdp_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_xdp_interfaces.clone()).await?;
+    attach_cgroup_programs(Arc::clone(&bpf), cgroup_file).await?;
+    attach_tc_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_tc_interfaces.clone()).await?;
     
     // --- Main Event Loop and Shutdown logic ---
     info!("[Kernel] ✅ Firewall is active. Waiting for shutdown signal...");
@@ -324,8 +385,10 @@ async fn main() -> Result<(), anyhow::Error> {
                     },
                     FireWhalMessage::UpdateInterfaces(update) => {
                         // if update.source == "TUI" {
-                            info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
-                            attach_xdp_programs(Arc::clone(&bpf), update.interfaces, active_xdp_interfaces.clone()).await;
+                        info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
+                        let interfaces = update.interfaces;
+                        attach_xdp_programs(Arc::clone(&bpf), interfaces.clone(), active_xdp_interfaces.clone()).await?;
+                        attach_tc_programs(Arc::clone(&bpf), interfaces, active_tc_interfaces.clone()).await?;
                         //}
                     },
                     FireWhalMessage::Ping(ping) => {

@@ -281,7 +281,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
         } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
             match action.action {
                 Action::Deny => {
-                    info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    info!(&ctx, "[Kernel] [connect4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
                     return Ok(0); // Block
                 }
@@ -292,14 +292,17 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
             }
         }
         // Print all allowed traffic
-        //info!(&ctx, "Allowed connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
+        info!(&ctx, "[Kernel] [connect4] BLOCKED connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
         
-        Ok(1) // Allow the connection
+        Ok(0) // Block the connection
     }();
 
     match result {
         Ok(ret) => ret,
-        Err(ret) => ret,
+        Err(ret) => {
+            info!(&ctx, "[Kernel] [connect4] Failed to process packet.");
+            ret
+        },
     }
 }
 
@@ -308,6 +311,8 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
 #[cgroup_sock_addr(sendmsg4)]
 pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
+        //Consider changing these back to safe "ctx.user_ipv" and the like if you can
+        let pid = ctx.pid();
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
         let user_port = unsafe { (*sockaddr_pointer).user_port }; 
@@ -322,17 +327,93 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
         //Convert to readable format for error logging
         let user_ip_converted = Ipv4Addr::from(u32::from_be(user_ip4));
         let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
+        
+        // Get a reference to the RULES hashmap
+        let rules_ptr =  core::ptr::addr_of_mut!(RULES);
 
-        
+        // Create keys to check for Rule Match
+        // Specific Match
+        let full_key = RuleKey {
+            protocol: protocol, // Don't forget about wild card for protocol
+            source_port: 0, // Source port is irrelevant in this filter
+            dest_port: destination_port,
+            source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
+            dest_ip: user_ip4,
+        };
+        // Wildcard port match
+        let wildcard_port_key = RuleKey {
+            protocol: protocol, // Don't forget about wild card for protocol
+            source_port: 0, // Source port is irrelevant in this filter
+            dest_port: 0,
+            source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
+            dest_ip: user_ip4,
+        };
+        // Wildcard IP match
+        let wildcard_ip_key = RuleKey {
+            protocol: protocol, // Don't forget about wild card for protocol
+            source_port: 0, // Source port is irrelevant in this filter
+            dest_port: destination_port,
+            source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
+            dest_ip: 0,
+        };
+        // Create block event to report block
+        let block_report_event = BlockEvent {
+            reason: BlockReason::IpBlockedEgressUdp,
+            pid: ctx.pid(),
+            dest_addr:IpAddr::V4(Ipv4Addr::from(user_ip4.to_be())),
+            dest_port: user_port_converted,
+        };
+        // Check all keys
+        if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
+            // New matching 
+            match action.action {
+                Action::Deny => {
+                    info!(&ctx, "[Kernel] [sendmsg4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                    return Ok(0); // Block
+                }
+                Action::Allow => {
+                    info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    return Ok(1);
+                }
+            }
+        } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
+            match action.action {
+                Action::Deny => {
+                    info!(&ctx, "[Kernel] [sendmsg4] Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
+                    unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                    return Ok(0); // Block
+                }
+                Action::Allow => {
+                    info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    return Ok(1);
+                }
+            }
+        } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
+            match action.action {
+                Action::Deny => {
+                    info!(&ctx, "[Kernel] [sendmsg4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                    return Ok(0); // Block
+                }
+                Action::Allow => {
+                    info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    return Ok(1);
+                }
+            }
+        }
         // Print all allowed traffic
-        //info!(&ctx, "[Kernel] [sendmsg4] Allowed connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
+        info!(&ctx, "[Kernel] [sendmsg4] BLOCKED connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
         
-        Ok(1) // Allow the connection
+        Ok(0) // Block the connection
     }();
 
     match result {
         Ok(ret) => ret,
-        Err(ret) => ret,
+        Err(ret) => {
+            info!(&ctx, "[Kernel] [sendmsg4] Failed to process packet.");
+            ret
+        },
     }
 }
 
@@ -340,8 +421,11 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 #[cgroup_sock_addr(bind4)]
 pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
+        //Consider changing these back to safe "ctx.user_ipv" and the like if you can
+        let pid = ctx.pid();
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+        let dest_ip4 = unsafe { (*sockaddr_pointer).msg_src_ip4 };
         let user_port = unsafe { (*sockaddr_pointer).user_port }; 
         let protocol = unsafe { (*sockaddr_pointer).protocol };
 
@@ -353,18 +437,95 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
 
         //Convert to readable format for error logging
         let user_ip_converted = Ipv4Addr::from(u32::from_be(user_ip4));
+        let dest_ip_converted = Ipv4Addr::from(u32::from_be(dest_ip4));
         let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
+        
+        // Get a reference to the RULES hashmap
+        let rules_ptr =  core::ptr::addr_of_mut!(RULES);
 
-        
+        // Create keys to check for Rule Match
+        // Specific Match
+        let full_key = RuleKey {
+            protocol: protocol, // Don't forget about wild card for protocol
+            source_port: 0, // Source port is irrelevant in this filter
+            dest_port: destination_port,
+            source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
+            dest_ip: user_ip4,
+        };
+        // Wildcard port match
+        let wildcard_port_key = RuleKey {
+            protocol: protocol, // Don't forget about wild card for protocol
+            source_port: 0, // Source port is irrelevant in this filter
+            dest_port: 0,
+            source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
+            dest_ip: user_ip4,
+        };
+        // Wildcard IP match
+        let wildcard_ip_key = RuleKey {
+            protocol: protocol, // Don't forget about wild card for protocol
+            source_port: 0, // Source port is irrelevant in this filter
+            dest_port: destination_port,
+            source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
+            dest_ip: 0,
+        };
+        // Create block event to report block
+        let block_report_event = BlockEvent {
+            reason: BlockReason::IpBlockedEgressUdp,
+            pid: ctx.pid(),
+            dest_addr:IpAddr::V4(Ipv4Addr::from(user_ip4.to_be())),
+            dest_port: user_port_converted,
+        };
+        // Check all keys
+        if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
+            // New matching 
+            match action.action {
+                Action::Deny => {
+                    info!(&ctx, "[Kernel] [bind4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                    return Ok(0); // Block
+                }
+                Action::Allow => {
+                    info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    return Ok(1);
+                }
+            }
+        } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
+            match action.action {
+                Action::Deny => {
+                    info!(&ctx, "[Kernel] [bind4] Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
+                    unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                    return Ok(0); // Block
+                }
+                Action::Allow => {
+                    info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    return Ok(1);
+                }
+            }
+        } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
+            match action.action {
+                Action::Deny => {
+                    info!(&ctx, "[Kernel] [bind4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                    return Ok(0); // Block
+                }
+                Action::Allow => {
+                    info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    return Ok(1);
+                }
+            }
+        }
         // Print all allowed traffic
-        //info!(&ctx, "[Kernel] [bind4] Allowed connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
+        info!(&ctx, "[Kernel] [bind4] BLOCKED connection User IP {}, Destination IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, dest_ip_converted, destination_port, protocol, source_port);
         
-        Ok(1) // Allow the connection
+        Ok(0) // Block the connection
     }();
 
     match result {
         Ok(ret) => ret,
-        Err(ret) => ret,
+        Err(ret) => {
+            info!(&ctx, "[Kernel] [bind4] Failed to process packet.");
+            ret
+        },
     }
 }
 
