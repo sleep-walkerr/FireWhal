@@ -167,22 +167,22 @@ fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
 
                 // Check if this connection is in our tracking map.
                 if unsafe { CONNECTION_MAP.get(&reversed_tuple).is_some() } {
-                    //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
+                    // info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
                     //
                     return Ok(TC_ACT_OK)
                 } else if unsafe { CONNECTION_MAP.get(&dhcp_response).is_some() } {
-                    //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
+                    // info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed tuple found: [{} {} {} {} {}]\n\n", source_address, destination_address, source_port, destination_port, protocol);
                     //
                     return Ok(TC_ACT_OK)
                 } else if unsafe { CONNECTION_MAP.get(&portless_tuple).is_some() } {
-                    //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed portless tuple found: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+                    // info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed portless tuple found: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
                     return Ok(TC_ACT_OK);
                 } else {
-                    //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
                     return Ok(TC_ACT_SHOT)
                 }
             } else {
-                //info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
+                info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
                 return Err(TC_ACT_SHOT)
             }
         }();
@@ -197,6 +197,13 @@ fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
 
 
 // EGRESS PROGRAMS
+/*
+Down the line, what the plan is is to use cgroup outgoing to check if the application's traffic is allowed
+Then use the outgoing TC programs to check for subsequent rules, either for all applications or 
+for a specific application.
+Why do this? Because at the point of a connect() call, for instance, its so early that port numbers may have
+not been assigned. This is an issue that will never occurr at the stage a TC program is triggered
+*/
 #[cgroup_sock_addr(connect4)]
 pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
@@ -262,7 +269,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
                     return Ok(0); // Block
                 }
                 Action::Allow => {
-                    info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    // info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     return Ok(1);
                 }
             }
@@ -274,7 +281,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
                     return Ok(0); // Block
                 }
                 Action::Allow => {
-                    info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    // info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     return Ok(1);
                 }
             }
@@ -286,7 +293,7 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
                     return Ok(0); // Block
                 }
                 Action::Allow => {
-                    info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    // info!(&ctx, "[Kernel] [connect4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     return Ok(1);
                 }
             }
@@ -373,7 +380,7 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
                     return Ok(0); // Block
                 }
                 Action::Allow => {
-                    info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    // info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     return Ok(1);
                 }
             }
@@ -385,7 +392,7 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
                     return Ok(0); // Block
                 }
                 Action::Allow => {
-                    info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    // info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     return Ok(1);
                 }
             }
@@ -397,12 +404,12 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
                     return Ok(0); // Block
                 }
                 Action::Allow => {
-                    info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    // info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     return Ok(1);
                 }
             }
         }
-        // Print all allowed traffic
+        // Print all blocked traffic
         info!(&ctx, "[Kernel] [sendmsg4] BLOCKED connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
         
         Ok(0) // Block the connection
@@ -485,7 +492,7 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
                     return Ok(0); // Block
                 }
                 Action::Allow => {
-                    info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    // info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     return Ok(1);
                 }
             }
@@ -497,7 +504,7 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
                     return Ok(0); // Block
                 }
                 Action::Allow => {
-                    info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    // info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     return Ok(1);
                 }
             }
@@ -509,12 +516,12 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
                     return Ok(0); // Block
                 }
                 Action::Allow => {
-                    info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
+                    // info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
                     return Ok(1);
                 }
             }
         }
-        // Print all allowed traffic
+        // Print all blocked traffic
         info!(&ctx, "[Kernel] [bind4] BLOCKED connection User IP {}, Destination IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, dest_ip_converted, destination_port, protocol, source_port);
         
         Ok(0) // Block the connection
@@ -574,7 +581,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let source_port = tuple.sport;
     let destination_port = tuple.dport;
     let protocol = tuple.protocol;
-    //info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+    info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
 
     Ok(TC_ACT_OK)
 }

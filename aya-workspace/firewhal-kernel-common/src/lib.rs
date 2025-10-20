@@ -62,7 +62,7 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
     if eth_hdr.ether_type == EtherType::Ipv4.into() {
         //info!(ctx, "IPv4 packet found. Continuing");
     } else if eth_hdr.ether_type == EtherType::Ipv6.into() {
-        //info!(ctx, "IPv6 Packet found. Continuing");
+        info!(ctx, "IPv6 Packet found. Breaking");
         return Err(());
     }
 

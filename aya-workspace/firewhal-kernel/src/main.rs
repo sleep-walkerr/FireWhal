@@ -120,7 +120,7 @@ async fn attach_tc_programs(
 
         {
             let egress_prog: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into().unwrap();
-            if let Ok(egress_identifier) = egress_prog.attach(&iface, TcAttachType::Ingress) {
+            if let Ok(egress_identifier) = egress_prog.attach(&iface, TcAttachType::Egress) {
                 egress_id = Some(egress_identifier);
             } else {
                 warn!("[Kernel] Failed to attach TC ingress to '{}'", iface)
@@ -424,7 +424,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
     shutdown_tx.send(()).unwrap();
-    let _ = time::timeout(time::Duration::from_secs(2), zmq_handle).await;
+    //let _ = time::timeout(time::Duration::from_secs(2), zmq_handle).await;
 
     Ok(())
 }
