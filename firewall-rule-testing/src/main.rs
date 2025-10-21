@@ -21,6 +21,7 @@ pub enum Action {
 
 #[derive(Encode, Decode, Debug)]
 pub enum Protocol {
+    Wildcard,
     Tcp,
     Udp,
     Icmp
@@ -30,7 +31,7 @@ pub enum Protocol {
 #[derive(Debug, Encode, Decode)]
 pub struct Rule {
     pub action: Action,
-    pub protocol: Protocol,
+    pub protocol: Option<Protocol>,
     pub source_ip: Option<IpAddr>,
     pub source_port: Option<u16>,
     pub dest_ip: Option<IpAddr>,
@@ -56,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         rules: vec![
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Tcp,
+                protocol: Some(Protocol::Tcp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -65,7 +66,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Udp,
+                protocol: Some(Protocol::Udp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -74,7 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Tcp,
+                protocol: Some(Protocol::Tcp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -83,7 +84,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Udp,
+                protocol: Some(Protocol::Udp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -92,7 +93,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Udp,
+                protocol: Some(Protocol::Udp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -101,7 +102,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Udp,
+                protocol: Some(Protocol::Udp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -110,15 +111,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Tcp,
+                protocol: Some(Protocol::Tcp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
                 dest_port: Some(67),
                 description: "Router communication".to_string(),
-            },Rule {
+            },
+            Rule {
                 action: Action::Allow,
-                protocol: Protocol::Tcp,
+                protocol: Some(Protocol::Tcp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -127,7 +129,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Udp,
+                protocol: Some(Protocol::Udp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -136,7 +138,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Tcp,
+                protocol: Some(Protocol::Tcp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -145,7 +147,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Udp,
+                protocol: Some(Protocol::Udp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -154,7 +156,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Tcp,
+                protocol: Some(Protocol::Tcp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -163,7 +165,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Udp,
+                protocol: Some(Protocol::Udp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -172,7 +174,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Tcp,
+                protocol: Some(Protocol::Tcp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: None,
@@ -181,7 +183,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Allow,
-                protocol: Protocol::Udp,
+                protocol: Some(Protocol::Udp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: Some(IpAddr::V4(Ipv4Addr::new(127,0,0,1))),
@@ -190,16 +192,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Deny,
-                protocol: Protocol::Tcp,
-                source_ip: None,
-                source_port: None,
-                dest_ip: Some(IpAddr::V4(Ipv4Addr::new(7, 0, 0, 5))),
-                dest_port: None,
-                description: "Block a specific malicious IP".to_string(),
-            },
-            Rule {
-                action: Action::Deny,
-                protocol: Protocol::Tcp,
+                protocol: Some(Protocol::Tcp),
                 source_ip: None,
                 source_port: None,
                 dest_ip: Some(IpAddr::V4(Ipv4Addr::new(172, 168, 8, 7))),
@@ -208,7 +201,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Deny,
-                protocol: Protocol::Icmp,
+                protocol: None,
                 source_ip: None,
                 source_port: None,
                 dest_ip: Some(IpAddr::V4(Ipv4Addr::new(7, 0, 0, 5))),
@@ -217,7 +210,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Deny,
-                protocol: Protocol::Udp,
+                protocol: Some(Protocol::Udp),
+                source_ip: None,
+                source_port: None,
+                dest_ip: Some(IpAddr::V4(Ipv4Addr::new(172, 168, 8, 7))),
+                dest_port: None,
+                description: "Block a specific malicious IP".to_string(),
+            },
+            Rule {
+                action: Action::Deny,
+                protocol: None,
                 source_ip: None,
                 source_port: None,
                 dest_ip: Some(IpAddr::V4(Ipv4Addr::new(172, 168, 8, 7))),

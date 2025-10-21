@@ -223,7 +223,7 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FirewallConfi
     for rule in config.rules {
             // Create Key from Rule
             let mut new_key = RuleKey {
-                protocol: rule.protocol as u32,
+                protocol: rule.protocol.unwrap_or(firewhal_core::Protocol::Wildcard) as u32,
                 dest_ip: 0, // Set placeholder IPs for now
                 dest_port: rule.dest_port.unwrap_or(0), // Wildcard port if not specified
                 source_ip: 0, // Set placeholder IPs for now

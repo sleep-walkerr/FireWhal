@@ -4,7 +4,7 @@ use aya_ebpf::{bindings::TC_ACT_OK, programs::TcContext};
 use aya_log_ebpf::{error, info, warn};
 use network_types::icmp::Icmp;
 use core::mem;
-use network_types::eth::{EthHdr, EtherType};
+use network_types::eth::{self, EthHdr, EtherType};
 use network_types::ip::{IpProto, Ipv4Hdr};
 use network_types::tcp::TcpHdr;
 use network_types::udp::UdpHdr;
@@ -62,8 +62,11 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
     if eth_hdr.ether_type == EtherType::Ipv4.into() {
         //info!(ctx, "IPv4 packet found. Continuing");
     } else if eth_hdr.ether_type == EtherType::Ipv6.into() {
-        info!(ctx, "IPv6 Packet found. Breaking");
+        info!(ctx, "IPv6 {} Packet found. Breaking", u16::from_be(eth_hdr.ether_type));
         return Err(());
+    } else {
+        info!(ctx, "Unsupported Type {} found. Breaking", u16::from_be(eth_hdr.ether_type));
+        return Err(())
     }
 
     let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
