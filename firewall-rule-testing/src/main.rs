@@ -208,7 +208,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             Rule {
                 action: Action::Deny,
-                protocol: Protocol::Udp,
+                protocol: Protocol::Icmp,
                 source_ip: None,
                 source_port: None,
                 dest_ip: Some(IpAddr::V4(Ipv4Addr::new(7, 0, 0, 5))),

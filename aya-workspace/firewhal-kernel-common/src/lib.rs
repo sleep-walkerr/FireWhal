@@ -72,8 +72,8 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
     // --- Convert IP addresses from [u8; 4] to u32 in Network Byte Order ---
     // The [u8; 4] is already big-endian, so u32::from_be_bytes() is the correct way
     // to get a u32 that represents this big-endian value, regardless of host endianness.
-    let saddr_net = u32::from_be_bytes(ipv4_hdr.src_addr);
-    let daddr_net = u32::from_be_bytes(ipv4_hdr.dst_addr);
+    let saddr_net = u32::from_le_bytes(ipv4_hdr.src_addr);
+    let daddr_net = u32::from_le_bytes(ipv4_hdr.dst_addr);
 
     let (sport, dport) = match ipv4_hdr.proto {
         IpProto::Tcp => {
