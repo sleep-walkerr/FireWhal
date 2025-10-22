@@ -310,7 +310,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 loop {
                     let events = buf.read_events(&mut buffers).await.unwrap();
                     for i in 0..events.read {
-                        if let Ok(event) = read_from_buffer::<BlockEvent>(&buffers[i]) {
+                        if let Ok(event) = read_from_buffer::<BlockEvent>(&buffers[i]) { // modify this to accept KernelEvents, which could be a connection attempt or a block event for notifications
                             //Format event
                             let formatted_event = format!(
                                 "Blocked {:?} -> PID: {}, Dest: {}:{}",
@@ -424,7 +424,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
     shutdown_tx.send(()).unwrap();
-    //let _ = time::timeout(time::Duration::from_secs(2), zmq_handle).await;
+    let _ = time::timeout(time::Duration::from_secs(2), zmq_handle).await;
 
     Ok(())
 }
