@@ -29,6 +29,7 @@ use core::fmt::{self, Debug};
 // TC Program Connection Handling and Tracking 
 
 // Connection info
+#[repr(C)]
 #[derive(Copy, Clone)]
 pub struct ConnectionInfo {
     pub pid: u32,
@@ -36,20 +37,22 @@ pub struct ConnectionInfo {
 }
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for ConnectionInfo {}
+unsafe impl Plain for ConnectionInfo {}
 
 // Connection Map Key for Statful
 #[repr(C)]
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct ConnectionTuple {
-    pub saddr: u32,
-    pub daddr: u32,
-    pub sport: u16,
-    pub dport: u16,
+    pub saddr: u32,    // Network Byte Order (Big Endian)
+    pub daddr: u32,    // Network Byte Order (Big Endian)
+    pub sport: u16,    // Network Byte Order (Big Endian)
+    pub dport: u16,    // Network Byte Order (Big Endian)
     pub protocol: u8,
-    pub _pad: [u8; 3], // Explicit padding
+    pub _pad: [u8; 3], // Padding to make total size 16 bytes (4+4+2+2+1+3) for alignment
 }
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for ConnectionTuple {}
+unsafe impl Plain for ConnectionTuple {}
 
 // TC Program Packet Parser
 #[inline(always)]
@@ -106,14 +109,40 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
         protocol: ipv4_hdr.proto as u8,
         _pad: [0; 3],
     })
-    // Ok(ConnectionTuple {
-    //     saddr: saddr_net,     // u32 in network byte order
-    //     daddr: daddr_net,     // u32 in network byte order
-    //     sport: sport_net,     // u16 in network byte order
-    //     dport: dport_net,     // u16 in network byte order
-    //     protocol: ipv4_hdr.proto as u8,
-    // })
 }
+
+// Kernel Event Data Structures
+#[repr(u32)] // Use u32 for the discriminant as it's common and provides alignment
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventType {
+    BlockEvent = 0,
+    ConnectionAttempt = 1, // For logging allowed connections, if desired
+    DebugMessage = 2,      // For generic debug messages
+    // Add other event types here if you expand functionality
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)] // Derive Clone and Copy
+pub struct KernelEvent {
+    pub event_type: EventType, // Discriminant for userspace to know how to interpret
+    pub pid: u32,               // Thread ID from bpf_get_current_pid_tgid() low 32 bits
+    pub tgid: u32,               // Process ID from bpf_get_current_pid_tgid() high 32 bits
+    pub comm: [u8; 16],          // Command name from ctx.command()
+
+    // Network Tuple Info (relevant for BlockEvent and ConnectionAttempt)
+    // Always store in Network Byte Order (Big Endian) for consistency with maps
+    pub saddr: u32,              // Source IP (NBO)
+    pub daddr: u32,              // Destination IP (NBO)
+    pub sport: u16,              // Source Port (NBO)
+    pub dport: u16,              // Destination Port (NBO)
+    pub protocol: u8,            // IP Protocol number
+
+    pub reason: BlockReason,     // Specific reason for BlockEvent type
+    pub _padding: [u8; 19],
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for KernelEvent {}
+unsafe impl Plain for KernelEvent {} // Always derive Plain if it's available and needed
 
 #[repr(u8)]
 #[derive(Clone, Copy)]
@@ -126,7 +155,7 @@ unsafe impl aya::Pod for Action {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
-pub struct RuleKey {
+pub struct RuleKey { // Change this later to have protocol as u8 and use plain along with padding 
     pub protocol: u32,
     pub source_port: u16,
     pub dest_port: u16,

@@ -9,14 +9,14 @@ use core::{hash::Hash, mem, net::{IpAddr,Ipv4Addr}};
 
 use aya_ebpf::{
     bindings::{sockaddr, xdp_action, TC_ACT_OK, TC_ACT_SHOT},
-    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns},
+    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_current_comm},
     macros::{cgroup_sock_addr, classifier, map, xdp},
     maps::{HashMap, LpmTrie, PerfEventArray, RingBuf, LruHashMap}, // <-- NEW: Import RingBuf
     programs::{tc, SockAddrContext, TcContext, XdpContext}, EbpfContext, 
 };
 use aya_log_ebpf::{info, error, warn};
 
-use firewhal_kernel_common::{BlockEvent, BlockReason, RuleKey, RuleAction, Action, LpmIpKey, ConnectionTuple, ConnectionInfo, parse_packet_tuple};
+use firewhal_kernel_common::{parse_packet_tuple, Action, BlockEvent, BlockReason, ConnectionInfo, ConnectionTuple, KernelEvent, LpmIpKey, RuleAction, RuleKey, EventType};
 
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -37,7 +37,7 @@ static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0)
 
 // NEW MAPS
 #[map]
-static mut EVENTS: PerfEventArray<BlockEvent> = PerfEventArray::new(0); // Change to accept KernelEvents instead
+static mut EVENTS: PerfEventArray<KernelEvent> = PerfEventArray::new(0); // Change to accept KernelEvents instead
 
 #[map]
 static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
@@ -100,7 +100,7 @@ pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
                     dest_addr: IpAddr::V4(ipv4_hdr.dst_addr()),
                     dest_port: 0,
                 };
-                unsafe { EVENTS.output(&ctx,&event, 0) };
+                //unsafe { EVENTS.output(&ctx,&event, 0) };
                 return Ok(xdp_action::XDP_DROP);
             }
         }
@@ -217,15 +217,43 @@ pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
 pub fn try_firewhal_egress_connect4(ctx: SockAddrContext) -> Result<i32, ()> {
     // Here we will now send the command information along with other relevant information to the userspace, which will then either add the PID to the list of approved PIDs or drop
     // We then check if it was added, if not, we block the connection attempt
+    
+
     let result = || -> Result<i32, i32> {
         
-        // if let Ok(command_name_bytes) = ctx.command() {
-        //     let null_pos = command_name_bytes.iter().position(|&x| x == 0).unwrap_or(command_name_bytes.len());
-        //     let command_slice = &command_name_bytes[0..null_pos];
-        //     if let Ok(command_name) = str::from_utf8(command_slice){
-        //         info!(&ctx, "Command name: {}", command_name);
-        //     }
-        // }
+        //Consider changing these back to safe "ctx.user_ipv" and the like if you can
+        let sockaddr_pointer = ctx.sock_addr;
+        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+        let user_port = unsafe { (*sockaddr_pointer).user_port }; 
+        let protocol = unsafe { (*sockaddr_pointer).protocol };
+        let command_fetch = ctx.command();
+        let command: [u8; 16]; 
+        if command_fetch.is_ok() {
+            command = command_fetch.unwrap();
+        } else { 
+            command = [0; 16];
+            info!(&ctx, "Command fetching failed");
+        }
+
+        //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
+        // They need to be converted to be used first
+        let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
+        let destination_port = (u32::from_be(user_port) >> 16) as u16;
+
+        let connection_attempt_test = KernelEvent {
+            event_type: EventType::ConnectionAttempt, // Specific event type
+            pid: ctx.pid(),
+            tgid: ctx.tgid(),
+            comm: command,
+            saddr: 0, // Source IP might not be known/relevant here
+            daddr: user_ip4, // Using dest_ip_net (NBO)
+            sport: 0, // Source port not known
+            dport: destination_port, // Using dest_port_net (NBO)
+            protocol: protocol as u8,
+            reason: BlockReason::IcmpBlocked, // Placeholder
+            _padding: [0; 19],
+        };
+        unsafe { EVENTS.output(&ctx, &connection_attempt_test, 0) };
         
         
         
@@ -550,11 +578,21 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     };
     
     // Create block event to report block
-    let block_report_event = BlockEvent {
-        reason: BlockReason::IpBlockedEgressUdp,
-        pid: ctx.pid(),
-        dest_addr:IpAddr::V4(Ipv4Addr::from(tuple.daddr.to_be())),
-        dest_port: tuple.sport,
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let tgid = (pid_tgid >> 32) as u32;
+    //let mut comm = unsafe { bpf_get_current_comm().unwrap() };
+    let block_event = KernelEvent {
+        event_type: EventType::BlockEvent, // Specific event type
+        pid: pid_tgid as u32,
+        tgid: tgid,
+        comm: [0; 16],
+        saddr: tuple.saddr, // Source IP might not be known/relevant here
+        daddr: tuple.daddr, // Using dest_ip_net (NBO)
+        sport: tuple.sport, // Source port not known
+        dport: tuple.dport, // Using dest_port_net (NBO)
+        protocol: tuple.protocol,
+        reason: BlockReason::IpBlockedEgressTcp, //Placeholder
+        _padding: [0; 19],
     };
 
     // Create debug printing fields
@@ -576,7 +614,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         match action.action {
             Action::Deny => {
                 info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                unsafe { EVENTS.output(&ctx, &block_event, 0) };
                 return Ok(TC_ACT_SHOT); // Block
             }
             Action::Allow => {
@@ -588,7 +626,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         match action.action {
             Action::Deny => {
                 info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                unsafe { EVENTS.output(&ctx, &block_event, 0) };
                 return Ok(TC_ACT_SHOT); // Block
             }
             Action::Allow => {
@@ -600,7 +638,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         match action.action {
             Action::Deny => {
                 info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                unsafe { EVENTS.output(&ctx, &block_event, 0) };
                 return Ok(TC_ACT_SHOT); // Block
             }
             Action::Allow => {
@@ -612,7 +650,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         match action.action {
             Action::Deny => {
                 info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
+                unsafe { EVENTS.output(&ctx, &block_event, 0) };
                 return Ok(TC_ACT_SHOT); // Block
             }
             Action::Allow => {

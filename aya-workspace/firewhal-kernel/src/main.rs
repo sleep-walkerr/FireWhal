@@ -18,7 +18,7 @@ use tokio::{
 use firewhal_core::{
     BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate, DiscordBlockNotification
 };
-use firewhal_kernel_common::{BlockEvent, RuleAction, RuleKey};
+use firewhal_kernel_common::{BlockEvent, EventType, KernelEvent, RuleAction, RuleKey};
 
 use pnet::{datalink, packet::ip::IpNextHeaderProtocols::Fire};
 
@@ -310,32 +310,105 @@ async fn main() -> Result<(), anyhow::Error> {
                 loop {
                     let events = buf.read_events(&mut buffers).await.unwrap();
                     for i in 0..events.read {
-                        if let Ok(event) = read_from_buffer::<BlockEvent>(&buffers[i]) { // modify this to accept KernelEvents, which could be a connection attempt or a block event for notifications
-                            //Format event
-                            let formatted_event = format!(
-                                "Blocked {:?} -> PID: {}, Dest: {}:{}",
-                                event.reason,
-                                event.pid,
-                                event.dest_addr,
-                                event.dest_port
+                        if let Ok(kernel_event) = read_from_buffer::<KernelEvent>(&buffers[i]) { // modify this to accept KernelEvents, which could be a connection attempt or a block event for notifications
+                            
+                            let (comm_slice, comm_str) = {
+                                let null_pos = kernel_event.comm.iter().position(|&c| c == 0).unwrap_or(kernel_event.comm.len());
+                                let slice = &kernel_event.comm[0..null_pos];
+                                (slice, String::from_utf8_lossy(slice))
+                            };
+                            match kernel_event.event_type {
+                                EventType::ConnectionAttempt => {
+                                    info!(
+                                        "[Events] CONN_ATTEMPT: PID={}, TGID={}, Comm={}, Src={}:{}, Dest={}:{}, Proto={:?}",
+                                        kernel_event.pid,
+                                        kernel_event.tgid,
+                                        comm_str,
+                                        Ipv4Addr::from(kernel_event.saddr),
+                                        kernel_event.sport,
+                                        Ipv4Addr::from(kernel_event.daddr),
+                                        kernel_event.dport,
+                                        kernel_event.protocol
+                                    );
+                                }
+                                EventType::BlockEvent => {
+                                //     pub struct KernelEvent {
+                                //     pub event_type: EventType, // Discriminant for userspace to know how to interpret
+                                //     pub pid: u32,               // Thread ID from bpf_get_current_pid_tgid() low 32 bits
+                                //     pub tgid: u32,               // Process ID from bpf_get_current_pid_tgid() high 32 bits
+                                //     pub comm: [u8; 16],          // Command name from ctx.command()
 
-                            );
+                                //     // Network Tuple Info (relevant for BlockEvent and ConnectionAttempt)
+                                //     // Always store in Network Byte Order (Big Endian) for consistency with maps
+                                //     pub saddr: u32,              // Source IP (NBO)
+                                //     pub daddr: u32,              // Destination IP (NBO)
+                                //     pub sport: u16,              // Source Port (NBO)
+                                //     pub dport: u16,              // Destination Port (NBO)
+                                //     pub protocol: u8,            // IP Protocol number
+
+                                //     pub reason: BlockReason,     // Specific reason for BlockEvent type
+                                //     pub _padding: [u8; 19],
+                                // }
+                                    let formatted_event = format!(
+                                        "BLOCKED: Reason={:?}, PID={}, TGID={}, Comm={}, Dest={}:{}, Proto={:?}",
+                                        kernel_event.reason,
+                                        kernel_event.pid,
+                                        kernel_event.tgid,
+                                        comm_str,
+                                        Ipv4Addr::from(u32::from_be(kernel_event.daddr)),
+                                        kernel_event.dport,
+                                        kernel_event.protocol,
+                                    );
+                                    info!("[Events] {}", formatted_event);
+                                    
+                                    // Send event to ZMQ
+                                    let debug_message = DebugMessage {
+                                        source: "Firewall".to_string(),
+                                        content: formatted_event.clone(),
+                                    };
+                                    if let Err(e) = task_zmq_tx.send(FireWhalMessage::Debug(debug_message)).await {
+                                        warn!("[Events] Failed to send block event: {}", e);
+                                    }
+
+                                    let discord_block_message = DiscordBlockNotification {
+                                        component: "Firewall".to_string(),
+                                        content: formatted_event.clone(),
+                                    };
+                                    if let Err(e) = task_zmq_tx.send(FireWhalMessage::DiscordBlockNotify(discord_block_message)).await {
+                                        warn!("[Events] Failed to send block event to Discord: {}", e);
+                                    }
+                                }
+                                EventType::DebugMessage => {
+                                    let debug_content_bytes = &kernel_event.comm;
+                                    let debug_content_str = String::from_utf8_lossy(debug_content_bytes);
+                                    info!("[Events] EBPF_DEBUG: PID={}, TGID={}, Msg={}", kernel_event.pid, kernel_event.tgid, debug_content_str);
+                                }
+                            }
+                            // //Format event
+                            // let formatted_event = format!(
+                            //     "Blocked {:?} -> PID: {}, Dest: {}:{}",
+                            //     event.reason,
+                            //     event.pid,
+                            //     event.dest_addr,
+                            //     event.dest_port
+
+                            // );
                             // Send event
-                            let debug_message = DebugMessage {
-                                source: "Firewall".to_string(),
-                                content: formatted_event.clone(),
-                            };
-                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::Debug(debug_message)).await {
-                                warn!("[Events] Failed to send block event: {}", e);
-                            }
-                            // Test sending event to discord bot
-                            let discord_block_message = DiscordBlockNotification {
-                                component: "Firewall".to_string(),
-                                content: formatted_event.clone(),
-                            };
-                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::DiscordBlockNotify(discord_block_message)).await {
-                                warn!("[Events] Failed to send block event to Discord: {}", e);
-                            }
+                            // let debug_message = DebugMessage {
+                            //     source: "Firewall".to_string(),
+                            //     content: formatted_event.clone(),
+                            // };
+                            // if let Err(e) = task_zmq_tx.send(FireWhalMessage::Debug(debug_message)).await {
+                            //     warn!("[Events] Failed to send block event: {}", e);
+                            // }
+                            // // Test sending event to discord bot
+                            // let discord_block_message = DiscordBlockNotification {
+                            //     component: "Firewall".to_string(),
+                            //     content: formatted_event.clone(),
+                            // };
+                            // if let Err(e) = task_zmq_tx.send(FireWhalMessage::DiscordBlockNotify(discord_block_message)).await {
+                            //     warn!("[Events] Failed to send block event to Discord: {}", e);
+                            // }
                         }
                     }
                 }
