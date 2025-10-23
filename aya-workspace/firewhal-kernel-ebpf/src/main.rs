@@ -245,20 +245,36 @@ pub fn try_firewhal_egress_connect4(ctx: SockAddrContext) -> Result<i32, ()> {
         let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
         let destination_port = (u32::from_be(user_port) >> 16) as u16;
 
-        let connection_attempt_test = KernelEvent {
-            event_type: EventType::ConnectionAttempt, // Specific event type
-            pid: ctx.pid(),
-            tgid: ctx.tgid(),
-            comm: command,
-            saddr: 0, // Source IP might not be known/relevant here
-            daddr: user_ip4, // Using dest_ip_net (NBO)
-            sport: 0, // Source port not known
-            dport: destination_port, // Using dest_port_net (NBO)
-            protocol: protocol as u8,
-            reason: BlockReason::IcmpBlocked, // Placeholder
-            _padding: [0; 19],
-        };
-        unsafe { EVENTS.output(&ctx, &connection_attempt_test, 0) };
+        // TESTING
+
+        // Check if TGID already exists in map
+        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
+            info!(&ctx, "[Kernel] [connect4] Trusted PID found {}", (ctx.tgid()) as u32);
+            return Ok(1)
+        } else { // If it doesn't send event to check application
+            let connection_attempt_test = KernelEvent {
+                event_type: EventType::ConnectionAttempt, // Specific event type
+                pid: ctx.pid(),
+                tgid: ctx.tgid(),
+                comm: command,
+                saddr: 0, // Source IP might not be known/relevant here
+                daddr: user_ip4, // Using dest_ip_net (NBO)
+                sport: 0, // Source port not known
+                dport: destination_port, // Using dest_port_net (NBO)
+                protocol: protocol as u8,
+                reason: BlockReason::IcmpBlocked, // Placeholder
+                _padding: [0; 19],
+            };
+            unsafe { EVENTS.output(&ctx, &connection_attempt_test, 0) };
+            // Check again to see if pid was inserted
+            if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } { // Allow connection if found after check
+                info!(&ctx, "[Kernel] [connect4] Newly inserted PID found {}", (ctx.tgid()) as u32);
+                return Ok(1)
+            } else { // Block connection otherwise
+                info!(&ctx, "[Kernel] [connect4] Application with PID {} not approved. Blocking connection.", (ctx.tgid()) as u32);
+                return Ok(0)
+            }
+        }
         
         
         
