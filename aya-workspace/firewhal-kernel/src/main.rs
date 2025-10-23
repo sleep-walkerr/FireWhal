@@ -374,6 +374,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
                             // Build a process lineage string
                             let mut lineage_info = Vec::new();
+                            let mut lineage_struct: Vec<(String, u32)> = Vec::new();
                             let mut current_pid = pid;
                             let mut visited_pids = HashSet::new(); // To prevent infinite loops in case of /proc anomalies
 
@@ -386,10 +387,11 @@ async fn main() -> Result<(), anyhow::Error> {
 
                                 if let Some((ppid, proc_name, full_exe_path)) = get_process_info(current_pid) {
                                     let display_name = if !full_exe_path.is_empty() {
-                                        format!("{} ({})", proc_name, full_exe_path)
+                                        full_exe_path
                                     } else {
                                         proc_name
                                     };
+                                    lineage_struct.push((display_name.clone(), current_pid.clone()));
                                     lineage_info.push(format!("{} (PID: {})", display_name, current_pid));
                                     current_pid = ppid;
                                 } else {
@@ -426,16 +428,34 @@ async fn main() -> Result<(), anyhow::Error> {
                                     // TGID is used as it is the ID for all processes for a grouping of threads associated with one process
                                     // Then from within the ebpf code, check the pid to see if it's in the list after the info has been checked here
                                     // If it's there, allow egress for that pid
-                                    let trust_info = PidTrustInfo {
-                                        action: Action::Allow,
-                                        last_seen_ns: 0,
-                                    };
-                                    // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
-                                    let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                    if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Note: insert takes &pid
-                                        warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
-                                    } else {
-                                        info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+
+                                    // So far, final path matching works, now lets test blocking or allowing based on that
+                                    lineage_struct.reverse();
+                                    let mut match_found = false;
+                                    match(lineage_struct[0].0.as_str()) {
+                                        "/opt/brave-bin/brave" => {
+                                            match_found = true;
+                                        }
+                                        "/usr/lib/systemd/systemd-resolved" => {
+                                            match_found = true;
+                                        }
+                                        _ => {}
+                                    }
+                                    if match_found {
+                                        info!("[Kernel] [AppMatching] MATCH FOUND FOR {}", lineage_struct[0].0);
+                                    
+
+                                        let trust_info = PidTrustInfo {
+                                            action: Action::Allow,
+                                            last_seen_ns: 0,
+                                        };
+                                        // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
+                                        let mut trusted_pids = trusted_pids_for_task.lock().await;
+                                        if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Insert pid on match found
+                                            warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
+                                        } else {
+                                            info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+                                        }
                                     }
                                     // Second, the app version:
                                     // Add an app list to the FireWhalConfig
