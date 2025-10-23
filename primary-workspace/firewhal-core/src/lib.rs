@@ -146,6 +146,7 @@ pub enum Action {
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum Protocol {
+    Wildcard = 0,
     Tcp = 6,
     Udp = 17,
     Icmp = 1
@@ -154,8 +155,9 @@ pub enum Protocol {
 
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct Rule {
+    // Consider adding rule ids to rules for debugging purposes
     pub action: Action,
-    pub protocol: Protocol,
+    pub protocol: Option<Protocol>,
     pub source_ip: Option<IpAddr>,
     pub source_port: Option<u16>,
     pub dest_ip: Option<IpAddr>,
