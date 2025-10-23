@@ -6,7 +6,7 @@ use clap::Parser;
 use log::{info, warn, LevelFilter};
 use core::borrow;
 use std::{
-    collections::{HashMap, HashSet}, fmt::format, fs::File, hash::Hash, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration
+    collections::{HashMap, HashSet}, fmt::format, fs, fs::File, hash::Hash, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration, io::{self, BufReader, Read, BufRead}, path::PathBuf
 };
 use bytes::BytesMut;
 use tokio::{
@@ -18,7 +18,7 @@ use tokio::{
 use firewhal_core::{
     BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate, DiscordBlockNotification
 };
-use firewhal_kernel_common::{BlockEvent, EventType, KernelEvent, RuleAction, RuleKey};
+use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey};
 
 use pnet::{datalink, packet::ip::IpNextHeaderProtocols::Fire};
 
@@ -54,6 +54,41 @@ fn get_all_interfaces() -> Vec<String> {
         .into_iter()
         .map(|iface| iface.name)
         .collect()
+}
+
+// Helper function to get PPID and process name
+fn get_process_info(pid: u32) -> Option<(u32, String, String)> {
+    let status_path = format!("/proc/{}/status", pid);
+    let cmdline_path = format!("/proc/{}/cmdline", pid);
+    let exe_path = format!("/proc/{}/exe", pid);
+
+    let mut ppid: Option<u32> = None;
+    let mut name: Option<String> = None; // Process name from /proc/<pid>/status 'Name:' field
+    let mut exe_full_path: Option<String> = None; // Full executable path from /proc/<pid>/exe
+
+    // Read /proc/<pid>/status for Name and PPid
+    if let Ok(file) = fs::File::open(&status_path) {
+        let reader = BufReader::new(file);
+        for line in reader.lines().flatten() {
+            if line.starts_with("Name:") {
+                name = line.split_whitespace().nth(1).map(String::from);
+            } else if line.starts_with("PPid:") {
+                ppid = line.split_whitespace().nth(1).and_then(|s| s.parse().ok());
+            }
+            if name.is_some() && ppid.is_some() { break; } // Found both, optimize
+        }
+    }
+
+    // Read /proc/<pid>/exe for the full executable path
+    if let Ok(path_buf) = fs::read_link(&exe_path) {
+        exe_full_path = Some(path_buf.to_string_lossy().into_owned());
+    }
+
+    // Prioritize full executable path, otherwise use 'Name:' from status.
+    // If neither, fallback to a placeholder.
+    let final_name = exe_full_path.clone().unwrap_or_else(|| name.unwrap_or_else(|| format!("Unknown ({})", pid)));
+
+    ppid.map(|p| (p, final_name, exe_full_path.unwrap_or_default().to_string())) // Return PPID, preferred_name, and full path
 }
 
 async fn attach_tc_programs(
@@ -282,12 +317,17 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FirewallConfi
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
     env_logger::Builder::new().filter_level(LevelFilter::Info).init();
+
     let (mut to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
+
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
     let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx, "Firewall".to_string()));
     to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
+
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;
+
     let active_xdp_interfaces: Arc<Mutex<ActiveXdpInterfaces>> = Arc::new(Mutex::new(ActiveXdpInterfaces { active_links: HashMap::new() }));
     let active_tc_interfaces: Arc<Mutex<ActiveTcInterfaces>> = Arc::new(Mutex::new(ActiveTcInterfaces { active_links: HashMap::new() }));
 
@@ -295,15 +335,27 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // 2. Take ownership of the EVENTS map and move it to the event handler task.
     let events_map = bpf.take_map("EVENTS").ok_or_else(|| anyhow::anyhow!("Failed to find EVENTS map"))?;
+
+    // Take ownership of PID map for use within async KernelEvent handling
+    let trusted_pids_map_raw = bpf.take_map("TRUSTED_PIDS").ok_or_else(|| anyhow::anyhow!("Failed to find TRUSTED_PIDS map"))?;
+    // Get actual map
+    let trusted_pids_aya_map = AyaHashMap::<_, u32, PidTrustInfo>::try_from(trusted_pids_map_raw)?;
+    // Create a sharable reference to the map
+    let trusted_pids_shared = Arc::new(tokio::sync::Mutex::new(trusted_pids_aya_map));
+    
     let zmq_tx_clone = to_zmq_tx.clone();
 
     tokio::spawn(async move {
         info!("[Events] Started listening for block events from the kernel.");
         let mut perf_array = AsyncPerfEventArray::try_from(events_map)?;
+        
+        
 
         for cpu_id in online_cpus().unwrap() {
             let mut buf = perf_array.open(cpu_id, None).unwrap();
             let task_zmq_tx = zmq_tx_clone.clone();
+            // Clone the Arc for each inner task
+            let trusted_pids_for_task = Arc::clone(&trusted_pids_shared);
 
             tokio::spawn(async move {
                 let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
@@ -312,15 +364,51 @@ async fn main() -> Result<(), anyhow::Error> {
                     for i in 0..events.read {
                         if let Ok(kernel_event) = read_from_buffer::<KernelEvent>(&buffers[i]) { // modify this to accept KernelEvents, which could be a connection attempt or a block event for notifications
                             
+                            let pid = kernel_event.tgid;
+
                             let (comm_slice, comm_str) = {
                                 let null_pos = kernel_event.comm.iter().position(|&c| c == 0).unwrap_or(kernel_event.comm.len());
                                 let slice = &kernel_event.comm[0..null_pos];
                                 (slice, String::from_utf8_lossy(slice))
                             };
+
+                            // Build a process lineage string
+                            let mut lineage_info = Vec::new();
+                            let mut current_pid = pid;
+                            let mut visited_pids = HashSet::new(); // To prevent infinite loops in case of /proc anomalies
+
+                            // Traverse up to 10 levels to avoid infinite loops and keep logs reasonable
+                            for _ in 0..10 { 
+                                if current_pid == 0 || current_pid == 1 || visited_pids.contains(&current_pid) {
+                                    break; // Stop at init (PID 1), kernel (PID 0), or if we've seen this PID
+                                }
+                                visited_pids.insert(current_pid);
+
+                                if let Some((ppid, proc_name, full_exe_path)) = get_process_info(current_pid) {
+                                    let display_name = if !full_exe_path.is_empty() {
+                                        format!("{} ({})", proc_name, full_exe_path)
+                                    } else {
+                                        proc_name
+                                    };
+                                    lineage_info.push(format!("{} (PID: {})", display_name, current_pid));
+                                    current_pid = ppid;
+                                } else {
+                                    lineage_info.push(format!("Unknown Process (PID: {})", current_pid));
+                                    break;
+                                }
+                            }
+
+                            // Reverse the lineage so the root parent is first
+                            lineage_info.reverse();
+                            let lineage_string = if lineage_info.is_empty() {
+                                format!("No lineage info for PID {}", pid)
+                            } else {
+                                lineage_info.join(" -> ")
+                            };
                             match kernel_event.event_type {
                                 EventType::ConnectionAttempt => {
                                     info!(
-                                        "[Events] CONN_ATTEMPT: PID={}, TGID={}, Comm={}, Src={}:{}, Dest={}:{}, Proto={:?}",
+                                        "[Events] CONN_ATTEMPT: PID={}, TGID={}, Comm={}, Src={}:{}, Dest={}:{}, Proto={:?} \n  Process Lineage: {}",
                                         kernel_event.pid,
                                         kernel_event.tgid,
                                         comm_str,
@@ -328,8 +416,36 @@ async fn main() -> Result<(), anyhow::Error> {
                                         kernel_event.sport,
                                         Ipv4Addr::from(kernel_event.daddr),
                                         kernel_event.dport,
-                                        kernel_event.protocol
+                                        kernel_event.protocol,
+                                        lineage_string
                                     );
+                                    // Now that this is working, these are the next steps
+                                    // First a prototype:
+                                    // Send process info here to be parsed, assume that all applications are a part of the application allowlist
+                                    // Insert their PID (really the TGID) into the map of trusted PIDs\
+                                    // TGID is used as it is the ID for all processes for a grouping of threads associated with one process
+                                    // Then from within the ebpf code, check the pid to see if it's in the list after the info has been checked here
+                                    // If it's there, allow egress for that pid
+                                    let trust_info = PidTrustInfo {
+                                        action: Action::Allow,
+                                        last_seen_ns: 0,
+                                    };
+                                    // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
+                                    let mut trusted_pids = trusted_pids_for_task.lock().await;
+                                    if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Note: insert takes &pid
+                                        warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
+                                    } else {
+                                        info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+                                    }
+                                    // Second, the app version:
+                                    // Add an app list to the FireWhalConfig
+                                    // Use that app list here to check and see if the outgoing traffic originates from an application at a path in the allowlist
+                                    // If so, we add it's pid to the list of trusted pids
+
+                                    // Third, the hash version:
+                                    // Do checks in previous prototype, but this time also check the registered hash of the application as well
+                                    // If it has changed and the application is allowed, block it
+                                    // If it's allowed and the hash is intact, the allow it
                                 }
                                 EventType::BlockEvent => {
                                 //     pub struct KernelEvent {
@@ -350,7 +466,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                 //     pub _padding: [u8; 19],
                                 // }
                                     let formatted_event = format!(
-                                        "BLOCKED: Reason={:?}, PID={}, TGID={}, Comm={}, Dest={}:{}, Proto={:?}",
+                                        "BLOCKED: Reason={:?}, PID={}, TGID={}, Comm={}, Dest={}:{}, Proto={:?} \n  Process Lineage: {}",
                                         kernel_event.reason,
                                         kernel_event.pid,
                                         kernel_event.tgid,
@@ -358,6 +474,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                         Ipv4Addr::from(u32::from_be(kernel_event.daddr)),
                                         kernel_event.dport,
                                         kernel_event.protocol,
+                                        lineage_string
                                     );
                                     info!("[Events] {}", formatted_event);
                                     

@@ -16,7 +16,7 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::{info, error, warn};
 
-use firewhal_kernel_common::{parse_packet_tuple, Action, BlockEvent, BlockReason, ConnectionInfo, ConnectionTuple, KernelEvent, LpmIpKey, RuleAction, RuleKey, EventType};
+use firewhal_kernel_common::{parse_packet_tuple, Action, BlockEvent, BlockReason, ConnectionInfo, ConnectionTuple, EventType, KernelEvent, LpmIpKey, PidTrustInfo, RuleAction, RuleKey};
 
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -45,6 +45,11 @@ static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024,
 #[map] // Connection Tracking Map for Stateful
 static mut CONNECTION_MAP: LruHashMap<ConnectionTuple, ConnectionInfo> =
     LruHashMap::with_max_entries(4096, 0);
+
+#[map]
+static mut TRUSTED_PIDS: HashMap<u32, PidTrustInfo> = HashMap::with_max_entries(4096, 0);
+
+
 
 // The following maps were for the map-in-map implementation and are no longer needed.
 //

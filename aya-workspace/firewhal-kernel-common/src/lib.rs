@@ -153,6 +153,17 @@ pub enum Action {
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for Action {}
 
+// Structs for keeping track of trusted PIDs
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PidTrustInfo {
+    pub action: Action, // Allow or Deny
+    pub last_seen_ns: u64, // Nanoseconds since boot (from bpf_ktime_get_ns())
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for PidTrustInfo {}
+unsafe impl Plain for PidTrustInfo {}
+
 #[repr(C)]
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
 pub struct RuleKey { // Change this later to have protocol as u8 and use plain along with padding 
