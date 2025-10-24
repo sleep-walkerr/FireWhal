@@ -138,13 +138,15 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
 // DATA STRUCTURES
 
 
-#[derive(Encode, Decode, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
 pub enum Action {
     Allow,
     Deny
 }
 
-#[derive(Encode, Decode, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
 pub enum Protocol {
     Wildcard = 0,
     Tcp = 6,
@@ -153,7 +155,7 @@ pub enum Protocol {
 }
 
 
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
 pub struct Rule {
     // Consider adding rule ids to rules for debugging purposes
     pub action: Action,
@@ -165,7 +167,7 @@ pub struct Rule {
     pub description: String,
 }
 
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
 pub struct FirewallConfig {
     pub rules: Vec<Rule>,
 }
