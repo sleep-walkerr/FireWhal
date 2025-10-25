@@ -8,7 +8,7 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 // Import the necessary items from your common library
-use firewhal_core::{DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, StatusPing, StatusPong, StatusUpdate};
+use firewhal_core::{DebugMessage, FireWhalMessage, FireWhalConfig, NetInterfaceRequest, NetInterfaceResponse, StatusPing, StatusPong, StatusUpdate, ApplicationAllowlistConfig};
 use bincode::{self, config};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             // FireWall Config message processing
             FireWhalMessage::LoadRules(_) => {
-                source_component = "Daemon".to_string();
+                source_component = "Daemon".to_string(); // Add check here to make sure that it's coming from the Daemon
 
                 if let Some(firewall_identity) = clients.get("Firewall") {
                     println!("[ROUTER] Forwarding LoadRules command to firewall.");
@@ -113,6 +113,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     eprintln!("[ROUTER] Received LoadRules command, but firewall client is not registered!");
 
                 }
+            }
+            FireWhalMessage::LoadAppIds(_) => {
+                source_component = "Daemon".to_string();
+
+                if let Some(firewall_identity) = clients.get("Firewall") {
+                    println!("[ROUTER] Forwarding AppIDsUpdate command to firewall.");
+                    router.send(firewall_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0)?;
+                } else {
+                    eprintln!("[ROUTER] Received AppIDsUpdate command, but firewall client is not registered!");
+
+                } 
             }
             // Interface Request message processing
             FireWhalMessage::InterfaceRequest(NetInterfaceRequest {source}) => {

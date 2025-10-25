@@ -34,16 +34,23 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, FirewallConfig, StatusPong, StatusUpdate};
+use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, FireWhalConfig, StatusPong, StatusUpdate, ApplicationAllowlistConfig};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
 
 
 //Loads and deserializes firewall rules from a binary file
-fn load_rules(path: &path::Path) -> Result<FirewallConfig, Box<dyn std::error::Error>> {
+fn load_rules(path: &path::Path) -> Result<FireWhalConfig, Box<dyn std::error::Error>> {
     let toml_content = fs::read_to_string(path)?;
-    let config: FirewallConfig = toml::from_str(&toml_content)?;
+    let config: FireWhalConfig = toml::from_str(&toml_content)?;
+    Ok(config)
+}
+
+// Loads and deserializes the defined applications that will be used in filtering
+fn load_app_ids(path: &path::Path) -> Result<ApplicationAllowlistConfig, Box<dyn std::error::Error>> {
+    let toml_content = fs::read_to_string(path)?;
+    let config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
     Ok(config)
 }
 
@@ -252,9 +259,10 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
             Some(message) = from_zmq_rx.recv() => {
                 match message {
                     FireWhalMessage::Status(status) => {
-                        if status.component == "Firewall" && status.message == "Ready" {
+                        if status.component == "Firewall" && status.message == "Ready" { // Wait for ready status to be forwarded from the IPC socket, then send rules
                             println!("[Supervisor] Firewall is ready. Loading and sending rules...");
                             let rules_path = path::Path::new("/opt/firewhal/bin/rules.toml");
+                            // Load firewall rules from file, and send configuration to the userspace loader
                             match load_rules(rules_path) {
                                 Ok(config) => {
                                     let msg = FireWhalMessage::LoadRules(config);
@@ -266,6 +274,21 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                                 }
                                 Err(e) => {
                                     eprintln!("[Supervisor] FAILED to load firewall rules: {}", e);
+                                }
+                            }
+                            // Load app ids and hashes and send to userspace loader
+                            let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
+                            match load_app_ids(app_id_path) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::LoadAppIds(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send app ids: {}", e);
+                                    } else {
+                                        println!("[Supervisor] App IDs successfully sent to firewall.");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load app ids: {}", e);
                                 }
                             }
                         }

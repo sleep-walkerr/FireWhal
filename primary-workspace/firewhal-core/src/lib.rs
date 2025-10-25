@@ -1,6 +1,8 @@
-use std::{fmt, fs};
+use std::path::PathBuf;
+use std::{fmt, fs, path};
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::collections::HashMap;
 use bincode::{config, Encode, Decode};
 //use serde::de::{value, Error};
 use serde::{Deserialize, Serialize};
@@ -164,14 +166,27 @@ pub struct Rule {
     pub source_port: Option<u16>,
     pub dest_ip: Option<IpAddr>,
     pub dest_port: Option<u16>,
+    pub app_id: Option<String>,
     pub description: String,
 }
 
+// List of rules to be sent to firewall
 #[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
-pub struct FirewallConfig {
+pub struct FireWhalConfig {
     pub rules: Vec<Rule>,
 }
 
+// Represents the value for an app id key in the app_id.toml file
+#[derive(Debug, Deserialize, Serialize, Encode, Decode, Clone)]
+pub struct AppIdentity {
+    pub path: PathBuf,
+    pub hash: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Encode, Decode, Clone)]
+pub struct ApplicationAllowlistConfig {
+    pub apps: HashMap<String, AppIdentity>, // Key is the app_id
+}
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum FireWhalMessage {
@@ -179,7 +194,8 @@ pub enum FireWhalMessage {
     RuleAddBlock(BlockAddressRule),
     Status(StatusUpdate),
     Debug(DebugMessage),
-    LoadRules(FirewallConfig),
+    LoadRules(FireWhalConfig),
+    LoadAppIds(ApplicationAllowlistConfig),
     InterfaceRequest(NetInterfaceRequest),
     InterfaceResponse(NetInterfaceResponse),
     UpdateInterfaces(UpdateInterfaces),

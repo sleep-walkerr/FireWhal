@@ -16,7 +16,7 @@ use tokio::{
 };
 
 use firewhal_core::{
-    BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate, DiscordBlockNotification
+    BlockAddressRule, DebugMessage, FireWhalMessage, FireWhalConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate, DiscordBlockNotification
 };
 use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey};
 
@@ -249,7 +249,7 @@ async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file:
     Ok(())
 }
 
-async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
+async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfig) -> Result<(), anyhow::Error> {
     let mut bpf = bpf.lock().await;
     info!("[Kernel] [Rule] Applying ruleset...");
 
@@ -374,7 +374,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
                             // Build a process lineage string
                             let mut lineage_info = Vec::new();
-                            let mut lineage_struct: Vec<(String, u32)> = Vec::new();
+                            let mut lineage_paths = Vec::new(); // Change to hashmap for speed in the future
                             let mut current_pid = pid;
                             let mut visited_pids = HashSet::new(); // To prevent infinite loops in case of /proc anomalies
 
@@ -391,7 +391,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                     } else {
                                         proc_name
                                     };
-                                    lineage_struct.push((display_name.clone(), current_pid.clone()));
+                                    lineage_paths.push(display_name.clone());
                                     lineage_info.push(format!("{} (PID: {})", display_name, current_pid));
                                     current_pid = ppid;
                                 } else {
@@ -430,31 +430,40 @@ async fn main() -> Result<(), anyhow::Error> {
                                     // If it's there, allow egress for that pid
 
                                     // So far, final path matching works, now lets test blocking or allowing based on that
-                                    lineage_struct.reverse();
+                                    lineage_paths.reverse();
                                     let mut match_found = false;
-                                    match(lineage_struct[0].0.as_str()) {
-                                        "/opt/brave-bin/brave" => {
-                                            match_found = true;
+                                    for app_path in lineage_paths {
+                                        match(app_path.as_str()) {
+                                            "/opt/brave-bin/brave" => {
+                                                match_found = true;
+                                            }
+                                            "/usr/lib/systemd/systemd-resolved" => {
+                                                match_found = true;
+                                            }
+                                            "ping" => {
+                                                match_found = true;
+                                            }
+                                            _ => {}
                                         }
-                                        "/usr/lib/systemd/systemd-resolved" => {
-                                            match_found = true;
-                                        }
-                                        _ => {}
-                                    }
-                                    if match_found {
-                                        info!("[Kernel] [AppMatching] MATCH FOUND FOR {}", lineage_struct[0].0);
                                     
+                                        if match_found {
+                                            info!("[Kernel] [AppMatching] MATCH FOUND FOR {}", app_path);
+                                        
 
-                                        let trust_info = PidTrustInfo {
-                                            action: Action::Allow,
-                                            last_seen_ns: 0,
-                                        };
-                                        // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
-                                        let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                        if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Insert pid on match found
-                                            warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
+                                            let trust_info = PidTrustInfo {
+                                                action: Action::Allow,
+                                                last_seen_ns: 0,
+                                            };
+                                            // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
+                                            let mut trusted_pids = trusted_pids_for_task.lock().await;
+                                            if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Insert pid on match found
+                                                warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
+                                            } else {
+                                                info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+                                            }
                                         } else {
-                                            info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+                                            info!("[Kernel] [AppMatching] MATCH NOT FOUND: {}", app_path);
+                                        
                                         }
                                     }
                                     // Second, the app version:
@@ -574,6 +583,9 @@ async fn main() -> Result<(), anyhow::Error> {
                     FireWhalMessage::LoadRules(config) => {
                         apply_ruleset(Arc::clone(&bpf), config).await?;
                     },
+                    FireWhalMessage::LoadAppIds(app_ids) => {
+                        info!("[Kernel] Received app IDs from TUI");
+                    },
                     FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interfaces
                         info!("[Kernel] Received interface request from TUI.");
                         let interface_list = match task::spawn_blocking(get_all_interfaces).await {
@@ -627,10 +639,6 @@ async fn main() -> Result<(), anyhow::Error> {
     if let Err(e) = to_zmq_tx.send(pong_message).await {
         
     }
-    //shutting_down.store(true, Ordering::SeqCst);
-
-    //reader_handle.await?;
-
 
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
     shutdown_tx.send(()).unwrap();

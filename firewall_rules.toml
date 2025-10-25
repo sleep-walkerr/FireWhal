@@ -1,3 +1,4 @@
+# We will be adding app_id as a field soon, which can either be none, or a specific app_id used to match in the hash and path file
 [[rules]]
 action = "Allow"
 protocol = "Tcp"
