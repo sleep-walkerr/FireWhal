@@ -16,7 +16,7 @@ use tokio::{
 };
 
 use firewhal_core::{
-    BlockAddressRule, DebugMessage, FireWhalMessage, FireWhalConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate, DiscordBlockNotification
+    ApplicationAllowlistConfig, BlockAddressRule, DebugMessage, DiscordBlockNotification, FireWhalConfig, FireWhalMessage, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate
 };
 use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey};
 
@@ -313,6 +313,14 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfi
     Ok(()) // Return Ok to signify success.
 }
 
+// Function to load app identities
+async fn load_app_ids(config: ApplicationAllowlistConfig) -> Result<(), anyhow::Error> {
+    for app_id in config.apps {
+        info!("[Kernel] Loaded app {}:{:?}", app_id.0, app_id.1);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
@@ -585,6 +593,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     },
                     FireWhalMessage::LoadAppIds(app_ids) => {
                         info!("[Kernel] Received app IDs from TUI");
+                        load_app_ids(app_ids).await?;
                     },
                     FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interfaces
                         info!("[Kernel] Received interface request from TUI.");
