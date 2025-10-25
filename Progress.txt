@@ -1,33 +1,16 @@
-For Next Meeting: 09/26/2025
+For Next Meeting: 10/31/2025
 
 · Build the UI to integrate all the components
-
-· Let the daemon listen to be stopped instead of doing that manually
-
-· In the UI, there should be all the network interfaces (like Wireshark), and the user can pick which interface the firewall rules will be applied to
-
-· Notification messages for the blocked packets (instead of all the packets). You can still keep the log file for the admin to analyze if he/she wants
-
-· Put the IP addresses in a file and let your app to read it instead of hardcoding inside your source code
-
-For Next Meeting: 10/17/2025
-
-· Build the UI to integrate all the components
-
-· Continue the missing parts from the previous meeting (06/26/2025)
 
 · Access control to the firewall rule file (consider later; consider read, read/write permissions on this file)
 
-· You should have so many rules for your firewall rules
+· Fixing the stateful firewall
+
+· Adding control of the apps by your firewall
+
+· Adding the integrity check for the files
     
 
 Progress Made:
--- Fixed issue with daemon launching components without subgroup awareness for the user running the program. This was blocking the discord bot from sending IPC messages
--- Updated firewall to load complete rules instead of just destination IP addresses. This was done using a hashmap that accepts a predefined rule structure
--- Fixed zmq ipc function to allow for graceful shutdown, this was causing  the TUI to hang when the shutdown command was sent
--- Rewrote firewhal-kernel userspace loader to eliminate deadlocks with asynchronous logic when using mutexes
--- Added interface selection to TUI
--- userspace loader now applies incoming firewall rules to the list of interfaces it receives from the TUI
--- Added fuzzy matching for rules so that wildcards are fully handled
--- Added systemd unit file for Firewhal
+-- 
 
