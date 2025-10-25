@@ -14,3 +14,6 @@ For Next Meeting: 10/31/2025
 Progress Made:
 -- 
 
+Permissive mode, user has interface open, runs the app they want to let through, the list populates with lineage entries for every application that attempted a connection and the user selects which applications they want to add 
+Hash Management Interface, gives the user a list of all registered applications. A button is next to each application giving the user the option to rehash the application and allow it again, and there is a button to rehash all applications.
+Hash is red if invalid, and green if valid.
