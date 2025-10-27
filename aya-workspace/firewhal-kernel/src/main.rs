@@ -458,21 +458,25 @@ async fn main() -> Result<(), anyhow::Error> {
                                         
                                         // Match path found in app_ids
                                         if let Some(app_hash) = app_ids_guard.get(&app_path) {
-                                            if let Some(debug_app_path) = app_path.clone().to_str() {
-                                                info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
-                                            } else {
-                                                info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
-                                            }
-                                            let trust_info = PidTrustInfo {
-                                                action: Action::Allow,
-                                                last_seen_ns: 0,
-                                            };
-                                            // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
-                                            let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                            if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Insert pid on match found
-                                                warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
-                                            } else {
-                                                info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+                                            // Hash application at path here, then compare to app_hash
+                                            // For now use a placeholder compare
+                                            if app_hash == "sha256:fedcba654321..." {
+                                                if let Some(debug_app_path) = app_path.clone().to_str() {
+                                                    info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
+                                                } else {
+                                                    info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
+                                                }
+                                                let trust_info = PidTrustInfo {
+                                                    action: Action::Allow,
+                                                    last_seen_ns: 0,
+                                                };
+                                                // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
+                                                let mut trusted_pids = trusted_pids_for_task.lock().await;
+                                                if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Insert pid on match found
+                                                    warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
+                                                } else {
+                                                    info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+                                                }
                                             }
                                         }
                                         
@@ -598,7 +602,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         info!("[Kernel] Received app IDs from TUI");
                         load_app_ids( Arc::clone(&app_ids_for_id_update), incoming_app_ids).await?;
                     },
-                    FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interfaces
+                    FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interface
                         info!("[Kernel] Received interface request from TUI.");
                         let interface_list = match task::spawn_blocking(get_all_interfaces).await {
                             Ok(list) => list,
