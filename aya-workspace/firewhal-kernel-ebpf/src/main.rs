@@ -514,7 +514,7 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
 }
 
 #[classifier] // Used for connection tracking when an outgoing connection is allowed
-pub fn firewall_egress_tc(ctx: TcContext) -> i32 {
+pub fn firewall_egress_tc(ctx: TcContext) -> i32 { // Change return type to include tuple, and then insert it here
     match try_firewall_egress_tc(ctx) {
         Ok(ret) => ret,
         Err(_) => TC_ACT_OK, // If there is a parsing error, allow the traffic. It means we haven't implemented a way to handle it yet.
@@ -622,13 +622,6 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let debug_sport = tuple.sport;
     let debug_dport = tuple.dport;
 
-    info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-    let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-    if result.is_err() {
-        info!(&ctx, "[Egress] FAILED to insert tuple into map!");
-        return Ok(TC_ACT_SHOT)
-    }
-
     // Check all keys
     if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
         // New matching 
@@ -640,6 +633,12 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
             }
             Action::Allow => {
                 info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
+                if result.is_err() {
+                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT)
+                }
                 return Ok(TC_ACT_OK);
             }
         }
@@ -652,6 +651,12 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
             }
             Action::Allow => {
                 info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
+                if result.is_err() {
+                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT)
+                }
                 return Ok(TC_ACT_OK);
             }
         }
@@ -664,6 +669,12 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
             }
             Action::Allow => {
                 info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
+                if result.is_err() {
+                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT)
+                }
                 return Ok(TC_ACT_OK);
             }
         }
@@ -676,6 +687,48 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
             }
             Action::Allow => {
                 info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
+                if result.is_err() {
+                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT)
+                }
+                return Ok(TC_ACT_OK);
+            }
+        }
+    } else if let Some(action) = unsafe { (*rules_ptr).get(&port_wildcard_proto_key) } {
+        match action.action {
+            Action::Deny => {
+                info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                unsafe { EVENTS.output(&ctx, &block_event, 0) };
+                return Ok(TC_ACT_SHOT); // Block
+            }
+            Action::Allow => {
+                info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
+                if result.is_err() {
+                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT)
+                }
+                return Ok(TC_ACT_OK);
+            }
+        }
+    } else if let Some(action) = unsafe { (*rules_ptr).get(&full_wildcard_proto_key) } {
+        match action.action {
+            Action::Deny => {
+                info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                unsafe { EVENTS.output(&ctx, &block_event, 0) };
+                return Ok(TC_ACT_SHOT); // Block
+            }
+            Action::Allow => {
+                info!(&ctx, "[Kernel] [firewall_egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
+                if result.is_err() {
+                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT)
+                }
                 return Ok(TC_ACT_OK);
             }
         }

@@ -1,8 +1,0 @@
-[package]
-name = "fileload_testing"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-bincode = "2.0.1"
-pnet = "0.35.0"

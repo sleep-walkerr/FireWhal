@@ -6,7 +6,7 @@ use clap::Parser;
 use log::{info, warn, LevelFilter};
 use core::borrow;
 use std::{
-    collections::{HashMap, HashSet}, fmt::format, fs, fs::File, hash::Hash, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration, io::{self, BufReader, Read, BufRead}, path::PathBuf
+    collections::{HashMap, HashSet}, fmt::format, fs::{self, File}, hash::Hash, io::{self, BufRead, BufReader, Read}, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration
 };
 use bytes::BytesMut;
 use tokio::{
@@ -16,7 +16,7 @@ use tokio::{
 };
 
 use firewhal_core::{
-    BlockAddressRule, DebugMessage, FireWhalMessage, FirewallConfig, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate, DiscordBlockNotification
+    ApplicationAllowlistConfig, BlockAddressRule, DebugMessage, DiscordBlockNotification, FireWhalConfig, FireWhalMessage, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate
 };
 use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey};
 
@@ -249,7 +249,7 @@ async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file:
     Ok(())
 }
 
-async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FirewallConfig) -> Result<(), anyhow::Error> {
+async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfig) -> Result<(), anyhow::Error> {
     let mut bpf = bpf.lock().await;
     info!("[Kernel] [Rule] Applying ruleset...");
 
@@ -313,14 +313,24 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FirewallConfi
     Ok(()) // Return Ok to signify success.
 }
 
+// Function to load app identities
+async fn load_app_ids(app_ids: Arc<Mutex<HashMap<PathBuf, String>>>, config: ApplicationAllowlistConfig) -> Result<(), anyhow::Error> {
+    for app_id in config.apps {
+        info!("[Kernel] Loaded app {}:{:?}", app_id.0, app_id.1);
+        let mut app_ids = app_ids.lock().await;
+        app_ids.insert(app_id.1.path, app_id.1.hash);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let opt = Opt::parse();
+    let opt = Opt::parse(); // Remove later
     env_logger::Builder::new().filter_level(LevelFilter::Info).init();
-
+    // ZMQ IPC channel senders and receivers
     let (mut to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
-
+    // ZMQ shutdown signal channels, for shutting down IPC async task
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
     let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx, "Firewall".to_string()));
@@ -330,6 +340,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let active_xdp_interfaces: Arc<Mutex<ActiveXdpInterfaces>> = Arc::new(Mutex::new(ActiveXdpInterfaces { active_links: HashMap::new() }));
     let active_tc_interfaces: Arc<Mutex<ActiveTcInterfaces>> = Arc::new(Mutex::new(ActiveTcInterfaces { active_links: HashMap::new() }));
+
+    // Hashmap that contains application paths and hashes
+    let app_ids: Arc<Mutex<HashMap<PathBuf, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let app_ids_for_event_processing = Arc::clone(&app_ids);
+    let app_ids_for_id_update = Arc::clone(&app_ids);
+
 
     if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
 
@@ -356,8 +372,13 @@ async fn main() -> Result<(), anyhow::Error> {
             let task_zmq_tx = zmq_tx_clone.clone();
             // Clone the Arc for each inner task
             let trusted_pids_for_task = Arc::clone(&trusted_pids_shared);
+            let app_ids_for_task = Arc::clone(&app_ids);
+            
 
             tokio::spawn(async move {
+                
+
+                
                 let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
                 loop {
                     let events = buf.read_events(&mut buffers).await.unwrap();
@@ -374,6 +395,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
                             // Build a process lineage string
                             let mut lineage_info = Vec::new();
+                            let mut lineage_paths = Vec::<PathBuf>::new(); // Change to hashmap for speed in the future
                             let mut current_pid = pid;
                             let mut visited_pids = HashSet::new(); // To prevent infinite loops in case of /proc anomalies
 
@@ -386,10 +408,11 @@ async fn main() -> Result<(), anyhow::Error> {
 
                                 if let Some((ppid, proc_name, full_exe_path)) = get_process_info(current_pid) {
                                     let display_name = if !full_exe_path.is_empty() {
-                                        format!("{} ({})", proc_name, full_exe_path)
+                                        full_exe_path
                                     } else {
                                         proc_name
                                     };
+                                    lineage_paths.push(display_name.clone().into());
                                     lineage_info.push(format!("{} (PID: {})", display_name, current_pid));
                                     current_pid = ppid;
                                 } else {
@@ -426,16 +449,37 @@ async fn main() -> Result<(), anyhow::Error> {
                                     // TGID is used as it is the ID for all processes for a grouping of threads associated with one process
                                     // Then from within the ebpf code, check the pid to see if it's in the list after the info has been checked here
                                     // If it's there, allow egress for that pid
-                                    let trust_info = PidTrustInfo {
-                                        action: Action::Allow,
-                                        last_seen_ns: 0,
-                                    };
-                                    // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
-                                    let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                    if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Note: insert takes &pid
-                                        warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
-                                    } else {
-                                        info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+
+                                    // So far, final path matching works, now lets test blocking or allowing based on that
+                                    lineage_paths.reverse();
+                                    let app_ids_guard = app_ids_for_task.lock().await;
+                                    
+                                    for app_path in lineage_paths {
+                                        
+                                        // Match path found in app_ids
+                                        if let Some(app_hash) = app_ids_guard.get(&app_path) {
+                                            // Hash application at path here, then compare to app_hash
+                                            // For now use a placeholder compare
+                                            if app_hash == "sha256:fedcba654321..." {
+                                                if let Some(debug_app_path) = app_path.clone().to_str() {
+                                                    info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
+                                                } else {
+                                                    info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
+                                                }
+                                                let trust_info = PidTrustInfo {
+                                                    action: Action::Allow,
+                                                    last_seen_ns: 0,
+                                                };
+                                                // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
+                                                let mut trusted_pids = trusted_pids_for_task.lock().await;
+                                                if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Insert pid on match found
+                                                    warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
+                                                } else {
+                                                    info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+                                                }
+                                            }
+                                        }
+                                        
                                     }
                                     // Second, the app version:
                                     // Add an app list to the FireWhalConfig
@@ -554,7 +598,11 @@ async fn main() -> Result<(), anyhow::Error> {
                     FireWhalMessage::LoadRules(config) => {
                         apply_ruleset(Arc::clone(&bpf), config).await?;
                     },
-                    FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interfaces
+                    FireWhalMessage::LoadAppIds(incoming_app_ids) => {
+                        info!("[Kernel] Received app IDs from TUI");
+                        load_app_ids( Arc::clone(&app_ids_for_id_update), incoming_app_ids).await?;
+                    },
+                    FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interface
                         info!("[Kernel] Received interface request from TUI.");
                         let interface_list = match task::spawn_blocking(get_all_interfaces).await {
                             Ok(list) => list,
@@ -607,10 +655,6 @@ async fn main() -> Result<(), anyhow::Error> {
     if let Err(e) = to_zmq_tx.send(pong_message).await {
         
     }
-    //shutting_down.store(true, Ordering::SeqCst);
-
-    //reader_handle.await?;
-
 
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
     shutdown_tx.send(()).unwrap();

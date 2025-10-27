@@ -1,0 +1,203 @@
+# We will be adding app_id as a field soon, which can either be none, or a specific app_id used to match in the hash and path file
+[[rules]]
+action = "Allow"
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 443 
+description = "Allow outgoing HTTPS" 
+
+[[rules]]
+action = "Allow"
+protocol =  "Udp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 443 
+description = "Allow outgoing HTTPS via UDP (for QUIC)" 
+
+[[rules]]
+action = "Allow"
+#source_ip = None 
+source_port = 22 
+#dest_ip = None 
+description = "Allow outgoing HTTPS via UDP (for QUIC)" 
+
+[[rules]]
+action = "Allow"
+#source_ip = None 
+dest_port = 22 
+#dest_ip = None 
+description = "Allow outgoing HTTPS via UDP (for QUIC)" 
+
+
+[[rules]]
+action = "Allow"
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 11371 
+description = "Pacman Port" 
+
+
+[[rules]]
+action = "Allow"
+protocol =  "Udp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 11371 
+description = "Pacman Port" 
+
+
+[[rules]]
+action = "Allow"
+protocol =  "Udp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 7777 
+description = "Wireguard" 
+
+
+[[rules]]
+action = "Allow"
+protocol =  "Udp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 67 
+description = "Router communication" 
+
+
+[[rules]]
+action = "Allow"
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 67 
+description = "Router communication" 
+
+
+[[rules]]
+action = "Allow"
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 22 
+description = "Outgoing SSH" 
+
+
+[[rules]]
+action = "Allow"
+protocol =  "Udp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 123 
+description = "NTP for getting time" 
+
+
+[[rules]]
+action = "Allow"
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 8443 
+description = "Https Alternate" 
+
+
+[[rules]]
+action = "Allow"
+protocol =  "Udp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 5355 
+description = "LLMNR" 
+
+
+[[rules]]
+action = "Allow"
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 636 
+description = "Lastpass" 
+
+
+[[rules]]
+action = "Allow"
+protocol =  "Udp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 53 
+description = "Unencrypted DNS" 
+
+
+[[rules]]
+action = "Allow"
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 853 
+description = "DNS-Over-TLS" 
+
+
+[[rules]]
+action = "Allow"
+protocol =  "Udp"
+#source_ip = None 
+#source_port = None 
+dest_ip = "127.0.0.1" 
+#dest_port  = None 
+description = "Block a specific malicious IP" 
+
+
+[[rules]]
+action = "Deny" 
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+dest_ip = "172.168.8.7" 
+#dest_port  = None 
+description = "Block a specific malicious IP" 
+
+
+[[rules]]
+action = "Deny" 
+#protocol  = None 
+#source_ip = None 
+#source_port = None 
+dest_ip = "7.0.0.5" 
+#dest_port  = None 
+description = "Block a specific malicious IP" 
+
+
+[[rules]]
+action = "Deny" 
+protocol =  "Udp"
+#source_ip = None 
+#source_port = None 
+dest_ip = "172.168.8.7" 
+#dest_port  = None 
+description = "Block a specific malicious IP" 
+
+
+[[rules]]
+action = "Deny" 
+#protocol  = None 
+#source_ip = None 
+#source_port = None 
+dest_ip = "172.168.8.7" 
+#dest_port  = None 
+description = "Block a specific malicious IP" 
+
