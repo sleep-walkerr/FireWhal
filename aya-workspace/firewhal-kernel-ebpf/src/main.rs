@@ -16,7 +16,7 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::{info, error, warn};
 
-use firewhal_kernel_common::{parse_packet_tuple, Action, BlockEvent, BlockReason, ConnectionInfo, ConnectionTuple, EventType, KernelEvent, LpmIpKey, PidTrustInfo, RuleAction, RuleKey};
+use firewhal_kernel_common::{Action, BlockEvent, BlockEventPayload, BlockReason, ConnectionAttemptPayload, ConnectionInfo, ConnectionKey, ConnectionTuple, EventType, KernelEvent, LpmIpKey, PidTrustInfo, RuleAction, RuleKey, parse_packet_tuple};
 
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -34,8 +34,6 @@ static mut PORT_BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0)
 #[map]
 static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0);
 
-
-// NEW MAPS
 #[map]
 static mut EVENTS: PerfEventArray<KernelEvent> = PerfEventArray::new(0); // Change to accept KernelEvents instead
 
@@ -48,6 +46,13 @@ static mut CONNECTION_MAP: LruHashMap<ConnectionTuple, ConnectionInfo> =
 
 #[map]
 static mut TRUSTED_PIDS: HashMap<u32, PidTrustInfo> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static mut PENDING_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static mut TRUSTED_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_max_entries(4096, 0);
+
 
 
 
@@ -225,7 +230,7 @@ pub fn try_firewhal_egress_connect4(ctx: SockAddrContext) -> Result<i32, ()> {
     
 
     let result = || -> Result<i32, i32> {
-        
+
         //Consider changing these back to safe "ctx.user_ipv" and the like if you can
         let sockaddr_pointer = ctx.sock_addr;
         let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
@@ -242,7 +247,7 @@ pub fn try_firewhal_egress_connect4(ctx: SockAddrContext) -> Result<i32, ()> {
 
         //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
         // They need to be converted to be used first
-        let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
+        let source_port =  u32::from_be(user_port) as u16;
         let destination_port = (u32::from_be(user_port) >> 16) as u16;
 
         // TESTING
@@ -252,28 +257,28 @@ pub fn try_firewhal_egress_connect4(ctx: SockAddrContext) -> Result<i32, ()> {
             info!(&ctx, "[Kernel] [connect4] Trusted PID found {}", (ctx.tgid()) as u32);
             return Ok(1)
         } else { // If it doesn't send event to check application
-            let connection_attempt_test = KernelEvent {
+            // Build connection key for payload
+            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+            // Print key string for debug purposes
+            info!(&ctx, "[Kernel] [connect4] ConnectionKey: {} {} {} {} {}", key_to_use.saddr, key_to_use.daddr, key_to_use.sport, key_to_use.dport, key_to_use.protocol as u8);
+            let conn_attempt_payload = ConnectionAttemptPayload {
+                key: key_to_use
+            };
+            let connection_attempt_event = KernelEvent {
                 event_type: EventType::ConnectionAttempt, // Specific event type
                 pid: ctx.pid(),
                 tgid: ctx.tgid(),
                 comm: command,
-                saddr: 0, // Source IP might not be known/relevant here
-                daddr: user_ip4, // Using dest_ip_net (NBO)
-                sport: 0, // Source port not known
-                dport: destination_port, // Using dest_port_net (NBO)
-                protocol: protocol as u8,
-                reason: BlockReason::IcmpBlocked, // Placeholder
-                _padding: [0; 19],
+                payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
             };
-            unsafe { EVENTS.output(&ctx, &connection_attempt_test, 0) };
-            // Check again to see if pid was inserted
-            if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } { // Allow connection if found after check
-                info!(&ctx, "[Kernel] [connect4] Newly inserted PID found {}", (ctx.tgid()) as u32);
-                return Ok(1)
-            } else { // Block connection otherwise
-                info!(&ctx, "[Kernel] [connect4] Application with PID {} not approved. Blocking connection.", (ctx.tgid()) as u32);
-                return Ok(0)
+            // Insert into map
+            if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
+                warn!(&ctx, "[Kernel] [connect4] Failed to insert connection key {}", ctx.tgid());
+            } else {
+                info!(&ctx, "[Kernel] [connect4] Successfully inserted connection key {}", ctx.tgid());
             }
+            // Send event for processing
+            unsafe { EVENTS.output(&ctx, &connection_attempt_event, 0) };
         }
         
         
@@ -523,6 +528,38 @@ pub fn firewall_egress_tc(ctx: TcContext) -> i32 { // Change return type to incl
 
 fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let mut tuple = parse_packet_tuple(&ctx)?;
+
+    // Extract Connection Key for Pending Match
+    let incoming_connection_key = ConnectionKey {
+        saddr: 0,
+        daddr: tuple.daddr,
+        sport: 0,
+        dport: tuple.dport,
+        protocol: tuple.protocol,
+        _padding: [0; 3],
+     };
+     // Print for Debug
+     info!(&ctx, "[Kernel] [egress_tc] ConnectionKey: {} {} {} {} {}", incoming_connection_key.saddr, incoming_connection_key.daddr, incoming_connection_key.sport, incoming_connection_key.dport, incoming_connection_key.protocol as u8);
+     // Lookup in TRUSTED_CONNECTIONS_MAP
+     if let Some(tgid_match) = unsafe { TRUSTED_CONNECTIONS_MAP.get(&incoming_connection_key) } {
+        info!(&ctx, "[Kernel] [egress_tc] Trusted Connection for {}, continuing.", *tgid_match);
+        // Already approved connection, do nothing
+     } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&incoming_connection_key) } {
+        info!(&ctx, "[Kernel] [egress_tc] Pending Connection for {}, checking.", *tgid_match);
+        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&tgid_match) } {
+            if pid_info.action == Action::Allow {
+                info!(&ctx, "[Kernel] [egress_tc] Pending Connection Allowed {}", *tgid_match);
+            //Let the connection pass
+            } else { 
+                info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked {}", *tgid_match);
+                return Ok(TC_ACT_SHOT)
+             } // Block the connection
+        }
+     } else {
+        info!(&ctx, "[Kernel] [egress_tc] Connection Not Found in Either Map");
+        // Not found in either map, default to block
+        return Ok(TC_ACT_SHOT)
+     }
     
     // This is where you would track the new outgoing connection.
     // TODO: A real implementation would check if this egress is from an approved PID.
@@ -602,18 +639,24 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let tgid = (pid_tgid >> 32) as u32;
     //let mut comm = unsafe { bpf_get_current_comm().unwrap() };
+    // Create payload to send in KernelEvent
+    let block_event_payload = BlockEventPayload {
+        key: ConnectionKey {
+            sport: tuple.sport,
+            dport: tuple.dport,
+            protocol: tuple.protocol,
+            saddr: tuple.saddr,
+            daddr: tuple.daddr,
+            _padding: [0; 3],
+        },
+        reason: BlockReason::IpBlockedEgressTcp,
+    };
     let block_event = KernelEvent {
         event_type: EventType::BlockEvent, // Specific event type
         pid: pid_tgid as u32,
         tgid: tgid,
         comm: [0; 16],
-        saddr: tuple.saddr, // Source IP might not be known/relevant here
-        daddr: tuple.daddr, // Using dest_ip_net (NBO)
-        sport: tuple.sport, // Source port not known
-        dport: tuple.dport, // Using dest_port_net (NBO)
-        protocol: tuple.protocol,
-        reason: BlockReason::IpBlockedEgressTcp, //Placeholder
-        _padding: [0; 19],
+        payload: firewhal_kernel_common::KernelEventPayload { block_event: (block_event_payload) }
     };
 
     // Create debug printing fields

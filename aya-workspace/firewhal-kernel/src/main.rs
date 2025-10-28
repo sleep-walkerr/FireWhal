@@ -18,7 +18,7 @@ use tokio::{
 use firewhal_core::{
     ApplicationAllowlistConfig, BlockAddressRule, DebugMessage, DiscordBlockNotification, FireWhalConfig, FireWhalMessage, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate
 };
-use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey};
+use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey, ConnectionKey};
 
 use pnet::{datalink, packet::ip::IpNextHeaderProtocols::Fire};
 
@@ -334,7 +334,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
     let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx, "Firewall".to_string()));
-    to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
+    
 
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;
 
@@ -358,6 +358,18 @@ async fn main() -> Result<(), anyhow::Error> {
     let trusted_pids_aya_map = AyaHashMap::<_, u32, PidTrustInfo>::try_from(trusted_pids_map_raw)?;
     // Create a sharable reference to the map
     let trusted_pids_shared = Arc::new(tokio::sync::Mutex::new(trusted_pids_aya_map));
+
+    // Take ownership of PENDING AND TRUSTED CONNECTIONS MAPS
+    let pending_connections_map_raw = bpf.take_map("PENDING_CONNECTIONS_MAP").ok_or_else(|| anyhow::anyhow!("Failed to find PENDING_CONNECTIONS_MAP map"))?;
+    let trusted_connections_map_raw = bpf.take_map("TRUSTED_CONNECTIONS_MAP").ok_or_else(|| anyhow::anyhow!("Failed to find TRUSTED_CONNECTIONS_MAP map"))?;
+    // Get actual maps
+    let pending_connections_map = AyaHashMap::<_, ConnectionKey, u32>::try_from(pending_connections_map_raw)?;
+    let trusted_connections_map = AyaHashMap::<_, ConnectionKey, u32>::try_from(trusted_connections_map_raw)?;
+    // Create a sharable reference to the maps
+    let pending_connections_shared = Arc::new(tokio::sync::Mutex::new(pending_connections_map));
+    let trusted_connections_shared = Arc::new(tokio::sync::Mutex::new(trusted_connections_map));
+
+    
     
     let zmq_tx_clone = to_zmq_tx.clone();
 
@@ -373,6 +385,8 @@ async fn main() -> Result<(), anyhow::Error> {
             // Clone the Arc for each inner task
             let trusted_pids_for_task = Arc::clone(&trusted_pids_shared);
             let app_ids_for_task = Arc::clone(&app_ids);
+            let pending_connections_for_task = Arc::clone(&pending_connections_shared);
+            let trusted_connections_for_task = Arc::clone(&trusted_connections_shared);
             
 
             tokio::spawn(async move {
@@ -430,16 +444,19 @@ async fn main() -> Result<(), anyhow::Error> {
                             };
                             match kernel_event.event_type {
                                 EventType::ConnectionAttempt => {
+                                    // Get key from payload 
+                                    let connection_key: ConnectionKey = unsafe { kernel_event.payload.connection_attempt.key };
+                                    
                                     info!(
                                         "[Events] CONN_ATTEMPT: PID={}, TGID={}, Comm={}, Src={}:{}, Dest={}:{}, Proto={:?} \n  Process Lineage: {}",
                                         kernel_event.pid,
                                         kernel_event.tgid,
                                         comm_str,
-                                        Ipv4Addr::from(kernel_event.saddr),
-                                        kernel_event.sport,
-                                        Ipv4Addr::from(kernel_event.daddr),
-                                        kernel_event.dport,
-                                        kernel_event.protocol,
+                                        Ipv4Addr::from(connection_key.saddr),
+                                        connection_key.sport,
+                                        Ipv4Addr::from(connection_key.daddr),
+                                        connection_key.dport,
+                                        connection_key.protocol,
                                         lineage_string
                                     );
                                     // Now that this is working, these are the next steps
@@ -472,10 +489,23 @@ async fn main() -> Result<(), anyhow::Error> {
                                                 };
                                                 // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
                                                 let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                                if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { // Insert pid on match found
-                                                    warn!("[Kernel] Failed to insert trusted PID {}: {}", pid, e);
+                                                let mut trusted_connections = trusted_connections_for_task.lock().await;
+                                                let mut pending_connections = pending_connections_for_task.lock().await;
+                                                // Insert PID into trusted pids map
+                                                if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
+                                                    warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
                                                 } else {
-                                                    info!("[Kernel] Successfully inserted trusted PID: {}", pid);
+                                                    info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
+                                                }
+                                                // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
+                                                if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
+                                                    //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
+                                                } else {
+                                                    //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
+                                                }
+                                                // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
+                                                if let Err(e) = pending_connections.remove(&connection_key) {
+                                                    
                                                 }
                                             }
                                         }
@@ -492,32 +522,17 @@ async fn main() -> Result<(), anyhow::Error> {
                                     // If it's allowed and the hash is intact, the allow it
                                 }
                                 EventType::BlockEvent => {
-                                //     pub struct KernelEvent {
-                                //     pub event_type: EventType, // Discriminant for userspace to know how to interpret
-                                //     pub pid: u32,               // Thread ID from bpf_get_current_pid_tgid() low 32 bits
-                                //     pub tgid: u32,               // Process ID from bpf_get_current_pid_tgid() high 32 bits
-                                //     pub comm: [u8; 16],          // Command name from ctx.command()
-
-                                //     // Network Tuple Info (relevant for BlockEvent and ConnectionAttempt)
-                                //     // Always store in Network Byte Order (Big Endian) for consistency with maps
-                                //     pub saddr: u32,              // Source IP (NBO)
-                                //     pub daddr: u32,              // Destination IP (NBO)
-                                //     pub sport: u16,              // Source Port (NBO)
-                                //     pub dport: u16,              // Destination Port (NBO)
-                                //     pub protocol: u8,            // IP Protocol number
-
-                                //     pub reason: BlockReason,     // Specific reason for BlockEvent type
-                                //     pub _padding: [u8; 19],
-                                // }
+                                    let payload = unsafe { kernel_event.payload.block_event };
+                                    let connection_key = payload.key;
                                     let formatted_event = format!(
                                         "BLOCKED: Reason={:?}, PID={}, TGID={}, Comm={}, Dest={}:{}, Proto={:?} \n  Process Lineage: {}",
-                                        kernel_event.reason,
+                                        payload.reason,
                                         kernel_event.pid,
                                         kernel_event.tgid,
                                         comm_str,
-                                        Ipv4Addr::from(u32::from_be(kernel_event.daddr)),
-                                        kernel_event.dport,
-                                        kernel_event.protocol,
+                                        Ipv4Addr::from(u32::from_be(connection_key.daddr)),
+                                        connection_key.dport,
+                                        connection_key.protocol,
                                         lineage_string
                                     );
                                     info!("[Events] {}", formatted_event);
@@ -545,31 +560,6 @@ async fn main() -> Result<(), anyhow::Error> {
                                     info!("[Events] EBPF_DEBUG: PID={}, TGID={}, Msg={}", kernel_event.pid, kernel_event.tgid, debug_content_str);
                                 }
                             }
-                            // //Format event
-                            // let formatted_event = format!(
-                            //     "Blocked {:?} -> PID: {}, Dest: {}:{}",
-                            //     event.reason,
-                            //     event.pid,
-                            //     event.dest_addr,
-                            //     event.dest_port
-
-                            // );
-                            // Send event
-                            // let debug_message = DebugMessage {
-                            //     source: "Firewall".to_string(),
-                            //     content: formatted_event.clone(),
-                            // };
-                            // if let Err(e) = task_zmq_tx.send(FireWhalMessage::Debug(debug_message)).await {
-                            //     warn!("[Events] Failed to send block event: {}", e);
-                            // }
-                            // // Test sending event to discord bot
-                            // let discord_block_message = DiscordBlockNotification {
-                            //     component: "Firewall".to_string(),
-                            //     content: formatted_event.clone(),
-                            // };
-                            // if let Err(e) = task_zmq_tx.send(FireWhalMessage::DiscordBlockNotify(discord_block_message)).await {
-                            //     warn!("[Events] Failed to send block event to Discord: {}", e);
-                            // }
                         }
                     }
                 }
@@ -588,6 +578,8 @@ async fn main() -> Result<(), anyhow::Error> {
     attach_tc_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_tc_interfaces.clone()).await?;
     
     // --- Main Event Loop and Shutdown logic ---
+    // Send Ready Status to IPC
+    to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
     info!("[Kernel] ✅ Firewall is active. Waiting for shutdown signal...");
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
     loop {

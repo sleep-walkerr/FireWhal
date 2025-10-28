@@ -4,6 +4,7 @@ use aya_ebpf::{bindings::TC_ACT_OK, programs::TcContext};
 use aya_log_ebpf::{error, info, warn};
 use network_types::icmp::Icmp;
 use core::mem;
+use core::fmt::{self, Debug, Formatter};
 use network_types::eth::{self, EthHdr, EtherType};
 use network_types::ip::{IpProto, Ipv4Hdr};
 use network_types::tcp::TcpHdr;
@@ -24,7 +25,7 @@ unsafe impl aya::Pod for LogRecord {}
 
 
 
-use core::fmt::{self, Debug};
+
 
 // TC Program Connection Handling and Tracking 
 
@@ -53,6 +54,9 @@ pub struct ConnectionTuple {
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for ConnectionTuple {}
 unsafe impl Plain for ConnectionTuple {}
+
+
+
 
 // TC Program Packet Parser
 #[inline(always)]
@@ -111,51 +115,13 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
     })
 }
 
-// Kernel Event Data Structures
-#[repr(u32)] // Use u32 for the discriminant as it's common and provides alignment
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventType {
-    BlockEvent = 0,
-    ConnectionAttempt = 1, // For logging allowed connections, if desired
-    DebugMessage = 2,      // For generic debug messages
-    // Add other event types here if you expand functionality
-}
 
-#[repr(C)]
-#[derive(Clone, Copy)] // Derive Clone and Copy
-pub struct KernelEvent {
-    pub event_type: EventType, // Discriminant for userspace to know how to interpret
-    pub pid: u32,               // Thread ID from bpf_get_current_pid_tgid() low 32 bits
-    pub tgid: u32,               // Process ID from bpf_get_current_pid_tgid() high 32 bits
-    pub comm: [u8; 16],          // Command name from ctx.command()
 
-    // Network Tuple Info (relevant for BlockEvent and ConnectionAttempt)
-    // Always store in Network Byte Order (Big Endian) for consistency with maps
-    pub saddr: u32,              // Source IP (NBO)
-    pub daddr: u32,              // Destination IP (NBO)
-    pub sport: u16,              // Source Port (NBO)
-    pub dport: u16,              // Destination Port (NBO)
-    pub protocol: u8,            // IP Protocol number
 
-    pub reason: BlockReason,     // Specific reason for BlockEvent type
-    pub _padding: [u8; 19],
-}
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for KernelEvent {}
-unsafe impl Plain for KernelEvent {} // Always derive Plain if it's available and needed
-
-#[repr(u8)]
-#[derive(Clone, Copy)]
-pub enum Action {
-    Allow,
-    Deny
-}
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for Action {}
 
 // Structs for keeping track of trusted PIDs
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PidTrustInfo {
     pub action: Action, // Allow or Deny
     pub last_seen_ns: u64, // Nanoseconds since boot (from bpf_ktime_get_ns())
@@ -189,26 +155,7 @@ unsafe impl aya::Pod for RuleAction {}
 
 
 
-#[repr(u8)]
-#[derive(Clone, Copy)]
-pub enum BlockReason {
-    IcmpBlocked = 1,
-    IpBlockedEgressTcp = 2,
-    IpBlockedEgressUdp = 3,
-    BindBlocked = 4,
-}
 
-// Implement Debug manually because `aya-ebpf` doesn't support derive macros easily.
-impl Debug for BlockReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BlockReason::IcmpBlocked => write!(f, "IcmpBlocked"),
-            BlockReason::IpBlockedEgressTcp => write!(f, "IpBlockedEgressTcp"),
-            BlockReason::IpBlockedEgressUdp => write!(f, "IpBlockedEgressUdp"),
-            BlockReason::BindBlocked => write!(f, "BindBlocked"),
-        }
-    }
-}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -233,3 +180,144 @@ pub struct LpmIpKey {
 }
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for LpmIpKey {}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// CHANGED STRUCTS
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    Allow = 0,
+    Deny = 1,
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for Action {}
+unsafe impl Plain for Action {}
+
+// Connection Tuple for Tracking Process for Outgoing Connections (Ex: connect() -> tc_egress)#[repr(C)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ConnectionKey {
+    pub saddr: u32,
+    pub daddr: u32,
+    pub sport: u16,
+    pub dport: u16,
+    pub protocol: u8,
+    pub _padding: [u8; 3], // Pad to 16 bytes
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for ConnectionKey {}
+unsafe impl Plain for ConnectionKey {}
+
+// Kernel Event Data Structures
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EventType {
+    ConnectionAttempt = 0,
+    BlockEvent = 1,
+    DebugMessage = 2,
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for EventType {}
+unsafe impl Plain for EventType {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BlockReason {
+    IcmpBlocked = 1,
+    IpBlockedEgressTcp = 2,
+    IpBlockedEgressUdp = 3,
+    BindBlocked = 4,
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for BlockReason {}
+unsafe impl Plain for BlockReason {}
+
+// Data specific to a ConnectionAttempt event
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionAttemptPayload {
+    pub key: ConnectionKey, // Embed the ConnectionKey directly
+    // Add any other connection-specific info here
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for ConnectionAttemptPayload {}
+unsafe impl Plain for ConnectionAttemptPayload {}
+
+// Data specific to a BlockEvent
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BlockEventPayload {
+    pub key: ConnectionKey, // Embed the ConnectionKey here too
+    pub reason: BlockReason,
+    // Add any other block-specific info here
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for BlockEventPayload {}
+unsafe impl Plain for BlockEventPayload {}
+
+// Data specific to a DebugMessage
+// This can be variable length, so usually it's a fixed-size array
+// or handled differently. For now, a fixed-size array is simple.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DebugMessagePayload {
+    pub message: [u8; 64], // Fixed-size buffer for a short debug message
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for DebugMessagePayload {}
+unsafe impl Plain for DebugMessagePayload {}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct KernelEvent {
+    pub event_type: EventType,
+    pub pid: u32,
+    pub tgid: u32,
+    pub comm: [u8; 16], // Command name
+
+    // Flexible payload: this struct will be large enough to hold the largest
+    // of your individual payload types. You'll read this based on event_type.
+    // For padding, ensure this combined_payload makes the whole struct 8-byte aligned.
+    pub payload: KernelEventPayload,
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for KernelEvent {}
+unsafe impl Plain for KernelEvent {} // Always derive Plain if it's available and needed
+
+
+// This is the "manual union" part.
+// Its size should be the max size of any of your individual payloads.
+// Ensure it's large enough and correctly aligned.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union KernelEventPayload {
+    pub connection_attempt: ConnectionAttemptPayload,
+    pub block_event: BlockEventPayload,
+    pub debug_message: DebugMessagePayload,
+    // Add more as needed.
+    // Ensure padding here if necessary to make this union 8-byte aligned
+    // and a multiple of 8 bytes for efficient perf buffer usage.
+    // Example: [u8; MAX_PAYLOAD_SIZE] if you just want raw bytes.
+    pub _padding: [u8; 64], // Example: make it big enough for DebugMessagePayload (64 bytes)
+                            // and BlockEventPayload (16 bytes + X)
+                            // Max size is currently DebugMessagePayload (64 bytes).
+                            // ConnectionAttemptPayload is 16 bytes. BlockEventPayload is 16 + X.
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for KernelEventPayload {}
+unsafe impl Plain for KernelEventPayload {}
