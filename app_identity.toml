@@ -11,3 +11,11 @@ hash = "sha256:fedcba654321..."
 [apps."ssh"]
 path = "ssh"
 hash = "sha256:fedcba654321..."
+
+[apps."ping"]
+path = "/usr/bin/ping"
+hash = "sha256:fedcba654321..."
+
+[apps."curl"]
+path = "/usr/bin/curl"
+hash = "sha256:fedcba654321..."

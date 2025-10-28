@@ -300,102 +300,62 @@ pub fn try_firewhal_egress_connect4(ctx: SockAddrContext) -> Result<i32, ()> {
 #[cgroup_sock_addr(sendmsg4)]
 pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
-        // //Consider changing these back to safe "ctx.user_ipv" and the like if you can
-        // let pid = ctx.pid();
-        // let sockaddr_pointer = ctx.sock_addr;
-        // let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-        // let user_port = unsafe { (*sockaddr_pointer).user_port }; 
-        // let protocol = unsafe { (*sockaddr_pointer).protocol };
 
-        // //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
-        // // They need to be converted to be used first
-        // let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
-        // let destination_port = (u32::from_be(user_port) >> 16) as u16;
+        //Consider changing these back to safe "ctx.user_ipv" and the like if you can
+        let sockaddr_pointer = ctx.sock_addr;
+        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+        let user_port = unsafe { (*sockaddr_pointer).user_port }; 
+        let protocol = unsafe { (*sockaddr_pointer).protocol };
+        let command_fetch = ctx.command();
+        let command: [u8; 16]; 
+        if command_fetch.is_ok() {
+            command = command_fetch.unwrap();
+        } else { 
+            command = [0; 16];
+            info!(&ctx, "Command fetching failed");
+        }
 
+        //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
+        // They need to be converted to be used first
+        let source_port =  u32::from_be(user_port) as u16;
+        let destination_port = (u32::from_be(user_port) >> 16) as u16;
 
-        // //Convert to readable format for error logging
-        // let user_ip_converted = Ipv4Addr::from(u32::from_be(user_ip4));
-        // let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
+        // TESTING
+
+        // Check if TGID already exists in map
+        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
+            info!(&ctx, "[Kernel] [sendmsg4] Trusted PID found {}", (ctx.tgid()) as u32);
+            return Ok(1)
+        } else { // If it doesn't send event to check application
+            // Build connection key for payload
+            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+            // Print key string for debug purposes
+            info!(&ctx, "[Kernel] [sendmsg4] ConnectionKey: {} {} {} {} {}", key_to_use.saddr, key_to_use.daddr, key_to_use.sport, key_to_use.dport, key_to_use.protocol as u8);
+            let conn_attempt_payload = ConnectionAttemptPayload {
+                key: key_to_use
+            };
+            let connection_attempt_event = KernelEvent {
+                event_type: EventType::ConnectionAttempt, // Specific event type
+                pid: ctx.pid(),
+                tgid: ctx.tgid(),
+                comm: command,
+                payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
+            };
+            // Insert into map
+            if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
+                warn!(&ctx, "[Kernel] [sendmsg4] Failed to insert connection key {}", ctx.tgid());
+            } else {
+                info!(&ctx, "[Kernel] [sendmsg4] Successfully inserted connection key {}", ctx.tgid());
+            }
+            // Send event for processing
+            unsafe { EVENTS.output(&ctx, &connection_attempt_event, 0) };
+        }
         
-        // // Get a reference to the RULES hashmap
-        // let rules_ptr =  core::ptr::addr_of_mut!(RULES);
-
-        // // Create keys to check for Rule Match
-        // // Specific Match
-        // let full_key = RuleKey {
-        //     protocol: protocol, // Don't forget about wild card for protocol
-        //     source_port: 0, // Source port is irrelevant in this filter
-        //     dest_port: destination_port,
-        //     source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        //     dest_ip: user_ip4,
-        // };
-        // // Wildcard port match
-        // let wildcard_port_key = RuleKey {
-        //     protocol: protocol, // Don't forget about wild card for protocol
-        //     source_port: 0, // Source port is irrelevant in this filter
-        //     dest_port: 0,
-        //     source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        //     dest_ip: user_ip4,
-        // };
-        // // Wildcard IP match
-        // let wildcard_ip_key = RuleKey {
-        //     protocol: protocol, // Don't forget about wild card for protocol
-        //     source_port: 0, // Source port is irrelevant in this filter
-        //     dest_port: destination_port,
-        //     source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        //     dest_ip: 0,
-        // };
-        // // Create block event to report block
-        // let block_report_event = BlockEvent {
-        //     reason: BlockReason::IpBlockedEgressUdp,
-        //     pid: ctx.pid(),
-        //     dest_addr:IpAddr::V4(Ipv4Addr::from(user_ip4.to_be())),
-        //     dest_port: user_port_converted,
-        // };
-        // // Check all keys
-        // if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
-        //     // New matching 
-        //     match action.action {
-        //         Action::Deny => {
-        //             info!(&ctx, "[Kernel] [sendmsg4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
-        //             return Ok(0); // Block
-        //         }
-        //         Action::Allow => {
-        //             // info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             return Ok(1);
-        //         }
-        //     }
-        // } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
-        //     match action.action {
-        //         Action::Deny => {
-        //             info!(&ctx, "[Kernel] [sendmsg4] Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
-        //             unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
-        //             return Ok(0); // Block
-        //         }
-        //         Action::Allow => {
-        //             // info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             return Ok(1);
-        //         }
-        //     }
-        // } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
-        //     match action.action {
-        //         Action::Deny => {
-        //             info!(&ctx, "[Kernel] [sendmsg4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
-        //             return Ok(0); // Block
-        //         }
-        //         Action::Allow => {
-        //             // info!(&ctx, "[Kernel] [sendmsg4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             return Ok(1);
-        //         }
-        //     }
-        // }
-        // // Print all blocked traffic
-        // info!(&ctx, "[Kernel] [sendmsg4] BLOCKED connection to IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, destination_port, protocol, source_port);
+        
         
         Ok(1) // Allow the connection for now, blocking delegated to tc egress program
     }();
+        
 
     match result {
         Ok(ret) => ret,
@@ -410,101 +370,58 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 #[cgroup_sock_addr(bind4)]
 pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
-        // //Consider changing these back to safe "ctx.user_ipv" and the like if you can
-        // let pid = ctx.pid();
-        // let sockaddr_pointer = ctx.sock_addr;
-        // let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-        // let dest_ip4 = unsafe { (*sockaddr_pointer).msg_src_ip4 };
-        // let user_port = unsafe { (*sockaddr_pointer).user_port }; 
-        // let protocol = unsafe { (*sockaddr_pointer).protocol };
 
-        // //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
-        // // They need to be converted to be used first
-        // let source_port = unsafe { ((*sockaddr_pointer).user_port) as u16};
-        // let destination_port = (u32::from_be(user_port) >> 16) as u16;
+        //Consider changing these back to safe "ctx.user_ipv" and the like if you can
+        let sockaddr_pointer = ctx.sock_addr;
+        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+        let user_port = unsafe { (*sockaddr_pointer).user_port }; 
+        let protocol = unsafe { (*sockaddr_pointer).protocol };
+        let command_fetch = ctx.command();
+        let command: [u8; 16]; 
+        if command_fetch.is_ok() {
+            command = command_fetch.unwrap();
+        } else { 
+            command = [0; 16];
+            info!(&ctx, "Command fetching failed");
+        }
 
+        //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
+        // They need to be converted to be used first
+        let source_port =  u32::from_be(user_port) as u16;
+        let destination_port = (u32::from_be(user_port) >> 16) as u16;
 
-        // //Convert to readable format for error logging
-        // let user_ip_converted = Ipv4Addr::from(u32::from_be(user_ip4));
-        // let dest_ip_converted = Ipv4Addr::from(u32::from_be(dest_ip4));
-        // let user_port_converted = (u32::from_be(user_port) >> 16) as u16;
+        // TESTING
+
+        // Check if TGID already exists in map
+        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
+            info!(&ctx, "[Kernel] [bind4] Trusted PID found {}", (ctx.tgid()) as u32);
+            return Ok(1)
+        } else { // If it doesn't send event to check application
+            // Build connection key for payload
+            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+            // Print key string for debug purposes
+            info!(&ctx, "[Kernel] [bind4] ConnectionKey: {} {} {} {} {}", key_to_use.saddr, key_to_use.daddr, key_to_use.sport, key_to_use.dport, key_to_use.protocol as u8);
+            let conn_attempt_payload = ConnectionAttemptPayload {
+                key: key_to_use
+            };
+            let connection_attempt_event = KernelEvent {
+                event_type: EventType::ConnectionAttempt, // Specific event type
+                pid: ctx.pid(),
+                tgid: ctx.tgid(),
+                comm: command,
+                payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
+            };
+            // Insert into map
+            if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
+                warn!(&ctx, "[Kernel] [bind4] Failed to insert connection key {}", ctx.tgid());
+            } else {
+                info!(&ctx, "[Kernel] [bind4] Successfully inserted connection key {}", ctx.tgid());
+            }
+            // Send event for processing
+            unsafe { EVENTS.output(&ctx, &connection_attempt_event, 0) };
+        }
         
-        // // Get a reference to the RULES hashmap
-        // let rules_ptr =  core::ptr::addr_of_mut!(RULES);
-
-        // // Create keys to check for Rule Match
-        // // Specific Match
-        // let full_key = RuleKey {
-        //     protocol: protocol, // Don't forget about wild card for protocol
-        //     source_port: 0, // Source port is irrelevant in this filter
-        //     dest_port: destination_port,
-        //     source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        //     dest_ip: user_ip4,
-        // };
-        // // Wildcard port match
-        // let wildcard_port_key = RuleKey {
-        //     protocol: protocol, // Don't forget about wild card for protocol
-        //     source_port: 0, // Source port is irrelevant in this filter
-        //     dest_port: 0,
-        //     source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        //     dest_ip: user_ip4,
-        // };
-        // // Wildcard IP match
-        // let wildcard_ip_key = RuleKey {
-        //     protocol: protocol, // Don't forget about wild card for protocol
-        //     source_port: 0, // Source port is irrelevant in this filter
-        //     dest_port: destination_port,
-        //     source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        //     dest_ip: 0,
-        // };
-        // // Create block event to report block
-        // let block_report_event = BlockEvent {
-        //     reason: BlockReason::IpBlockedEgressUdp,
-        //     pid: ctx.pid(),
-        //     dest_addr:IpAddr::V4(Ipv4Addr::from(user_ip4.to_be())),
-        //     dest_port: user_port_converted,
-        // };
-        // // Check all keys
-        // if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
-        //     // New matching 
-        //     match action.action {
-        //         Action::Deny => {
-        //             info!(&ctx, "[Kernel] [bind4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
-        //             return Ok(0); // Block
-        //         }
-        //         Action::Allow => {
-        //             // info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             return Ok(1);
-        //         }
-        //     }
-        // } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
-        //     match action.action {
-        //         Action::Deny => {
-        //             info!(&ctx, "[Kernel] [bind4] Rule {} blocked connection to IP {}, port {}", action.rule_id, user_ip_converted, user_port_converted);
-        //             unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
-        //             return Ok(0); // Block
-        //         }
-        //         Action::Allow => {
-        //             // info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             return Ok(1);
-        //         }
-        //     }
-        // } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
-        //     match action.action {
-        //         Action::Deny => {
-        //             info!(&ctx, "[Kernel] [bind4] Rule {} blocked connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             unsafe { EVENTS.output(&ctx, &block_report_event, 0) };
-        //             return Ok(0); // Block
-        //         }
-        //         Action::Allow => {
-        //             // info!(&ctx, "[Kernel] [bind4] Rule {} allowed connection to IP {}, port {}, protocol {}", action.rule_id, user_ip_converted, user_port_converted, protocol);
-        //             return Ok(1);
-        //         }
-        //     }
-        // }
-        // // Print all blocked traffic
-        // info!(&ctx, "[Kernel] [bind4] BLOCKED connection User IP {}, Destination IP {}, Destination Port {}, Protocol {}, Source Port {}", user_ip_converted, dest_ip_converted, destination_port, protocol, source_port);
+        
         
         Ok(1) // Allow the connection for now, blocking delegated to tc egress program
     }();
@@ -558,7 +475,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
      } else {
         info!(&ctx, "[Kernel] [egress_tc] Connection Not Found in Either Map");
         // Not found in either map, default to block
-        return Ok(TC_ACT_SHOT)
+        //return Ok(TC_ACT_SHOT)
      }
     
     // This is where you would track the new outgoing connection.

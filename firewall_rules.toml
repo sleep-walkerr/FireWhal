@@ -20,16 +20,24 @@ description = "Allow outgoing HTTPS via UDP (for QUIC)"
 [[rules]]
 action = "Allow"
 #source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 80 
+description = "Allow outgoing HTTP" 
+
+[[rules]]
+action = "Allow"
+#source_ip = None 
 source_port = 22 
 #dest_ip = None 
-description = "Allow outgoing HTTPS via UDP (for QUIC)" 
+description = "Incoming SSH (Turn Off Later)" 
 
 [[rules]]
 action = "Allow"
 #source_ip = None 
 dest_port = 22 
 #dest_ip = None 
-description = "Allow outgoing HTTPS via UDP (for QUIC)" 
+description = "Outgoing SSH" 
 
 
 [[rules]]
