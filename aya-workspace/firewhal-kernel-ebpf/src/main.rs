@@ -332,7 +332,15 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 
         // Check if TGID already exists in map
         if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
-            info!(&ctx, "[Kernel] [sendmsg4] Trusted PID found {}", (ctx.tgid()) as u32);
+            info!(&ctx, "[Kernel] [sendmsg4] Trusted PID {} found for {}", (ctx.tgid()) as u32, Ipv4Addr::from(u32::from_be(user_ip4)));
+            // Build connection key for payload
+            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+            // Insert into again, in case of a trusted process connecting to a new ip address
+            if let Err(e) = unsafe { TRUSTED_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
+                warn!(&ctx, "[Kernel] [sendmsg4] Failed to insert connection key {}", ctx.tgid());
+            } else {
+                info!(&ctx, "[Kernel] [sendmsg4] Successfully inserted connection key {}", ctx.tgid());
+            }
             return Ok(1)
         } else { // If it doesn't send event to check application
             // Build connection key for payload
@@ -402,7 +410,15 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
 
         // Check if TGID already exists in map
         if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
-            info!(&ctx, "[Kernel] [bind4] Trusted PID found {}", (ctx.tgid()) as u32);
+            info!(&ctx, "[Kernel] [bind4] Trusted PID {} found for {}", (ctx.tgid()) as u32, Ipv4Addr::from(u32::from_be(user_ip4)));
+            // Build connection key for payload
+            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+            // Insert into again, in case of a trusted process connecting to a new ip address
+            if let Err(e) = unsafe { TRUSTED_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
+                warn!(&ctx, "[Kernel] [bind4] Failed to insert connection key {}", ctx.tgid());
+            } else {
+                info!(&ctx, "[Kernel] [bind4] Successfully inserted connection key {}", ctx.tgid());
+            }
             return Ok(1)
         } else { // If it doesn't send event to check application
             // Build connection key for payload

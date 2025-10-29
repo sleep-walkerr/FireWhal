@@ -19,3 +19,7 @@ hash = "sha256:fedcba654321..."
 [apps."curl"]
 path = "/usr/bin/curl"
 hash = "sha256:fedcba654321..."
+
+[apps."vscodium"]
+path = "/opt/vscodium-bin/codium"
+hash = "sha256:fedcba654321..."
