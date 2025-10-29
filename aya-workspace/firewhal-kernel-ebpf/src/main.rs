@@ -254,7 +254,15 @@ pub fn try_firewhal_egress_connect4(ctx: SockAddrContext) -> Result<i32, ()> {
 
         // Check if TGID already exists in map
         if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
-            info!(&ctx, "[Kernel] [connect4] Trusted PID found {}", (ctx.tgid()) as u32);
+            info!(&ctx, "[Kernel] [connect4] Trusted PID {} found for {}", (ctx.tgid()) as u32, Ipv4Addr::from(u32::from_be(user_ip4)));
+            // Build connection key for payload
+            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+            // Insert into again, in case of a trusted process connecting to a new ip address
+            if let Err(e) = unsafe { TRUSTED_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
+                warn!(&ctx, "[Kernel] [connect4] Failed to insert connection key {}", ctx.tgid());
+            } else {
+                info!(&ctx, "[Kernel] [connect4] Successfully inserted connection key {}", ctx.tgid());
+            }
             return Ok(1)
         } else { // If it doesn't send event to check application
             // Build connection key for payload
@@ -445,6 +453,38 @@ pub fn firewall_egress_tc(ctx: TcContext) -> i32 { // Change return type to incl
 
 fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let mut tuple = parse_packet_tuple(&ctx)?;
+    // Create debug printing fields
+    let debug_saddr = Ipv4Addr::from(u32::from_be(tuple.saddr));
+    let debug_daddr = Ipv4Addr::from(u32::from_be(tuple.daddr));
+    let debug_sport = tuple.sport;
+    let debug_dport = tuple.dport;
+    // Placeholder Info, Move Inside ConnectionKey Matching Later for REAL TGID
+    let mut info = ConnectionInfo {
+        pid: 0, // In TC we don't know the PID, this would be set by the cgroup program
+        last_seen: unsafe { bpf_ktime_get_ns() },
+    };
+    // Check to see if broadcast for DHCP
+    if tuple.saddr == Ipv4Addr::from([0,0,0,0]).into() && tuple.daddr == Ipv4Addr::from([255,255,255,255]).into() { // Add port 68 and 67 here as well
+        
+        let broadcast_rule = ConnectionTuple {
+        saddr: 0,
+        daddr: 0,
+        sport: tuple.sport,
+        dport: tuple.dport,
+        protocol: tuple.protocol,
+        _pad: [0; 3],
+        };
+        tuple = broadcast_rule;
+        info!(&ctx, "[Kernel] [firewall_egress_tc] DHCP ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                info!(&ctx, "[Kernel] [firewall_egress_tc]: Adding tuple for DHCP: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
+                if result.is_err() {
+                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT)
+                }
+                return Ok(TC_ACT_OK);
+    }
+
 
     // Extract Connection Key for Pending Match
     let incoming_connection_key = ConnectionKey {
@@ -456,7 +496,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         _padding: [0; 3],
      };
      // Print for Debug
-     info!(&ctx, "[Kernel] [egress_tc] ConnectionKey: {} {} {} {} {}", incoming_connection_key.saddr, incoming_connection_key.daddr, incoming_connection_key.sport, incoming_connection_key.dport, incoming_connection_key.protocol as u8);
+     info!(&ctx, "[Kernel] [egress_tc] ConnectionKey: {} {} {} {} {}", debug_saddr, debug_daddr, debug_sport, debug_dport, incoming_connection_key.protocol as u8);
      // Lookup in TRUSTED_CONNECTIONS_MAP
      if let Some(tgid_match) = unsafe { TRUSTED_CONNECTIONS_MAP.get(&incoming_connection_key) } {
         info!(&ctx, "[Kernel] [egress_tc] Trusted Connection for {}, continuing.", *tgid_match);
@@ -475,7 +515,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
      } else {
         info!(&ctx, "[Kernel] [egress_tc] Connection Not Found in Either Map");
         // Not found in either map, default to block
-        //return Ok(TC_ACT_SHOT)
+        return Ok(TC_ACT_SHOT)
      }
 
     
@@ -483,22 +523,8 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     // This is where you would track the new outgoing connection.
     // TODO: A real implementation would check if this egress is from an approved PID.
     // For now, we'll add any outgoing connection to the map to allow its return traffic.
-    let info = ConnectionInfo {
-        pid: 0, // In TC we don't know the PID, this would be set by the cgroup program
-        last_seen: unsafe { bpf_ktime_get_ns() },
-    };
-    // Check to see if broadcast for DHCP
-    if tuple.saddr == Ipv4Addr::from([0,0,0,0]).into() && tuple.daddr == Ipv4Addr::from([255,255,255,255]).into() {
-        let broadcast_rule = ConnectionTuple {
-        saddr: 0,
-        daddr: 0,
-        sport: tuple.sport,
-        dport: tuple.dport,
-        protocol: tuple.protocol,
-        _pad: [0; 3],
-        };
-        tuple = broadcast_rule;
-    }
+    
+
     
 
     // Get a reference to the RULES hashmap
@@ -578,11 +604,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         payload: firewhal_kernel_common::KernelEventPayload { block_event: (block_event_payload) }
     };
 
-    // Create debug printing fields
-    let debug_saddr = Ipv4Addr::from(u32::from_be(tuple.saddr));
-    let debug_daddr = Ipv4Addr::from(u32::from_be(tuple.daddr));
-    let debug_sport = tuple.sport;
-    let debug_dport = tuple.dport;
+    
 
     // ADD TEMP DEBUG PRINT OF FIELDS
     info!(&ctx, "[Kernel] [egress_tc] CHECKING TRAFFIC: [{}:{}, {}:{}]", debug_saddr, debug_sport, debug_daddr, debug_dport);
@@ -699,10 +721,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         }
     }
 
-    
-    // TEST REMOVE LATER
-    info!(&ctx, "[Kernel] [egress_tc] Made it past rules check");
-    Ok(TC_ACT_SHOT) // Allow all traffic for now
+    Ok(TC_ACT_SHOT) // Default: Block All 
 }
 
 #[cfg(not(test))]
