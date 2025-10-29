@@ -261,7 +261,7 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     FireWhalMessage::Status(status) => {
                         if status.component == "Firewall" && status.message == "Ready" { // Wait for ready status to be forwarded from the IPC socket, then send rules
                             println!("[Supervisor] Firewall is ready. Loading and sending rules...");
-                            let rules_path = path::Path::new("/opt/firewhal/bin/rules.toml");
+                            let rules_path = path::Path::new("/opt/firewhal/bin/firewall_rules.toml");
                             // Load firewall rules from file, and send configuration to the userspace loader
                             match load_rules(rules_path) {
                                 Ok(config) => {

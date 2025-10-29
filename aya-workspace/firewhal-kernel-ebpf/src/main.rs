@@ -477,6 +477,8 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         // Not found in either map, default to block
         //return Ok(TC_ACT_SHOT)
      }
+
+    
     
     // This is where you would track the new outgoing connection.
     // TODO: A real implementation would check if this egress is from an approved PID.
@@ -581,6 +583,9 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let debug_daddr = Ipv4Addr::from(u32::from_be(tuple.daddr));
     let debug_sport = tuple.sport;
     let debug_dport = tuple.dport;
+
+    // ADD TEMP DEBUG PRINT OF FIELDS
+    info!(&ctx, "[Kernel] [egress_tc] CHECKING TRAFFIC: [{}:{}, {}:{}]", debug_saddr, debug_sport, debug_daddr, debug_dport);
 
     // Check all keys
     if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
@@ -695,7 +700,8 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     }
 
     
-
+    // TEST REMOVE LATER
+    info!(&ctx, "[Kernel] [egress_tc] Made it past rules check");
     Ok(TC_ACT_SHOT) // Allow all traffic for now
 }
 
