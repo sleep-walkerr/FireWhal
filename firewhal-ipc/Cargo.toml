@@ -1,0 +1,10 @@
+[package]
+name = "firewhal-ipc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bincode = { workspace = true }
+firewhal-core = { path = "../firewhal-core" } # Depends on the shared library
+nix = { workspace = true, features = ["fs", "user"] }
+zmq = { workspace = true }

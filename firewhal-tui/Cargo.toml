@@ -1,0 +1,13 @@
+[package]
+name = "firewhal-tui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+firewhal-core = { path = "../firewhal-core" } # Depends on the shared library
+color-eyre = "0.6.4"
+crossterm = "0.29.0"
+ratatui = "0.29.0"
+zmq = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+

@@ -1,0 +1,11 @@
+[package]
+name = "firewhal-discord-bot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+firewhal-core = { path = "../firewhal-core" }
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "cache"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+dotenvy = "0.15" # For loading .env file
+zmq = { workspace = true }

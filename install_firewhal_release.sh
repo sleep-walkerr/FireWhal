@@ -39,7 +39,9 @@ sudo pkill -f firewhal-kernel
 sudo pkill -f firewhal-ipc
 sudo pkill -f firewhal-discord-bot
 
-
+echo "Installing Rule and App ID files."
+sudo cp app_identity.toml /opt/firewhal/bin
+sudo cp firewall_rules.toml /opt/firewhal/bin
 
 echo "Building binaries"
 # Build all binaries in the workspace in release mode
@@ -48,10 +50,6 @@ echo $(cargo build --release)
 echo "Creating /opt/firewhal/bin directory in case it doesn't exist"
 # Create the destination directory if it doesn't exist
 sudo mkdir -p /opt/firewhal/bin
-
-echo "Installing Rule and App ID files."
-sudo cp app_identity.toml /opt/firewhal/bin/app_identity.toml
-sudo cp firewall_rules.toml /opt/firewhal/bin/firewall_rules.toml
 
 echo "Installing binaries to /opt/firewhal/bin"
 

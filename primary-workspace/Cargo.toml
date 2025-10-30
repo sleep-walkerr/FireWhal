@@ -1,8 +1,0 @@
-[workspace]
-resolver = "2" # Recommended for new workspaces
-members = [
-    "firewhal-core",
-    "firewhal-tui",
-    "firewhal-daemon",
-    "firewhal-discord-bot", "firewhal-ipc"
-]
