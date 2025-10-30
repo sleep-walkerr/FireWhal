@@ -15,6 +15,8 @@ use tokio::{
     task::{self}, time::{self, timeout},
 };
 
+use sha3::{Sha3_256, Digest};
+
 use firewhal_core::{
     ApplicationAllowlistConfig, BlockAddressRule, DebugMessage, DiscordBlockNotification, FireWhalConfig, FireWhalMessage, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate
 };
@@ -323,6 +325,43 @@ async fn load_app_ids(app_ids: Arc<Mutex<HashMap<PathBuf, String>>>, config: App
     Ok(())
 }
 
+// Hashing function for checking binaries at a given path
+async fn calculate_file_hash(path: PathBuf) -> Result<String, io::Error> {
+    task::spawn_blocking(move || {
+        info!("[Hashing] Starting hash for: {}", path.display());
+
+        let mut file = File::open(&path)?; // Directly open the file
+
+        let mut hasher = Sha3_256::new();
+
+        // Use a 1MB buffer (1 * 1024 * 1024 bytes)
+        const BUFFER_SIZE: usize = 1 * 1024 * 1024;
+        let mut buffer = vec![0; BUFFER_SIZE];
+
+        loop {
+            // Read a chunk directly from the File into our buffer.
+            let n = file.read(&mut buffer)?;
+
+            if n == 0 {
+                // End of file reached
+                break;
+            }
+
+            // Update the hasher with the bytes that were actually read.
+            hasher.update(&buffer[..n]);
+        }
+
+        info!("[Hashing] Finished hashing: {}", path.display());
+
+        let hash_bytes = hasher.finalize();
+        let hash_string = format!("{:x}", hash_bytes);
+
+        Ok(hash_string)
+    })
+    .await
+    .map_err(|join_err| io::Error::new(io::ErrorKind::Other, join_err))?
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse(); // Remove later
@@ -476,37 +515,44 @@ async fn main() -> Result<(), anyhow::Error> {
                                         // Match path found in app_ids
                                         if let Some(app_hash) = app_ids_guard.get(&app_path) {
                                             // Hash application at path here, then compare to app_hash
-                                            // For now use a placeholder compare
-                                            if app_hash == "sha256:fedcba654321..." {
-                                                if let Some(debug_app_path) = app_path.clone().to_str() {
-                                                    info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
-                                                } else {
-                                                    info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
+                                            // Get Hash
+                                            if let Ok(current_hash) = calculate_file_hash(app_path.clone()).await {
+                                                
+                                            
+                                                info!("[Kernel] [AppMatching] Hash for path {}: {}", app_path.to_str().unwrap(), current_hash);
+                                                if *app_hash == current_hash {
+                                                    if let Some(debug_app_path) = app_path.clone().to_str() {
+                                                        info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
+                                                    } else {
+                                                        info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
+                                                    }
+                                                    let trust_info = PidTrustInfo {
+                                                        action: Action::Allow,
+                                                        last_seen_ns: 0,
+                                                    };
+                                                    // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
+                                                    let mut trusted_pids = trusted_pids_for_task.lock().await;
+                                                    let mut trusted_connections = trusted_connections_for_task.lock().await;
+                                                    let mut pending_connections = pending_connections_for_task.lock().await;
+                                                    // Insert PID into trusted pids map
+                                                    if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
+                                                        warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
+                                                    } else {
+                                                        info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
+                                                    }
+                                                    // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
+                                                    if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
+                                                        //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
+                                                    } else {
+                                                        //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
+                                                    }
+                                                    // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
+                                                    if let Err(e) = pending_connections.remove(&connection_key) {
+                                                        
+                                                    }
                                                 }
-                                                let trust_info = PidTrustInfo {
-                                                    action: Action::Allow,
-                                                    last_seen_ns: 0,
-                                                };
-                                                // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
-                                                let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                                let mut trusted_connections = trusted_connections_for_task.lock().await;
-                                                let mut pending_connections = pending_connections_for_task.lock().await;
-                                                // Insert PID into trusted pids map
-                                                if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
-                                                    warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
-                                                } else {
-                                                    info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
-                                                }
-                                                // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
-                                                if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
-                                                    //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
-                                                } else {
-                                                    //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
-                                                }
-                                                // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
-                                                if let Err(e) = pending_connections.remove(&connection_key) {
-                                                    
-                                                }
+                                            } else { 
+                                                info!("[Kernel] [AppMatching] Hash Function Failed.")
                                             }
                                         }
                                         

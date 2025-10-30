@@ -12,6 +12,7 @@ firewhal-kernel-common = { path = "../firewhal-kernel-common", features = ["user
 futures = "0.3.31"
 plain = "0.2.3"
 pnet = "0.35.0"
+sha3 = "0.10.8"
 
 [build-dependencies]
 anyhow = { workspace = true }
@@ -52,3 +53,13 @@ tokio = { workspace = true, features = [
     "macros", "rt-multi-thread", "signal", "sync", "time"
 ] }
 zmq = "0.10.0"
+
+[profile.dev]
+# opt-level = 3
+debug = true
+
+[profile.dev.package.sha3]
+opt-level = 3 # Use release-level optimizations just for zmq
+
+# [profile.release]
+# debug = 1
