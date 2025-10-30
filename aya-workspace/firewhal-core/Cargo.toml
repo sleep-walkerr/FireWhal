@@ -1,0 +1,10 @@
+[package]
+name = "firewhal-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bincode = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["signal", "sync", "rt", "rt-multi-thread", "macros", "time"] }
+zmq = { workspace = true }

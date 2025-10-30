@@ -10,7 +10,7 @@ async-stream = "0.3.6"
 aya-obj = "0.2.1"
 firewhal-kernel-common = { path = "../firewhal-kernel-common", features = ["user"] }
 futures = "0.3.31"
-plain = "0.2.3"
+plain = {workspace = true}
 pnet = "0.35.0"
 sha3 = "0.10.8"
 
@@ -44,7 +44,7 @@ aya-log-ebpf = { workspace = true }
 bytes = "1"
 clap = { workspace = true, features = ["derive"] }
 env_logger = { workspace = true }
-firewhal-core = { path = "../../primary-workspace/firewhal-core" }
+firewhal-core = { path = "../firewhal-core" }
 libc = { workspace = true }
 log = { workspace = true }
 network-interface = "2.0.3"
@@ -52,7 +52,7 @@ simple-logging = "2.0.2"
 tokio = { workspace = true, features = [
     "macros", "rt-multi-thread", "signal", "sync", "time"
 ] }
-zmq = "0.10.0"
+zmq = { workspace = true } 
 
 [profile.dev]
 # opt-level = 3

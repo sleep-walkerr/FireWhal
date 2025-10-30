@@ -43,10 +43,7 @@ echo "Installing Rule and App ID files."
 sudo cp app_identity.toml /opt/firewhal/bin
 sudo cp firewall_rules.toml /opt/firewhal/bin
 
-echo "Changing directory to primary workspace"
-cd primary-workspace
-
-echo "Building primary binaries"
+echo "Building binaries"
 # Build all binaries in the workspace in release mode
 echo $(cargo build --release)
 
@@ -54,7 +51,7 @@ echo "Creating /opt/firewhal/bin directory in case it doesn't exist"
 # Create the destination directory if it doesn't exist
 sudo mkdir -p /opt/firewhal/bin
 
-echo "Installing primary workspace binaries to /opt/firewhal/bin"
+echo "Installing binaries to /opt/firewhal/bin"
 
 sudo cp target/release/firewhal-ipc /opt/firewhal/bin
 sudo cp target/release/firewhal-discord-bot /opt/firewhal/bin
@@ -67,12 +64,6 @@ sudo cp firewhal-discord-bot/.env /opt/firewhal/bin
 
 echo "Installing TUI to /usr/local/bin"
 sudo cp target/release/firewhal-tui /usr/local/bin
-
-echo "Changing directory to aya workspace"
-cd ../aya-workspace
-
-echo "Building aya binaries"
-echo $(cargo build --release)
 
 echo "Installing aya workspace binaries to /opt/firewhal/bin"
 sudo cp target/release/firewhal-kernel /opt/firewhal/bin

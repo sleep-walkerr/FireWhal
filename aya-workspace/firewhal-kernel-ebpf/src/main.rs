@@ -66,63 +66,63 @@ static mut TRUSTED_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_
 // static mut IP_RULES_TEMPLATE: LpmTrie<LpmIpKey, RuleAction> = LpmTrie::with_max_entries(1024, 0);
 
 // INGRESS PROGRAMS
-#[xdp]
-pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
-    let result = || -> Result<u32, ()> {
-        let data_end = ctx.data_end();
-        let data_start = ctx.data();
+// #[xdp]
+// pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
+//     let result = || -> Result<u32, ()> {
+//         let data_end = ctx.data_end();
+//         let data_start = ctx.data();
 
-        // We manually track the offset as we parse headers.
-        let mut offset = 0;
+//         // We manually track the offset as we parse headers.
+//         let mut offset = 0;
 
-        // Load Ethernet header. All pointer operations are unsafe and must be
-        // enclosed in an unsafe block. The bounds check is what makes this
-        // operation safe.
-        let eth_hdr: EthHdr = unsafe {
-            let ptr = (data_start as *const u8).add(offset) as *const EthHdr;
-            if (ptr as *const u8).add(mem::size_of::<EthHdr>()) > (data_end as *const u8) {
-                return Err(());
-            }
-            *ptr
-        };
-        offset += mem::size_of::<EthHdr>();
+//         // Load Ethernet header. All pointer operations are unsafe and must be
+//         // enclosed in an unsafe block. The bounds check is what makes this
+//         // operation safe.
+//         let eth_hdr: EthHdr = unsafe {
+//             let ptr = (data_start as *const u8).add(offset) as *const EthHdr;
+//             if (ptr as *const u8).add(mem::size_of::<EthHdr>()) > (data_end as *const u8) {
+//                 return Err(());
+//             }
+//             *ptr
+//         };
+//         offset += mem::size_of::<EthHdr>();
 
-        if !matches!(eth_hdr.ether_type, EtherType::Ipv4) {
-            return Ok(xdp_action::XDP_PASS);
-        }
+//         if !matches!(eth_hdr.ether_type, EtherType::Ipv4) {
+//             return Ok(xdp_action::XDP_PASS);
+//         }
 
-        // Load IPv4 header.
-        let ipv4_hdr: Ipv4Hdr = unsafe {
-            let ptr = (data_start as *const u8).add(offset) as *const Ipv4Hdr;
-            if (ptr as *const u8).add(mem::size_of::<Ipv4Hdr>()) > (data_end as *const u8) {
-                return Err(());
-            }
-            *ptr
-        };
-        let icmp_block_ptr = core::ptr::addr_of_mut!(ICMP_BLOCK_ENABLED);
+//         // Load IPv4 header.
+//         let ipv4_hdr: Ipv4Hdr = unsafe {
+//             let ptr = (data_start as *const u8).add(offset) as *const Ipv4Hdr;
+//             if (ptr as *const u8).add(mem::size_of::<Ipv4Hdr>()) > (data_end as *const u8) {
+//                 return Err(());
+//             }
+//             *ptr
+//         };
+//         let icmp_block_ptr = core::ptr::addr_of_mut!(ICMP_BLOCK_ENABLED);
         
-        if ipv4_hdr.proto == IpProto::Icmp {
-            if unsafe { (*icmp_block_ptr).get(&1).is_some() } {
-                // <-- NEW: Send a BlockEvent
-                let event = BlockEvent {
-                    reason: BlockReason::IcmpBlocked,
-                    pid: 0, // PID is not available in the XDP context
-                    dest_addr: IpAddr::V4(ipv4_hdr.dst_addr()),
-                    dest_port: 0,
-                };
-                //unsafe { EVENTS.output(&ctx,&event, 0) };
-                return Ok(xdp_action::XDP_DROP);
-            }
-        }
+//         if ipv4_hdr.proto == IpProto::Icmp {
+//             if unsafe { (*icmp_block_ptr).get(&1).is_some() } {
+//                 // <-- NEW: Send a BlockEvent
+//                 let event = BlockEvent {
+//                     reason: BlockReason::IcmpBlocked,
+//                     pid: 0, // PID is not available in the XDP context
+//                     dest_addr: IpAddr::V4(ipv4_hdr.dst_addr()),
+//                     dest_port: 0,
+//                 };
+//                 //unsafe { EVENTS.output(&ctx,&event, 0) };
+//                 return Ok(xdp_action::XDP_DROP);
+//             }
+//         }
 
-        Ok(xdp_action::XDP_PASS)
-    }();
+//         Ok(xdp_action::XDP_PASS)
+//     }();
 
-    match result {
-        Ok(ret) => ret,
-        Err(_) => xdp_action::XDP_PASS, // On parsing error, better to pass than to drop unexpectedly
-    }
-}
+//     match result {
+//         Ok(ret) => ret,
+//         Err(_) => xdp_action::XDP_PASS, // On parsing error, better to pass than to drop unexpectedly
+//     }
+// }
 
 #[classifier] // Replaces primary use of XDP for all incoming packets, uses a map of current connections to implement stateful filtering
 pub fn firewall_ingress_tc(ctx: TcContext) -> i32 {
