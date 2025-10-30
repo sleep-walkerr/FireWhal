@@ -60,7 +60,7 @@ echo "Installing daemon to /usr/local/sbin (the daemon will be started from a sy
 sudo cp target/release/firewhal-daemon /usr/local/sbin
 
 echo "Installing Discord token and user ID"
-sudo cp firewhal-discord-bot/.env /opt/firewhal/bin
+sudo cp firewhal-discord-bot/.env /opt/firewhal
 
 echo "Installing TUI to /usr/local/bin"
 sudo cp target/release/firewhal-tui /usr/local/bin

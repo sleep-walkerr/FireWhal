@@ -177,51 +177,51 @@ async fn attach_tc_programs(
     Ok(())
 }
 
-async fn attach_xdp_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>, active_xdp_programs: Arc<Mutex<ActiveXdpInterfaces>>) -> Result<(), anyhow::Error>{ // This should be renamed to represent TC program attachment
-    let mut bpf = bpf.lock().await;
-    let mut active_xdp_programs = active_xdp_programs.lock().await;
+// async fn attach_xdp_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>, active_xdp_programs: Arc<Mutex<ActiveXdpInterfaces>>) -> Result<(), anyhow::Error>{ // This should be renamed to represent TC program attachment
+//     let mut bpf = bpf.lock().await;
+//     let mut active_xdp_programs = active_xdp_programs.lock().await;
 
-    // XDP 
-    info!("[Kernel] Applying XDP programs to interfaces {}...", updated_interfaces.join(","));
-    let xdp_program: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
-    let _ = xdp_program.load();
+//     // XDP 
+//     info!("[Kernel] Applying XDP programs to interfaces {}...", updated_interfaces.join(","));
+//     let xdp_program: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
+//     let _ = xdp_program.load();
 
-    //Iterate
-    let new_set: HashSet<&String> = updated_interfaces.iter().collect();
+//     //Iterate
+//     let new_set: HashSet<&String> = updated_interfaces.iter().collect();
 
-    let interfaces_to_remove: Vec<String> = active_xdp_programs.active_links.keys().filter(|&iface_name| !updated_interfaces.contains(iface_name)).cloned().collect();
+//     let interfaces_to_remove: Vec<String> = active_xdp_programs.active_links.keys().filter(|&iface_name| !updated_interfaces.contains(iface_name)).cloned().collect();
     
-    // Now, iterate through that list, remove each from the map, and detach.
-    info!("Interfaces to Remove: {:?}", interfaces_to_remove);
-    for iface in interfaces_to_remove {
-        // .remove() gives us ownership of the XdpLinkId.
-        if let Some(link_id) = active_xdp_programs.active_links.remove(&iface) {
-            info!("[Kernel] Detaching XDP from '{}'...", iface);
-            if let Err(e) = xdp_program.detach(link_id) {
-                warn!("[Kernel] Failed to detach from '{}': {}", iface, e);
-            }
-        }
-    }
+//     // Now, iterate through that list, remove each from the map, and detach.
+//     info!("Interfaces to Remove: {:?}", interfaces_to_remove);
+//     for iface in interfaces_to_remove {
+//         // .remove() gives us ownership of the XdpLinkId.
+//         if let Some(link_id) = active_xdp_programs.active_links.remove(&iface) {
+//             info!("[Kernel] Detaching XDP from '{}'...", iface);
+//             if let Err(e) = xdp_program.detach(link_id) {
+//                 warn!("[Kernel] Failed to detach from '{}': {}", iface, e);
+//             }
+//         }
+//     }
 
-    // --- 2. Attach to new interfaces that were not previously active ---
-    for iface in updated_interfaces {
-        // If our map of active links DOES NOT already contain this interface, attach it.
-        if !active_xdp_programs.active_links.contains_key(&iface) {
-            info!("[Kernel] Attaching XDP to '{}'...", iface);
-            match xdp_program.attach(&iface, XdpFlags::default()) {
-                Ok(link_id) => {
-                    // Success! Save the new link_id in our map.
-                    active_xdp_programs.active_links.insert(iface.clone(), link_id);
-                }
-                Err(e) => {
-                    warn!("[Kernel] Failed to attach to '{}': {}", iface, e);
-                }
-            }
-        }
-    }
-    info!("[Kernel] XDP programs applied.");
-    Ok(())
-}
+//     // --- 2. Attach to new interfaces that were not previously active ---
+//     for iface in updated_interfaces {
+//         // If our map of active links DOES NOT already contain this interface, attach it.
+//         if !active_xdp_programs.active_links.contains_key(&iface) {
+//             info!("[Kernel] Attaching XDP to '{}'...", iface);
+//             match xdp_program.attach(&iface, XdpFlags::default()) {
+//                 Ok(link_id) => {
+//                     // Success! Save the new link_id in our map.
+//                     active_xdp_programs.active_links.insert(iface.clone(), link_id);
+//                 }
+//                 Err(e) => {
+//                     warn!("[Kernel] Failed to attach to '{}': {}", iface, e);
+//                 }
+//             }
+//         }
+//     }
+//     info!("[Kernel] XDP programs applied.");
+//     Ok(())
+// }
 
 async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file: File) -> Result<(), anyhow::Error>{
     let mut bpf = bpf.lock().await;
@@ -619,7 +619,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let cgroup_file = File::open(&opt.cgroup_path)?;
     let initial_interfaces = get_all_interfaces();
-    attach_xdp_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_xdp_interfaces.clone()).await?;
+    // attach_xdp_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_xdp_interfaces.clone()).await?;
     attach_cgroup_programs(Arc::clone(&bpf), cgroup_file).await?;
     attach_tc_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_tc_interfaces.clone()).await?;
     
@@ -663,7 +663,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         // if update.source == "TUI" {
                         info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
                         let interfaces = update.interfaces;
-                        attach_xdp_programs(Arc::clone(&bpf), interfaces.clone(), active_xdp_interfaces.clone()).await?;
+                        // attach_xdp_programs(Arc::clone(&bpf), interfaces.clone(), active_xdp_interfaces.clone()).await?;
                         attach_tc_programs(Arc::clone(&bpf), interfaces, active_tc_interfaces.clone()).await?;
                         //}
                     },
