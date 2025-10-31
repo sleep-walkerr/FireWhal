@@ -20,6 +20,22 @@ hash = "sha256:fedcba654321..."
 path = "/usr/bin/curl"
 hash = "sha256:fedcba654321..."
 
-# [apps."vscodium"]
-# path = "/opt/vscodium-bin/codium"
-# hash = "sha256:fedcba654321..."
+[apps."vscodium"]
+path = "/opt/vscodium-bin/codium"
+hash = "sha256:fedcba654321..."
+
+[apps."discord"]
+path = "/opt/discord/Discord"
+hash = "sha256:fedcba654321..."
+
+[apps."firewhal-discord-bot"]
+path = "/opt/firewhal/bin/firewhal-discord-bot"
+hash = "sha256:fedcba654321..."
+
+[apps."zoom-frontend"]
+path = "/opt/zoom/ZoomWebviewHost"
+hash = "sha256:fedcba654321..."
+
+[apps."zoom"]
+path = "/opt/zoom/zoom"
+hash = "sha256:fedcba654321..."
