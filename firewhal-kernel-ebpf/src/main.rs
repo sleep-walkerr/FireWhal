@@ -527,6 +527,9 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
                 info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked {}", *tgid_match);
                 return Ok(TC_ACT_SHOT)
              } // Block the connection
+        } else {
+            info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked, No PID Found.");
+            return Ok(TC_ACT_SHOT)
         }
      } else {
         info!(&ctx, "[Kernel] [egress_tc] Connection Not Found in Either Map");

@@ -38,7 +38,7 @@ path = "src/main.rs"
 # These dependencies are for the userspace host application ONLY.
 [target.'cfg(not(target_arch = "bpf"))'.dependencies]
 anyhow = { workspace = true, default-features = true }
-aya = { workspace = true, features = ["async_tokio"] }
+aya = { workspace = true, default-features = false, features = ["async_tokio"] }
 aya-log = { workspace = true }
 aya-log-ebpf = { workspace = true }
 bytes = "1"
@@ -55,11 +55,8 @@ tokio = { workspace = true, features = [
 zmq = { workspace = true } 
 
 [profile.dev]
-# opt-level = 3
-debug = true
-
-[profile.dev.package.sha3]
-opt-level = 3 # Use release-level optimizations just for zmq
+opt-level = 3
+# debug = true
 
 # [profile.release]
 # debug = 1

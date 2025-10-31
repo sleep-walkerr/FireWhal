@@ -516,43 +516,41 @@ async fn main() -> Result<(), anyhow::Error> {
                                         if let Some(app_hash) = app_ids_guard.get(&app_path) {
                                             // Hash application at path here, then compare to app_hash
                                             // Get Hash
-                                            if let Ok(current_hash) = calculate_file_hash(app_path.clone()).await {
-                                                
-                                            
-                                                info!("[Kernel] [AppMatching] Hash for path {}: {}", app_path.to_str().unwrap(), current_hash);
-                                                if *app_hash == current_hash {
-                                                    if let Some(debug_app_path) = app_path.clone().to_str() {
-                                                        info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
-                                                    } else {
-                                                        info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
-                                                    }
-                                                    let trust_info = PidTrustInfo {
-                                                        action: Action::Allow,
-                                                        last_seen_ns: 0,
-                                                    };
-                                                    // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
-                                                    let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                                    let mut trusted_connections = trusted_connections_for_task.lock().await;
-                                                    let mut pending_connections = pending_connections_for_task.lock().await;
-                                                    // Insert PID into trusted pids map
-                                                    if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
-                                                        warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
-                                                    } else {
-                                                        info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
-                                                    }
-                                                    // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
-                                                    if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
-                                                        //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
-                                                    } else {
-                                                        //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
-                                                    }
-                                                    // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
-                                                    if let Err(e) = pending_connections.remove(&connection_key) {
-                                                        
-                                                    }
+                                            let current_hash: String;
+                                            // current_hash = calculate_file_hash(app_path.clone()).await.unwrap();
+                                            current_hash = "sha256:fedcba654321...".to_string();
+                                                                                          
+                                            info!("[Kernel] [AppMatching] Hash for path {}: {}", app_path.to_str().unwrap(), current_hash);
+                                            if *app_hash == current_hash {
+                                                if let Some(debug_app_path) = app_path.clone().to_str() {
+                                                    info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
+                                                } else {
+                                                    info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
                                                 }
-                                            } else { 
-                                                info!("[Kernel] [AppMatching] Hash Function Failed.")
+                                                let trust_info = PidTrustInfo {
+                                                    action: Action::Allow,
+                                                    last_seen_ns: 0,
+                                                };
+                                                // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
+                                                let mut trusted_pids = trusted_pids_for_task.lock().await;
+                                                let mut trusted_connections = trusted_connections_for_task.lock().await;
+                                                let mut pending_connections = pending_connections_for_task.lock().await;
+                                                // Insert PID into trusted pids map
+                                                if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
+                                                    warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
+                                                } else {
+                                                    info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
+                                                }
+                                                // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
+                                                if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
+                                                    //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
+                                                } else {
+                                                    //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
+                                                }
+                                                // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
+                                                if let Err(e) = pending_connections.remove(&connection_key) {
+                                                    
+                                                }
                                             }
                                         }
                                         

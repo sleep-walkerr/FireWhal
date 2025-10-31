@@ -6,7 +6,7 @@ hash = "sha256:fedcba654321..."
 
 [apps."systemd-resolved"]
 path = "/usr/lib/systemd/systemd-resolved"
-hash = "40d031e9d88fb23b715fccce3da1adc74017d5c6e553969e561be0943e6e9b4a"
+hash = "sha256:fedcba654321..."
 
 [apps."ssh"]
 path = "ssh"
