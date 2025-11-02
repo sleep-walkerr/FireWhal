@@ -5,13 +5,10 @@ edition = "2021"
 
 [dependencies]
 firewhal-core = { path = "../firewhal-core" }
-aya = "0.13.1"
-sha3 = "0.10.8"
 zmq = { workspace = true }
-hex = "0.4.3"
 daemonize = "0.5.0"
 nix = { workspace = true, features = ["signal", "user", "fs"] }
 bincode = { workspace = true }
 serde = { workspace = true }
 toml = "0.9.8"
-tokio = { workspace=true, features = ["signal", "sync", "rt", "rt-multi-thread", "macros", "time"]}
+tokio = { workspace=true }

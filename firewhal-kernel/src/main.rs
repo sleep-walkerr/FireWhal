@@ -1,13 +1,16 @@
 use aya::{
     include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}, CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, XdpFlags}, util::online_cpus, Ebpf
 };
+use anyhow::{bail, Context, Result};
 use aya_log::EbpfLogger;
 use clap::Parser;
 use log::{info, warn, LevelFilter};
 use core::borrow;
 use std::{
-    collections::{HashMap, HashSet}, fmt::format, fs::{self, File}, hash::Hash, io::{self, BufRead, BufReader, Read}, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration
+    collections::{HashMap, HashSet}, fmt::format, fs::{self, File}, hash::Hash, io::{self, BufRead, BufReader, Read}, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, path::{Path, PathBuf}, process::Command as StdCommand, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration,
+    ffi::CString,
 };
+
 use bytes::BytesMut;
 use tokio::{
     signal,
@@ -15,7 +18,8 @@ use tokio::{
     task::{self}, time::{self, timeout},
 };
 
-use sha3::{Sha3_256, Digest};
+use nix;
+use std::os::unix::process::CommandExt;
 
 use firewhal_core::{
     ApplicationAllowlistConfig, BlockAddressRule, DebugMessage, DiscordBlockNotification, FireWhalConfig, FireWhalMessage, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate
@@ -325,41 +329,53 @@ async fn load_app_ids(app_ids: Arc<Mutex<HashMap<PathBuf, String>>>, config: App
     Ok(())
 }
 
-// Hashing function for checking binaries at a given path
-async fn calculate_file_hash(path: PathBuf) -> Result<String, io::Error> {
-    task::spawn_blocking(move || {
-        info!("[Hashing] Starting hash for: {}", path.display());
+/// Calculates a file's hash by spawning a sandboxed, external process.
+///
+/// This function executes the `firewhal-hashing` utility, passing it a file path.
+/// For security, the child process drops its privileges to the 'nobody' user
+/// before it begins execution. The function captures and returns the hash from stdout.
+async fn calculate_file_hash(path: PathBuf) -> Result<String> {
+    // 1. Build the command using `std::process::Command` to access `pre_exec`.
+    let mut hash_command = StdCommand::new("/opt/firewhal/bin/firewhal-hashing");
+    hash_command.arg(path);
 
-        let mut file = File::open(&path)?; // Directly open the file
+    // 2. Get user info for 'nobody' to drop privileges.
+    let target_user = nix::unistd::User::from_name("nobody")
+        .context("Failed to get user info for 'nobody'")?
+        .context("User 'nobody' not found")?;
 
-        let mut hasher = Sha3_256::new();
+    // 3. Set up the privilege drop to run in the child process before `exec`.
+    // This is `unsafe` because it runs after `fork` but before `exec`, a context
+    // where many standard library functions are not safe to call. The `nix` calls
+    // used here are designed for this purpose.
+    unsafe {
+        hash_command.pre_exec(move || {
+            let username = CString::new("nobody")
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        // Use a 1MB buffer (1 * 1024 * 1024 bytes)
-        const BUFFER_SIZE: usize = 1 * 1024 * 1024;
-        let mut buffer = vec![0; BUFFER_SIZE];
+            nix::unistd::initgroups(&username, target_user.gid)
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+            nix::unistd::setgid(target_user.gid)
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+            nix::unistd::setuid(target_user.uid)
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+            Ok(())
+        });
+    }
 
-        loop {
-            // Read a chunk directly from the File into our buffer.
-            let n = file.read(&mut buffer)?;
+    // 4. Convert to a Tokio command to execute asynchronously and capture output.
+    let output = tokio::process::Command::from(hash_command).output()
+        .await
+        .context("Failed to spawn 'firewhal-hashing' command")?;
 
-            if n == 0 {
-                // End of file reached
-                break;
-            }
-
-            // Update the hasher with the bytes that were actually read.
-            hasher.update(&buffer[..n]);
-        }
-
-        info!("[Hashing] Finished hashing: {}", path.display());
-
-        let hash_bytes = hasher.finalize();
-        let hash_string = format!("{:x}", hash_bytes);
-
-        Ok(hash_string)
-    })
-    .await
-    .map_err(|join_err| io::Error::new(io::ErrorKind::Other, join_err))?
+    // 5. Check the result and return the hash or an error.
+    if output.status.success() {
+        let line = String::from_utf8_lossy(&output.stdout);
+        Ok(line.trim().to_string())
+    } else {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        bail!("firewhal-hashing failed with status {}: {}", output.status, error_message.trim());
+    }
 }
 
 #[tokio::main]
@@ -516,10 +532,8 @@ async fn main() -> Result<(), anyhow::Error> {
                                         if let Some(app_hash) = app_ids_guard.get(&app_path) {
                                             // Hash application at path here, then compare to app_hash
                                             // Get Hash
-                                            let current_hash: String;
-                                            // current_hash = calculate_file_hash(app_path.clone()).await.unwrap();
-                                            current_hash = "sha256:fedcba654321...".to_string();
-                                                                                          
+                                            let current_hash = calculate_file_hash(app_path.clone()).await.unwrap();
+                                       
                                             info!("[Kernel] [AppMatching] Hash for path {}: {}", app_path.to_str().unwrap(), current_hash);
                                             if *app_hash == current_hash {
                                                 if let Some(debug_app_path) = app_path.clone().to_str() {
@@ -694,7 +708,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
     shutdown_tx.send(()).unwrap();
-    let _ = time::timeout(time::Duration::from_secs(2), zmq_handle).await;
+    let _ = zmq_handle.await;
 
     Ok(())
 }

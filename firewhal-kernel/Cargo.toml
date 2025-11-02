@@ -38,7 +38,7 @@ path = "src/main.rs"
 # These dependencies are for the userspace host application ONLY.
 [target.'cfg(not(target_arch = "bpf"))'.dependencies]
 anyhow = { workspace = true, default-features = true }
-aya = { workspace = true, default-features = false, features = ["async_tokio"] }
+aya = { workspace = true }
 aya-log = { workspace = true }
 aya-log-ebpf = { workspace = true }
 bytes = "1"
@@ -49,14 +49,9 @@ libc = { workspace = true }
 log = { workspace = true }
 network-interface = "2.0.3"
 simple-logging = "2.0.2"
-tokio = { workspace = true, features = [
-    "macros", "rt-multi-thread", "signal", "sync", "time"
-] }
+tokio = { workspace=true }
 zmq = { workspace = true } 
-
-[profile.dev]
-opt-level = 3
-# debug = true
+nix = { workspace = true, features = ["user"] }
 
 # [profile.release]
 # debug = 1

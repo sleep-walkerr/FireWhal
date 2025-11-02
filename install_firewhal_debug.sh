@@ -71,6 +71,11 @@ echo $(cargo build)
 echo "Installing aya binaries to /opt/firewhal/bin"
 sudo cp target/debug/firewhal-kernel /opt/firewhal/bin
 
+echo "Building hashing program in release mode"
+echo $(cargo build --bin firewhal-hashing --release)
+echo "Copying hashing program to /opt/firewhal/bin"
+sudo cp target/release/firewhal-hashing /opt/firewhal/bin
+
 echo "Ensuring proper permissions for access purposes"
 sudo chmod 755 /opt/firewhal/bin/*
 
