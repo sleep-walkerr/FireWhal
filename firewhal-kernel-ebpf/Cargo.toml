@@ -1,0 +1,18 @@
+[package]
+name = "firewhal-kernel-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+firewhal-kernel-common = { path = "../firewhal-kernel-common" }
+network-types = { workspace = true, default-features = false }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+
+[build-dependencies]
+which = { version = "8.0.0", default-features = false, features = ["real-sys"] }
+
+[[bin]]
+name = "firewhal-kernel"
+path = "src/main.rs"

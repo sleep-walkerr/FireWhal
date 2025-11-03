@@ -2,12 +2,44 @@
 # So what do we keep here? Key: app_id, Value: (path, hash)
 [apps."brave"]
 path = "/opt/brave-bin/brave"
-hash = "sha256:fedcba654321..." 
+hash = "96e979373ba7635248086fe5e87ecc9f33421460bf593a19ca35cdcc89db34d8" 
 
 [apps."systemd-resolved"]
 path = "/usr/lib/systemd/systemd-resolved"
-hash = "sha256:fedcba654321..."
+hash = "40d031e9d88fb23b715fccce3da1adc74017d5c6e553969e561be0943e6e9b4a"
 
 [apps."ssh"]
-path = "ssh"
+path = "/usr/bin/ssh"
+hash = "e21c8774a91322e81eb84922ae6719b30ede7efc194346991922f8c6cbb2940a"
+
+[apps."sshd"]
+path = "/usr/bin/sshd"
+hash = "8d127c26993ea530f01110387aaf0c6bb445d3dbd540c461875952d7fd5ec333"
+
+[apps."ping"]
+path = "/usr/bin/ping"
+hash = "d99fc96281f3ea11913f9ff3b750ce6fbd5d0c84035c2f93dc52c0bb9fa3144b"
+
+[apps."curl"]
+path = "/usr/bin/curl"
+hash = "00c5d31285b525975f526a2c2ce8365a1b545f6fe003a9ded69f7198f67b8f9c"
+
+[apps."vscodium"]
+path = "/opt/vscodium-bin/codium"
+hash = "de3df78022e8e63941de42da1acca55268eef022540eabfb8a3071760d1c0409"
+
+[apps."discord"]
+path = "/opt/discord/Discord"
+hash = "12d6707e5d14aecfb35d3c43a1395318134af0b52d5b566c4820bf8efe6d893c"
+
+[apps."firewhal-discord-bot"]
+path = "/opt/firewhal/bin/firewhal-discord-bot"
+hash = "5e2cc1b69e1d8e7c1a8a829594160778616dd68db603e0fcdb89aa32053af48d"
+
+[apps."zoom-frontend"]
+path = "/opt/zoom/ZoomWebviewHost"
+hash = "sha256:fedcba654321..."
+
+[apps."zoom"]
+path = "/opt/zoom/zoom"
 hash = "sha256:fedcba654321..."

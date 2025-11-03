@@ -1,0 +1,10 @@
+[package]
+name = "firewhal-hashing"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+sha3 = "0.10.8"
+
+

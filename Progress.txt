@@ -12,8 +12,91 @@ For Next Meeting: 10/31/2025
     
 
 Progress Made:
--- 
+--Stateful firewall works perfectly.
+--Changed firewall rule file to be a TOML file for easy editing and access
+--Added app_identity TOML file that includes a list of allowed applications with their corresponding paths and hashes (placeholder hashes for now)
+--Both files are loaded in the daemon and then sent to the firewall at startup via IPC
+--App identities are checked in the firewall userspace loader. 
+--Added process lineage traversal function to determine child processes of allowed applications (paths). This must be done is userspace program, which is slower than kernel program. 
+-- Added Traffic Control bpf program to filter after the connect call is made.
+---Why do this? More information is available at this point in kernel processing, which means better rule processing.
+---***Race Condition: Lineage traversal and approval of applications happens slower than the kernel program checking for an approval after sending the information for a check. 
+---Kernel program is not sleepable at all, meaning every program will fail the first check, and the pass subsequent checks. 
+---This is fine for persistent applications like a browser, that keep trying to connect. The PID (really TGID) gets added to the approved list, and the second connect attempt succeeds.
+---This is a problem for programs like ping or ssh though. If the first connect call fails, they terminate immediately.
+
+Blockers:
+--Hash function was very easy to implement, but suffers from a fatal flaw.
+--Runs extremely slow unless program is compiled in release mode (around 10 minutes for brave with 100% cpu usage)
+--When testing release mode, I discovered problem that is specific to using aya and zmq, where under the hood, two different versions of zmq are used for my other applications, and for my userspace loader.
+--This causes the userspace loader (the firewall) to crash immediately with a segfault.
+
+My Options:
+--Develop a separate hashing program that the userspace loader sends a hash to, that then sends the hash back. EX: Brave takes less than half a second.
+--Use the beta zeromq library instead of zmq, which is a rust native version of zero message queue instead of a wrapper for the c implementation.   
+---This would require me to rewrite all of my IPC functionalities, which happen all throughout my code in every program.
+
+
+
+
+
+
+Proposed Rule Addition Mechanism:
 
 Permissive mode, user has interface open, runs the app they want to let through, the list populates with lineage entries for every application that attempted a connection and the user selects which applications they want to add 
 Hash Management Interface, gives the user a list of all registered applications. A button is next to each application giving the user the option to rehash the application and allow it again, and there is a button to rehash all applications.
 Hash is red if invalid, and green if valid.
+
+WORKFLOW FOR ALLOWING CONNECTIONS:
+
+PENDING_CONNECTIONS_MAP: Map<ConnectionKey, TGID> (temp storage for TGID during initial pending phase)
+
+TRUSTED_CONNECTIONS_MAP: Map<ConnectionKey, u8> (stores "is this connection allowed?" for approved connections)
+
+TRUSTED_PIDS_MAP: Map<TGID, u8> (stores "is this PID generally allowed?")
+
+Flow with these 3 maps:
+
+cgroup/connect4:
+
+Extract ConnectionKey & TGID.
+
+Insert (ConnectionKey, TGID) into PENDING_CONNECTIONS_MAP.
+
+Send event to userspace.
+
+Return BPF_OK.
+
+tc_egress:
+
+Extract ConnectionKey from sk_buff.
+
+Attempt Lookup in TRUSTED_CONNECTIONS_MAP:
+
+If ConnectionKey is found and marked "allowed": return TC_ACT_OK. (This handles already-approved connections)
+
+Else, Attempt Lookup in PENDING_CONNECTIONS_MAP:
+
+If ConnectionKey is found, get TGID.
+
+Lookup TGID in TRUSTED_PIDS_MAP.
+
+If TGID found and trusted: return TC_ACT_OK.
+
+If TGID found but NOT trusted: return TC_ACT_SHOT.
+
+If ConnectionKey is NOT found in PENDING_CONNECTIONS_MAP: Apply default untracked policy (TC_ACT_OK or TC_ACT_SHOT).
+
+Userspace Daemon:
+
+Receives ConnectionAttempt (TGID, ConnectionKey).
+
+Verifies TGID.
+
+If TGID is approved:
+
+Insert (TGID, 1) into TRUSTED_PIDS_MAP.
+
+Insert (ConnectionKey, 1) into TRUSTED_CONNECTIONS_MAP.
+
+Delete ConnectionKey from PENDING_CONNECTIONS_MAP.

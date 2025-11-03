@@ -19,17 +19,35 @@ description = "Allow outgoing HTTPS via UDP (for QUIC)"
 
 [[rules]]
 action = "Allow"
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 80 
+description = "Allow outgoing HTTP" 
+
+[[rules]]
+action = "Allow"
+protocol = "Udp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 80 
+description = "Allow outgoing HTTP" 
+
+[[rules]]
+action = "Allow"
 #source_ip = None 
 source_port = 22 
 #dest_ip = None 
-description = "Allow outgoing HTTPS via UDP (for QUIC)" 
+description = "Incoming SSH (Turn Off Later)" 
 
 [[rules]]
 action = "Allow"
 #source_ip = None 
 dest_port = 22 
 #dest_ip = None 
-description = "Allow outgoing HTTPS via UDP (for QUIC)" 
+description = "Outgoing SSH" 
 
 
 [[rules]]
@@ -160,7 +178,6 @@ protocol =  "Udp"
 dest_ip = "127.0.0.1" 
 #dest_port  = None 
 description = "Block a specific malicious IP" 
-
 
 [[rules]]
 action = "Deny" 
