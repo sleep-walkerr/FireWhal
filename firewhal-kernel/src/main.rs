@@ -417,7 +417,7 @@ async fn calculate_file_hash(path: PathBuf) -> Result<String> {
     }
 }
 
-async fn update_flag(
+async fn update_permissive_mode_flag(
     bpf: Arc<Mutex<Ebpf>>,
     is_enabled: bool,
 ) -> Result<(), anyhow::Error> {
@@ -486,8 +486,6 @@ async fn main() -> Result<(), anyhow::Error> {
     let pending_connections_shared = Arc::new(tokio::sync::Mutex::new(pending_connections_map));
     let trusted_connections_shared = Arc::new(tokio::sync::Mutex::new(trusted_connections_map));
 
-    
-    
     let zmq_tx_clone = to_zmq_tx.clone();
 
     tokio::spawn(async move {
@@ -697,6 +695,10 @@ async fn main() -> Result<(), anyhow::Error> {
     attach_cgroup_programs(Arc::clone(&bpf), cgroup_file).await?;
     attach_tc_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_tc_interfaces.clone()).await?;
     
+    // Set Permissive Mode To False just to be safe
+    update_permissive_mode_flag(Arc::clone(&bpf), false).await?;
+
+
     // --- Main Event Loop and Shutdown logic ---
     // Send Ready Status to IPC
     to_zmq_tx.send(FireWhalMessage::Status(StatusUpdate { component: "Firewall".to_string(), is_healthy: true, message: "Ready".to_string() })).await?;
@@ -753,10 +755,10 @@ async fn main() -> Result<(), anyhow::Error> {
                         }
                     },
                     FireWhalMessage::EnablePermissiveMode(_) => {
-                        update_flag(Arc::clone(&bpf), true).await?;
+                        update_permissive_mode_flag(Arc::clone(&bpf), true).await?;
                     },
                     FireWhalMessage::DisablePermissiveMode(_) => {
-                        update_flag(Arc::clone(&bpf), false).await?;
+                        update_permissive_mode_flag(Arc::clone(&bpf), false).await?;
                     },
                     _ => {}
                 }

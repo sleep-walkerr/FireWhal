@@ -215,6 +215,91 @@ for a specific application.
 Why do this? Because at the point of a connect() call, for instance, its so early that port numbers may have
 not been assigned. This is an issue that will never occurr at the stage a TC program is triggered
 */
+
+
+// TEST FUNCTION 
+fn app_tracking(prog_name: &str, ctx: &SockAddrContext) {
+    //Consider changing these back to safe "ctx.user_ipv" and the like if you can
+    let sockaddr_pointer = ctx.sock_addr;
+    let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+    let user_port = unsafe { (*sockaddr_pointer).user_port }; 
+    let protocol = unsafe { (*sockaddr_pointer).protocol };
+    let command_fetch = ctx.command();
+    let command: [u8; 16]; 
+    if command_fetch.is_ok() {
+        command = command_fetch.unwrap();
+    } else { 
+        command = [0; 16];
+        info!(ctx, "Command fetching failed");
+    }
+
+    //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
+    // They need to be converted to be used first
+    let source_port =  u32::from_be(user_port) as u16;
+    let destination_port = (u32::from_be(user_port) >> 16) as u16;
+
+    // Check to see if permissive mode is not enabled
+    if let Some(flag_val) = unsafe { PERMISSIVE_MODE_ENABLED.get(0) } {
+        if *flag_val == 0 {
+            // Check if TGID already exists in map
+            if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
+                info!(ctx, "[Kernel] [{}] Trusted PID {} found for {}", prog_name, (ctx.tgid()) as u32, Ipv4Addr::from(u32::from_be(user_ip4)));
+                // Build connection key for payload
+                let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+                // Insert into again, in case of a trusted process connecting to a new ip address
+                if let Err(e) = unsafe { TRUSTED_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
+                    warn!(ctx, "[Kernel] [{}] Failed to insert connection key {}", prog_name, ctx.tgid());
+                } else {
+                    info!(ctx, "[Kernel] [{}] Successfully inserted connection key {}", prog_name, ctx.tgid());
+                }
+                return 
+            } else { // If it doesn't send event to check application
+                // Build connection key for payload
+                let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+                // Print key string for debug purposes
+                info!(ctx, "[Kernel] [{}] ConnectionKey: {} {} {} {} {}", prog_name, key_to_use.saddr, key_to_use.daddr, key_to_use.sport, key_to_use.dport, key_to_use.protocol as u8);
+                let conn_attempt_payload = ConnectionAttemptPayload {
+                    key: key_to_use
+                };
+                let connection_attempt_event = KernelEvent {
+                    event_type: EventType::ConnectionAttempt, // Specific event type
+                    pid: ctx.pid(),
+                    tgid: ctx.tgid(),
+                    comm: command,
+                    payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
+                };
+                // Insert into map
+                if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
+                    warn!(ctx, "[Kernel] [{}] Failed to insert connection key {}", prog_name, ctx.tgid());
+                } else {
+                    info!(ctx, "[Kernel] [{}] Successfully inserted connection key {}", prog_name, ctx.tgid());
+                }
+                // Send event for processing
+                unsafe { EVENTS.output(ctx, &connection_attempt_event, 0) };
+            }
+        } else { // Permissive Mode is enabled
+            //info!(&ctx, "[Kernel] [firewall_egress_tc] PERMISSIVE MODE ENABLED");
+            // Build connection key for payload
+            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+            // Print key string for debug purposes
+            info!(ctx, "[Kernel] [{}] ConnectionKey: {} {} {} {} {}", prog_name, key_to_use.saddr, key_to_use.daddr, key_to_use.sport, key_to_use.dport, key_to_use.protocol as u8);
+            let conn_attempt_payload = ConnectionAttemptPayload {
+                key: key_to_use
+            };
+            let connection_attempt_event = KernelEvent {
+                event_type: EventType::ConnectionAttempt, // Specific event type
+                pid: ctx.pid(),
+                tgid: ctx.tgid(),
+                comm: command,
+                payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
+            };
+            // Send event to userspace to send conn attempt to TUI
+            unsafe { EVENTS.output(ctx, &connection_attempt_event, 0) };
+        }
+    }
+}
+
+//END TEST FUNCTION MOVE LATER
 #[cgroup_sock_addr(connect4)]
 pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
     match try_firewhal_egress_connect4(ctx) {
@@ -231,68 +316,8 @@ pub fn try_firewhal_egress_connect4(ctx: SockAddrContext) -> Result<i32, ()> {
     
 
     let result = || -> Result<i32, i32> {
-
-        //Consider changing these back to safe "ctx.user_ipv" and the like if you can
-        let sockaddr_pointer = ctx.sock_addr;
-        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-        let user_port = unsafe { (*sockaddr_pointer).user_port }; 
-        let protocol = unsafe { (*sockaddr_pointer).protocol };
-        let command_fetch = ctx.command();
-        let command: [u8; 16]; 
-        if command_fetch.is_ok() {
-            command = command_fetch.unwrap();
-        } else { 
-            command = [0; 16];
-            info!(&ctx, "Command fetching failed");
-        }
-
-        //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
-        // They need to be converted to be used first
-        let source_port =  u32::from_be(user_port) as u16;
-        let destination_port = (u32::from_be(user_port) >> 16) as u16;
-
-        // TESTING
-
-        // Check if TGID already exists in map
-        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
-            info!(&ctx, "[Kernel] [connect4] Trusted PID {} found for {}", (ctx.tgid()) as u32, Ipv4Addr::from(u32::from_be(user_ip4)));
-            // Build connection key for payload
-            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
-            // Insert into again, in case of a trusted process connecting to a new ip address
-            if let Err(e) = unsafe { TRUSTED_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
-                warn!(&ctx, "[Kernel] [connect4] Failed to insert connection key {}", ctx.tgid());
-            } else {
-                info!(&ctx, "[Kernel] [connect4] Successfully inserted connection key {}", ctx.tgid());
-            }
-            return Ok(1)
-        } else { // If it doesn't send event to check application
-            // Build connection key for payload
-            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
-            // Print key string for debug purposes
-            info!(&ctx, "[Kernel] [connect4] ConnectionKey: {} {} {} {} {}", key_to_use.saddr, key_to_use.daddr, key_to_use.sport, key_to_use.dport, key_to_use.protocol as u8);
-            let conn_attempt_payload = ConnectionAttemptPayload {
-                key: key_to_use
-            };
-            let connection_attempt_event = KernelEvent {
-                event_type: EventType::ConnectionAttempt, // Specific event type
-                pid: ctx.pid(),
-                tgid: ctx.tgid(),
-                comm: command,
-                payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
-            };
-            // Insert into map
-            if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
-                warn!(&ctx, "[Kernel] [connect4] Failed to insert connection key {}", ctx.tgid());
-            } else {
-                info!(&ctx, "[Kernel] [connect4] Successfully inserted connection key {}", ctx.tgid());
-            }
-            // Send event for processing
-            unsafe { EVENTS.output(&ctx, &connection_attempt_event, 0) };
-        }
-        
-        
-        
-        Ok(1) // Allow the connection for now, blocking delegated to tc egress program
+        app_tracking("connect4",&ctx);
+        Ok(1) // Allow the connection, blocking delegated to tc egress program
     }();
 
     match result {
@@ -309,67 +334,7 @@ pub fn try_firewhal_egress_connect4(ctx: SockAddrContext) -> Result<i32, ()> {
 #[cgroup_sock_addr(sendmsg4)]
 pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
-
-        //Consider changing these back to safe "ctx.user_ipv" and the like if you can
-        let sockaddr_pointer = ctx.sock_addr;
-        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-        let user_port = unsafe { (*sockaddr_pointer).user_port }; 
-        let protocol = unsafe { (*sockaddr_pointer).protocol };
-        let command_fetch = ctx.command();
-        let command: [u8; 16]; 
-        if command_fetch.is_ok() {
-            command = command_fetch.unwrap();
-        } else { 
-            command = [0; 16];
-            info!(&ctx, "Command fetching failed");
-        }
-
-        //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
-        // They need to be converted to be used first
-        let source_port =  u32::from_be(user_port) as u16;
-        let destination_port = (u32::from_be(user_port) >> 16) as u16;
-
-        // TESTING
-
-        // Check if TGID already exists in map
-        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
-            info!(&ctx, "[Kernel] [sendmsg4] Trusted PID {} found for {}", (ctx.tgid()) as u32, Ipv4Addr::from(u32::from_be(user_ip4)));
-            // Build connection key for payload
-            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
-            // Insert into again, in case of a trusted process connecting to a new ip address
-            if let Err(e) = unsafe { TRUSTED_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
-                warn!(&ctx, "[Kernel] [sendmsg4] Failed to insert connection key {}", ctx.tgid());
-            } else {
-                info!(&ctx, "[Kernel] [sendmsg4] Successfully inserted connection key {}", ctx.tgid());
-            }
-            return Ok(1)
-        } else { // If it doesn't send event to check application
-            // Build connection key for payload
-            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
-            // Print key string for debug purposes
-            info!(&ctx, "[Kernel] [sendmsg4] ConnectionKey: {} {} {} {} {}", key_to_use.saddr, key_to_use.daddr, key_to_use.sport, key_to_use.dport, key_to_use.protocol as u8);
-            let conn_attempt_payload = ConnectionAttemptPayload {
-                key: key_to_use
-            };
-            let connection_attempt_event = KernelEvent {
-                event_type: EventType::ConnectionAttempt, // Specific event type
-                pid: ctx.pid(),
-                tgid: ctx.tgid(),
-                comm: command,
-                payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
-            };
-            // Insert into map
-            if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
-                warn!(&ctx, "[Kernel] [sendmsg4] Failed to insert connection key {}", ctx.tgid());
-            } else {
-                info!(&ctx, "[Kernel] [sendmsg4] Successfully inserted connection key {}", ctx.tgid());
-            }
-            // Send event for processing
-            unsafe { EVENTS.output(&ctx, &connection_attempt_event, 0) };
-        }
-        
-        
-        
+        app_tracking("sendmsg4", &ctx);
         Ok(1) // Allow the connection for now, blocking delegated to tc egress program
     }();
         
@@ -387,67 +352,7 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 #[cgroup_sock_addr(bind4)]
 pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
-
-        //Consider changing these back to safe "ctx.user_ipv" and the like if you can
-        let sockaddr_pointer = ctx.sock_addr;
-        let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-        let user_port = unsafe { (*sockaddr_pointer).user_port }; 
-        let protocol = unsafe { (*sockaddr_pointer).protocol };
-        let command_fetch = ctx.command();
-        let command: [u8; 16]; 
-        if command_fetch.is_ok() {
-            command = command_fetch.unwrap();
-        } else { 
-            command = [0; 16];
-            info!(&ctx, "Command fetching failed");
-        }
-
-        //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
-        // They need to be converted to be used first
-        let source_port =  u32::from_be(user_port) as u16;
-        let destination_port = (u32::from_be(user_port) >> 16) as u16;
-
-        // TESTING
-
-        // Check if TGID already exists in map
-        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
-            info!(&ctx, "[Kernel] [bind4] Trusted PID {} found for {}", (ctx.tgid()) as u32, Ipv4Addr::from(u32::from_be(user_ip4)));
-            // Build connection key for payload
-            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
-            // Insert into again, in case of a trusted process connecting to a new ip address
-            if let Err(e) = unsafe { TRUSTED_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
-                warn!(&ctx, "[Kernel] [bind4] Failed to insert connection key {}", ctx.tgid());
-            } else {
-                info!(&ctx, "[Kernel] [bind4] Successfully inserted connection key {}", ctx.tgid());
-            }
-            return Ok(1)
-        } else { // If it doesn't send event to check application
-            // Build connection key for payload
-            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
-            // Print key string for debug purposes
-            info!(&ctx, "[Kernel] [bind4] ConnectionKey: {} {} {} {} {}", key_to_use.saddr, key_to_use.daddr, key_to_use.sport, key_to_use.dport, key_to_use.protocol as u8);
-            let conn_attempt_payload = ConnectionAttemptPayload {
-                key: key_to_use
-            };
-            let connection_attempt_event = KernelEvent {
-                event_type: EventType::ConnectionAttempt, // Specific event type
-                pid: ctx.pid(),
-                tgid: ctx.tgid(),
-                comm: command,
-                payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
-            };
-            // Insert into map
-            if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
-                warn!(&ctx, "[Kernel] [bind4] Failed to insert connection key {}", ctx.tgid());
-            } else {
-                info!(&ctx, "[Kernel] [bind4] Successfully inserted connection key {}", ctx.tgid());
-            }
-            // Send event for processing
-            unsafe { EVENTS.output(&ctx, &connection_attempt_event, 0) };
-        }
-        
-        
-        
+        app_tracking("bind4", &ctx);
         Ok(1) // Allow the connection for now, blocking delegated to tc egress program
     }();
 
@@ -469,6 +374,14 @@ pub fn firewall_egress_tc(ctx: TcContext) -> i32 { // Change return type to incl
 }
 
 fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
+    // TESTING FOR FLAG SET
+    if let Some(flag_val) = unsafe { PERMISSIVE_MODE_ENABLED.get(0) } {
+        if *flag_val == 1 {
+            //info!(&ctx, "[Kernel] [firewall_egress_tc] PERMISSIVE MODE ENABLED");
+            return Ok(TC_ACT_SHOT);
+        }
+    }
+    //END TESTING
     let mut tuple = parse_packet_tuple(&ctx)?;
     // Create debug printing fields
     let debug_saddr = Ipv4Addr::from(u32::from_be(tuple.saddr));
