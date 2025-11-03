@@ -12,6 +12,10 @@ hash = "40d031e9d88fb23b715fccce3da1adc74017d5c6e553969e561be0943e6e9b4a"
 path = "/usr/bin/ssh"
 hash = "e21c8774a91322e81eb84922ae6719b30ede7efc194346991922f8c6cbb2940a"
 
+[apps."sshd"]
+path = "/usr/bin/sshd"
+hash = "8d127c26993ea530f01110387aaf0c6bb445d3dbd540c461875952d7fd5ec333"
+
 [apps."ping"]
 path = "/usr/bin/ping"
 hash = "d99fc96281f3ea11913f9ff3b750ce6fbd5d0c84035c2f93dc52c0bb9fa3144b"

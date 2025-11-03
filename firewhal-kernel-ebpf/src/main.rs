@@ -11,7 +11,7 @@ use aya_ebpf::{
     bindings::{sockaddr, xdp_action, TC_ACT_OK, TC_ACT_SHOT},
     helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_current_comm},
     macros::{cgroup_sock_addr, classifier, map, xdp},
-    maps::{HashMap, LpmTrie, PerfEventArray, RingBuf, LruHashMap}, // <-- NEW: Import RingBuf
+    maps::{HashMap, LpmTrie, PerfEventArray, RingBuf, LruHashMap, Array}, 
     programs::{tc, SockAddrContext, TcContext, XdpContext}, EbpfContext, 
 };
 use aya_log_ebpf::{info, error, warn};
@@ -53,7 +53,8 @@ static mut PENDING_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_
 #[map]
 static mut TRUSTED_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_max_entries(4096, 0);
 
-
+#[map]
+static mut PERMISSIVE_MODE_ENABLED: Array<u32> = Array::with_max_entries(1, 0);
 
 
 // The following maps were for the map-in-map implementation and are no longer needed.

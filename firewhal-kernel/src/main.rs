@@ -1,5 +1,21 @@
 use aya::{
-    include_bytes_aligned, maps::{perf::AsyncPerfEventArrayBuffer, AsyncPerfEventArray, HashMap as AyaHashMap}, programs::{tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}, CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, XdpFlags}, util::online_cpus, Ebpf
+    include_bytes_aligned, 
+    maps::{perf::AsyncPerfEventArrayBuffer, 
+        AsyncPerfEventArray, 
+        HashMap as AyaHashMap,
+        Array as AyaArray
+    }, 
+        programs::{
+            tc::SchedClassifierLinkId, 
+            xdp::{XdpLink, XdpLinkId}, 
+            CgroupAttachMode, 
+            CgroupSockAddr, 
+            SchedClassifier, 
+            TcAttachType, 
+            Xdp, 
+            XdpFlags}, 
+        util::online_cpus, 
+        Ebpf,
 };
 use anyhow::{bail, Context, Result};
 use aya_log::EbpfLogger;
@@ -7,7 +23,18 @@ use clap::Parser;
 use log::{info, warn, LevelFilter};
 use core::borrow;
 use std::{
-    collections::{HashMap, HashSet}, fmt::format, fs::{self, File}, hash::Hash, io::{self, BufRead, BufReader, Read}, mem::{self, MaybeUninit}, net::{IpAddr, Ipv4Addr}, path::{Path, PathBuf}, process::Command as StdCommand, sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::yield_now, time::Duration,
+    collections::{HashMap, HashSet}, 
+    fmt::format, 
+    fs::{self, File}, 
+    hash::Hash, 
+    io::{self, BufRead, BufReader, Read}, 
+    mem::{self, MaybeUninit}, 
+    net::{IpAddr, Ipv4Addr}, 
+    path::{Path, PathBuf}, 
+    process::Command as StdCommand, 
+    sync::{atomic::{AtomicBool, Ordering}, Arc}, 
+    thread::yield_now, 
+    time::Duration,
     ffi::CString,
 };
 
@@ -22,7 +49,19 @@ use nix;
 use std::os::unix::process::CommandExt;
 
 use firewhal_core::{
-    ApplicationAllowlistConfig, BlockAddressRule, DebugMessage, DiscordBlockNotification, FireWhalConfig, FireWhalMessage, NetInterfaceRequest, NetInterfaceResponse, Rule, StatusPong, StatusUpdate
+    ApplicationAllowlistConfig, 
+    BlockAddressRule, 
+    DebugMessage, 
+    DiscordBlockNotification, 
+    FireWhalConfig, 
+    FireWhalMessage, 
+    NetInterfaceRequest, 
+    NetInterfaceResponse, 
+    Rule, 
+    StatusPong, 
+    StatusUpdate,
+    PermissiveModeEnable,
+    PermissiveModeDisable
 };
 use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey, ConnectionKey};
 
@@ -378,6 +417,29 @@ async fn calculate_file_hash(path: PathBuf) -> Result<String> {
     }
 }
 
+async fn update_flag(
+    bpf: Arc<Mutex<Ebpf>>,
+    is_enabled: bool,
+) -> Result<(), anyhow::Error> {
+    let mut bpf_guard = bpf.lock().await; // Lock the Bpf object
+
+    // Get the map by name
+    let mut flag_map = AyaArray::<_, u32>::try_from(
+        bpf_guard.map_mut("PERMISSIVE_MODE_ENABLED")
+            .ok_or_else(|| anyhow::anyhow!("Failed to find EXECUTION_FLAG map"))?
+    )?;
+
+    let index: u32 = 0;
+    let value: u32 = if is_enabled { 1 } else { 0 };
+
+    // Set the value in the map
+    flag_map.set(index, value, 0)?;
+
+    info!("Updated eBPF execution flag to: {}", is_enabled);
+    Ok(())
+}
+
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse(); // Remove later
@@ -689,6 +751,12 @@ async fn main() -> Result<(), anyhow::Error> {
                                 warn!("[Kernel] Failed to send status update: {}", e);
                             }
                         }
+                    },
+                    FireWhalMessage::EnablePermissiveMode(_) => {
+                        update_flag(Arc::clone(&bpf), true).await?;
+                    },
+                    FireWhalMessage::DisablePermissiveMode(_) => {
+                        update_flag(Arc::clone(&bpf), false).await?;
                     },
                     _ => {}
                 }

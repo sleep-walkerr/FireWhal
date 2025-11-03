@@ -202,6 +202,17 @@ pub enum FireWhalMessage {
     Ping(StatusPing),
     Pong(StatusPong),
     DiscordBlockNotify(DiscordBlockNotification),
+    EnablePermissiveMode(PermissiveModeEnable),
+    DisablePermissiveMode(PermissiveModeDisable),
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct PermissiveModeEnable {
+    pub component: String,
+}
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct PermissiveModeDisable {
+    pub component: String,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
