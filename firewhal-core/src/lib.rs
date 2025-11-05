@@ -204,7 +204,14 @@ pub enum FireWhalMessage {
     DiscordBlockNotify(DiscordBlockNotification),
     EnablePermissiveMode(PermissiveModeEnable),
     DisablePermissiveMode(PermissiveModeDisable),
-    PermissiveModeTuple(ProcessLineageTuple)
+    PermissiveModeTuple(ProcessLineageTuple),
+    AddAppIds(AppIdsToAdd)
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct AppIdsToAdd {
+    pub component: String,
+    pub app_ids_to_add: Vec<(String, String)>
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

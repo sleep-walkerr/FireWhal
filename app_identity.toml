@@ -20,9 +20,9 @@ hash = "8d127c26993ea530f01110387aaf0c6bb445d3dbd540c461875952d7fd5ec333"
 path = "/usr/bin/ping"
 hash = "d99fc96281f3ea11913f9ff3b750ce6fbd5d0c84035c2f93dc52c0bb9fa3144b"
 
-[apps."curl"]
-path = "/usr/bin/curl"
-hash = "00c5d31285b525975f526a2c2ce8365a1b545f6fe003a9ded69f7198f67b8f9c"
+# [apps."curl"]
+# path = "/usr/bin/curl"
+# hash = "00c5d31285b525975f526a2c2ce8365a1b545f6fe003a9ded69f7198f67b8f9c"
 
 [apps."vscodium"]
 path = "/opt/vscodium-bin/codium"

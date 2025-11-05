@@ -143,6 +143,9 @@ async fn main() -> Result<(), io::Error> {
                 FireWhalMessage::PermissiveModeTuple(tuple_message) =>
                 {
                     if tuple_message.component == "Firewall" {
+                        for lineage_tuple in tuple_message.lineage_tuple.clone() {
+                            app_guard.debug_print.add_message(format!("[TUI]: Permissive Mode Tuple Received: [{}]", lineage_tuple.0));
+                        }
                         app_guard.process_lineage_tuple_list.add_tuple(tuple_message.lineage_tuple.iter().cloned().collect());
                         // app_guard.debug_print.add_message("[TUI]: Permissive Mode Tuple Received".to_string());
                     }
@@ -192,10 +195,10 @@ async fn main() -> Result<(), io::Error> {
                                         _ = &app_guard.debug_print.add_message(format!("Failed to send EnablePermissiveMode message: {}", e));
                                     }
                                 } else { _ = &app_guard.debug_print.add_message("Permissive Mode found no zmq sender".to_string()); }
-                                app_guard.process_lineage_tuple_list.clear_interfaces();
+                                //app_guard.process_lineage_tuple_list.clear_interfaces();
                             },
                             AppScreen::MainMenu => {
-                                // FIX ME, permissive mode will have an toggle button in its interface, for now, just send the disable message when you swap to main
+                                // FIX ME, permissive mode will have a toggle button in its interface, for now, just send the disable message when you swap to main
                                 let disable_message = FireWhalMessage::DisablePermissiveMode(firewhal_core::PermissiveModeDisable { component: ("TUI".to_string()) });
                                 // Send enable message to enable permissive mode
                                 if let Some(zmq_sender) = &app_guard.to_zmq_tx {
@@ -223,6 +226,9 @@ async fn main() -> Result<(), io::Error> {
                                     AppScreen::InterfaceSelection => {
                                         ui::interface_selection::handle_key_event(key.code, &mut app_guard);
                                     },
+                                    AppScreen::PermissiveMode => {
+                                        ui::permissive_mode::handle_key_event(key.code, &mut app_guard);
+                                    }
                                     AppScreen::MainMenu => {
                                     },
                                     _ => {}

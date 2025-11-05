@@ -301,6 +301,15 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                             eprintln!("[Supervisor] FAILED to send pong: {}", e);
                         }
                     }
+                    FireWhalMessage::AddAppIds(message) => {
+                        if message.component == "TUI" {
+                            println!("[Supervisor] Received AddAppIds command from TUI");
+                            for (app_id, hash) in message.app_ids_to_add {
+                                println!("{} : {}", app_id, hash);
+                            }
+                        }
+
+                    }
                     _ => {
 
                     }
