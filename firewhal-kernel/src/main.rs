@@ -1,21 +1,7 @@
 use aya::{
-    include_bytes_aligned, 
-    maps::{perf::AsyncPerfEventArrayBuffer, 
-        AsyncPerfEventArray, 
-        HashMap as AyaHashMap,
-        Array as AyaArray
-    }, 
-        programs::{
-            tc::SchedClassifierLinkId, 
-            xdp::{XdpLink, XdpLinkId}, 
-            CgroupAttachMode, 
-            CgroupSockAddr, 
-            SchedClassifier, 
-            TcAttachType, 
-            Xdp, 
-            XdpFlags}, 
-        util::online_cpus, 
-        Ebpf,
+    Ebpf, include_bytes_aligned, maps::{Array as AyaArray, AsyncPerfEventArray, HashMap as AyaHashMap, MapData, perf::AsyncPerfEventArrayBuffer
+    }, programs::{
+            CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, XdpFlags, tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}}, util::online_cpus
 };
 use anyhow::{bail, Context, Result};
 use aya_log::EbpfLogger;
@@ -61,7 +47,8 @@ use firewhal_core::{
     StatusPong, 
     StatusUpdate,
     PermissiveModeEnable,
-    PermissiveModeDisable
+    PermissiveModeDisable,
+    ProcessLineageTuple
 };
 use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey, ConnectionKey};
 
@@ -360,9 +347,10 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfi
 
 // Function to load app identities
 async fn load_app_ids(app_ids: Arc<Mutex<HashMap<PathBuf, String>>>, config: ApplicationAllowlistConfig) -> Result<(), anyhow::Error> {
+    let mut app_ids = app_ids.lock().await;
     for app_id in config.apps {
         info!("[Kernel] Loaded app {}:{:?}", app_id.0, app_id.1);
-        let mut app_ids = app_ids.lock().await;
+        
         app_ids.insert(app_id.1.path, app_id.1.hash);
     }
     Ok(())
@@ -379,7 +367,7 @@ async fn calculate_file_hash(path: PathBuf) -> Result<String> {
     hash_command.arg(path);
 
     // 2. Get user info for 'nobody' to drop privileges.
-    let target_user = nix::unistd::User::from_name("nobody")
+    let target_user = nix::unistd::User::from_name("root")
         .context("Failed to get user info for 'nobody'")?
         .context("User 'nobody' not found")?;
 
@@ -389,7 +377,7 @@ async fn calculate_file_hash(path: PathBuf) -> Result<String> {
     // used here are designed for this purpose.
     unsafe {
         hash_command.pre_exec(move || {
-            let username = CString::new("nobody")
+            let username = CString::new("root")
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
             nix::unistd::initgroups(&username, target_user.gid)
@@ -418,27 +406,29 @@ async fn calculate_file_hash(path: PathBuf) -> Result<String> {
 }
 
 async fn update_permissive_mode_flag(
-    bpf: Arc<Mutex<Ebpf>>,
+    flag_array: Arc<Mutex<AyaArray<MapData, u32>>>,
     is_enabled: bool,
 ) -> Result<(), anyhow::Error> {
-    let mut bpf_guard = bpf.lock().await; // Lock the Bpf object
-
-    // Get the map by name
-    let mut flag_map = AyaArray::<_, u32>::try_from(
-        bpf_guard.map_mut("PERMISSIVE_MODE_ENABLED")
-            .ok_or_else(|| anyhow::anyhow!("Failed to find EXECUTION_FLAG map"))?
-    )?;
+    let mut permissive_map_guard = flag_array.lock().await; // Lock the Bpf object
 
     let index: u32 = 0;
     let value: u32 = if is_enabled { 1 } else { 0 };
 
     // Set the value in the map
-    flag_map.set(index, value, 0)?;
+    permissive_map_guard.set(index, value, 0)?;
 
     info!("Updated eBPF execution flag to: {}", is_enabled);
     Ok(())
 }
 
+async fn get_permissive_mode_value(
+    flag_array: Arc<Mutex<AyaArray<MapData, u32>>> // Have to use array here since bool maps don't exist
+) -> Result<u32, anyhow::Error> {
+    let mut permissive_map_guard = flag_array.lock().await; // Lock the Bpf object
+    let permissive_flag = permissive_map_guard.get(&0, 0)?;
+
+    Ok(permissive_flag)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -476,6 +466,7 @@ async fn main() -> Result<(), anyhow::Error> {
     // Create a sharable reference to the map
     let trusted_pids_shared = Arc::new(tokio::sync::Mutex::new(trusted_pids_aya_map));
 
+
     // Take ownership of PENDING AND TRUSTED CONNECTIONS MAPS
     let pending_connections_map_raw = bpf.take_map("PENDING_CONNECTIONS_MAP").ok_or_else(|| anyhow::anyhow!("Failed to find PENDING_CONNECTIONS_MAP map"))?;
     let trusted_connections_map_raw = bpf.take_map("TRUSTED_CONNECTIONS_MAP").ok_or_else(|| anyhow::anyhow!("Failed to find TRUSTED_CONNECTIONS_MAP map"))?;
@@ -485,6 +476,15 @@ async fn main() -> Result<(), anyhow::Error> {
     // Create a sharable reference to the maps
     let pending_connections_shared = Arc::new(tokio::sync::Mutex::new(pending_connections_map));
     let trusted_connections_shared = Arc::new(tokio::sync::Mutex::new(trusted_connections_map));
+
+    // Get map for permissive mode
+    let permissive_mode_map_raw = bpf.take_map("PERMISSIVE_MODE_ENABLED").ok_or_else(|| anyhow::anyhow!("Failed to find PERMISSIVE_MODE_ENABLED map"))?;
+    // Get actual permissive mode map
+    let permissive_mode_map = AyaArray::<_, u32>::try_from(permissive_mode_map_raw)?;
+    // Create sharable reference
+    let permissive_mode_shared: Arc<Mutex<AyaArray<MapData, u32>>> = Arc::new(tokio::sync::Mutex::new(permissive_mode_map));
+    let permissive_mode_for_cpu: Arc<Mutex<AyaArray<MapData, u32>>> = Arc::clone(&permissive_mode_shared);
+    let permissive_mode_for_main_loop: Arc<Mutex<AyaArray<MapData, u32>>> = Arc::clone(&permissive_mode_shared);
 
     let zmq_tx_clone = to_zmq_tx.clone();
 
@@ -502,6 +502,8 @@ async fn main() -> Result<(), anyhow::Error> {
             let app_ids_for_task = Arc::clone(&app_ids);
             let pending_connections_for_task = Arc::clone(&pending_connections_shared);
             let trusted_connections_for_task = Arc::clone(&trusted_connections_shared);
+            let permissive_mode_for_task = Arc::clone(&permissive_mode_for_cpu);
+
             
 
             tokio::spawn(async move {
@@ -567,9 +569,9 @@ async fn main() -> Result<(), anyhow::Error> {
                                         kernel_event.pid,
                                         kernel_event.tgid,
                                         comm_str,
-                                        Ipv4Addr::from(connection_key.saddr),
+                                        Ipv4Addr::from(u32::from_be(connection_key.saddr)),
                                         connection_key.sport,
-                                        Ipv4Addr::from(connection_key.daddr),
+                                        Ipv4Addr::from(u32::from_be(connection_key.daddr)),
                                         connection_key.dport,
                                         connection_key.protocol,
                                         lineage_string
@@ -585,59 +587,93 @@ async fn main() -> Result<(), anyhow::Error> {
                                     // So far, final path matching works, now lets test blocking or allowing based on that
                                     lineage_paths.reverse();
                                     let app_ids_guard = app_ids_for_task.lock().await;
-                                    
-                                    for app_path in lineage_paths {
-                                        
-                                        // Match path found in app_ids
-                                        if let Some(app_hash) = app_ids_guard.get(&app_path) {
-                                            // Hash application at path here, then compare to app_hash
-                                            // Get Hash
-                                            let current_hash = calculate_file_hash(app_path.clone()).await.unwrap();
-                                       
-                                            info!("[Kernel] [AppMatching] Hash for path {}: {}", app_path.to_str().unwrap(), current_hash);
-                                            if *app_hash == current_hash {
-                                                if let Some(debug_app_path) = app_path.clone().to_str() {
-                                                    info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
-                                                } else {
-                                                    info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
-                                                }
-                                                let trust_info = PidTrustInfo {
-                                                    action: Action::Allow,
-                                                    last_seen_ns: 0,
-                                                };
-                                                // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
-                                                let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                                let mut trusted_connections = trusted_connections_for_task.lock().await;
-                                                let mut pending_connections = pending_connections_for_task.lock().await;
-                                                // Insert PID into trusted pids map
-                                                if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
-                                                    warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
-                                                } else {
-                                                    info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
-                                                }
-                                                // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
-                                                if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
-                                                    //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
-                                                } else {
-                                                    //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
-                                                }
-                                                // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
-                                                if let Err(e) = pending_connections.remove(&connection_key) {
-                                                    
+                                    // Data structure for permissive mode messages 
+                                    let mut permissive_app_ids_defined = Vec::<(String, String)>::new();
+
+                                    if let Ok(permissive_flag) = get_permissive_mode_value(Arc::clone(&permissive_mode_for_task)).await {
+                                            for app_path in lineage_paths {        
+                                                // Match path found in app_ids
+                                                if let Some(app_hash) = app_ids_guard.get(&app_path) {
+                                                    // Hash application at path here, then compare to app_hash
+                                                    // Get Hash
+                                                    let current_hash = calculate_file_hash(app_path.clone()).await.unwrap();
+    
+                                                    info!("[Kernel] [AppMatching] Hash for [Path:{}, PID:{}]: {}", app_path.to_str().unwrap(), kernel_event.tgid, current_hash);
+                                                    if *app_hash == current_hash {
+                                                        if let Some(debug_app_path) = app_path.clone().to_str() {
+                                                            info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
+                                                        } else {
+                                                            info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
+                                                        }
+                                                        let trust_info = PidTrustInfo {
+                                                            action: Action::Allow,
+                                                            last_seen_ns: 0,
+                                                        };
+                                                        // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
+                                                        let mut trusted_pids = trusted_pids_for_task.lock().await;
+                                                        let mut trusted_connections = trusted_connections_for_task.lock().await;
+                                                        let mut pending_connections = pending_connections_for_task.lock().await;
+                                                        // Insert PID into trusted pids map
+                                                        if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
+                                                            warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
+                                                        } else {
+                                                            info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
+                                                        }
+                                                        // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
+                                                        if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
+                                                            //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
+                                                        } else {
+                                                            //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
+                                                        }
+                                                        // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
+                                                        if let Err(e) = pending_connections.remove(&connection_key) {
+                                                            
+                                                        }
+                                                    }
+                                                    return;
+                                                } else if permissive_flag == 1 {   
+                                                    let current_hash = calculate_file_hash(app_path.clone()).await.unwrap();
+                                                    info!("[Kernel] [Permissive] Hash for [Path:{}, PID:{}]: {}", app_path.to_str().unwrap(), kernel_event.tgid, current_hash);
+                                                    permissive_app_ids_defined.push((app_path.to_str().unwrap().to_string(), current_hash)); 
+
+                                                    let trust_info = PidTrustInfo {
+                                                        action: Action::Allow,
+                                                        last_seen_ns: 0,
+                                                    };
+                                                    // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
+                                                    let mut trusted_pids = trusted_pids_for_task.lock().await;
+                                                    let mut trusted_connections = trusted_connections_for_task.lock().await;
+                                                    let mut pending_connections = pending_connections_for_task.lock().await;
+                                                    // Insert PID into trusted pids map
+                                                    if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
+                                                        warn!("[Kernel] [Permissive] Failed to insert trusted PID {}: {}", pid, e);
+                                                    } else {
+                                                        info!("[Kernel] [Permissive] Successfully inserted trusted PID: {}", pid);
+                                                    }
+                                                    // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
+                                                    if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
+                                                        //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
+                                                    } else {
+                                                        //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
+                                                    }
+                                                    // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
+                                                    if let Err(e) = pending_connections.remove(&connection_key) {
+                                                        
+                                                    }           
                                                 }
                                             }
+                                        if permissive_flag == 1 {
+                                            let path_tuple_to_send = 
+                                                ProcessLineageTuple {
+                                                    component: "Firewall".to_string(),
+                                                    lineage_tuple: permissive_app_ids_defined.clone()
+                                                };
+                                            
+                                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::PermissiveModeTuple(path_tuple_to_send)).await {
+                                                warn!("[Events] Failed to send block event: {}", e);
+                                            }
                                         }
-                                        
                                     }
-                                    // Second, the app version:
-                                    // Add an app list to the FireWhalConfig
-                                    // Use that app list here to check and see if the outgoing traffic originates from an application at a path in the allowlist
-                                    // If so, we add it's pid to the list of trusted pids
-
-                                    // Third, the hash version:
-                                    // Do checks in previous prototype, but this time also check the registered hash of the application as well
-                                    // If it has changed and the application is allowed, block it
-                                    // If it's allowed and the hash is intact, the allow it
                                 }
                                 EventType::BlockEvent => {
                                     let payload = unsafe { kernel_event.payload.block_event };
@@ -696,7 +732,7 @@ async fn main() -> Result<(), anyhow::Error> {
     attach_tc_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_tc_interfaces.clone()).await?;
     
     // Set Permissive Mode To False just to be safe
-    update_permissive_mode_flag(Arc::clone(&bpf), false).await?;
+    update_permissive_mode_flag(Arc::clone(&permissive_mode_shared), false).await?;
 
 
     // --- Main Event Loop and Shutdown logic ---
@@ -739,7 +775,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         // if update.source == "TUI" {
                         info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
                         let interfaces = update.interfaces;
-                        // attach_xdp_programs(Arc::clone(&bpf), interfaces.clone(), active_xdp_interfaces.clone()).await?;
+                        // attach_xdp_programs(Arc::clone(&bpf), interfaces.clone(), active_xdp_interfaces.clone()).await?; 
                         attach_tc_programs(Arc::clone(&bpf), interfaces, active_tc_interfaces.clone()).await?;
                         //}
                     },
@@ -754,11 +790,11 @@ async fn main() -> Result<(), anyhow::Error> {
                             }
                         }
                     },
-                    FireWhalMessage::EnablePermissiveMode(_) => {
-                        update_permissive_mode_flag(Arc::clone(&bpf), true).await?;
+                    FireWhalMessage::EnablePermissiveMode(_) => { 
+                        update_permissive_mode_flag(Arc::clone(&permissive_mode_for_main_loop), true).await?;
                     },
                     FireWhalMessage::DisablePermissiveMode(_) => {
-                        update_permissive_mode_flag(Arc::clone(&bpf), false).await?;
+                        update_permissive_mode_flag(Arc::clone(&permissive_mode_for_main_loop), false).await?;
                     },
                     _ => {}
                 }

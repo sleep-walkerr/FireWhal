@@ -1,5 +1,5 @@
 use std::time::Instant;
-use crate::ui::{debug_print::DebugPrintState, interface_selection::{InterfaceList, InterfaceListState, ToggledInterfaces}, main_menu::MainMenuState};
+use crate::ui::{debug_print::DebugPrintState, interface_selection::{InterfaceList, InterfaceListState, ToggledInterfaces}, main_menu::MainMenuState, permissive_mode::{PermissiveListState, ProcessLineageTupleList, ToggledPaths}};
 use tokio::sync::mpsc;
 use firewhal_core::FireWhalMessage;
 
@@ -16,14 +16,18 @@ pub struct App<'a> {
     pub debug_print: DebugPrintState,
     pub available_interfaces: InterfaceList,
     pub interface_list_state: InterfaceListState,
-    pub toggled_interfaces: ToggledInterfaces
+    pub toggled_interfaces: ToggledInterfaces,
+    pub process_lineage_tuple_list: ProcessLineageTupleList,
+    pub permissive_mode_list_state: PermissiveListState,
+    pub toggled_paths: ToggledPaths
 }
 
 #[derive(Debug)]
 pub enum AppScreen {
     MainMenu,
     DebugPrint,
-    InterfaceSelection
+    InterfaceSelection,
+    PermissiveMode
 }
 
 impl Default for AppScreen {
@@ -37,7 +41,8 @@ impl<'a> App<'a> {
         self.screen = match self.screen {
             AppScreen::MainMenu => AppScreen::DebugPrint,
             AppScreen::DebugPrint => AppScreen::InterfaceSelection,
-            AppScreen::InterfaceSelection => AppScreen::MainMenu
+            AppScreen::InterfaceSelection => AppScreen::PermissiveMode,
+            AppScreen::PermissiveMode => AppScreen::MainMenu
         };
         self.index = (self.index + 1) % self.titles.len();
     }
@@ -59,7 +64,10 @@ impl Default for App<'_> {
             debug_print: DebugPrintState::default(),
             available_interfaces: InterfaceList::default(),
             interface_list_state: InterfaceListState::default(),
-            toggled_interfaces: ToggledInterfaces::default()
+            toggled_interfaces: ToggledInterfaces::default(),
+            permissive_mode_list_state: PermissiveListState::default(),
+            process_lineage_tuple_list: ProcessLineageTupleList::default(),
+            toggled_paths: ToggledPaths::default()
         }
     }
 }
