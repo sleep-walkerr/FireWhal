@@ -348,9 +348,9 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfi
 // Function to load app identities
 async fn load_app_ids(app_ids: Arc<Mutex<HashMap<PathBuf, String>>>, config: ApplicationAllowlistConfig) -> Result<(), anyhow::Error> {
     let mut app_ids = app_ids.lock().await;
+    app_ids.clear(); // clear first then insert new app_ids
     for app_id in config.apps {
         info!("[Kernel] Loaded app {}:{:?}", app_id.0, app_id.1);
-        
         app_ids.insert(app_id.1.path, app_id.1.hash);
     }
     Ok(())
@@ -673,7 +673,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                                 warn!("[Events] Failed to send block event: {}", e);
                                             }
                                         }
-                                    }
+                                    } else { warn!("[Events] Failed to get permissive mode flag.") }
                                 }
                                 EventType::BlockEvent => {
                                     let payload = unsafe { kernel_event.payload.block_event };

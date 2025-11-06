@@ -28,13 +28,13 @@ use std::{fs, fs::File};
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::{path, vec};
+use std::{path, path::{PathBuf}, vec};
 use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, FireWhalConfig, StatusPong, StatusUpdate, ApplicationAllowlistConfig};
+use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, FireWhalConfig, StatusPong, StatusUpdate, ApplicationAllowlistConfig, AppIdentity};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -52,6 +52,78 @@ fn load_app_ids(path: &path::Path) -> Result<ApplicationAllowlistConfig, Box<dyn
     let toml_content = fs::read_to_string(path)?;
     let config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
     Ok(config)
+}
+
+// Same as load_app_ids but this time adds new applications sent from permissive mode
+// This function will load the app ids, add new ones to the struct, serialize the new struct, and then send the new struct to the firewall
+fn add_app_ids(path: &path::Path, app_ids_to_add: Vec<(String, String)>) -> Result<(), Box<dyn std::error::Error>> {
+    let toml_content = fs::read_to_string(path)?;
+    let mut config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
+
+    // Use a label to break from the inner loop and continue the outer one
+    'new_app_loop: for (new_app_path_str, new_app_hash) in app_ids_to_add {
+        let new_app_path = PathBuf::from(new_app_path_str);
+
+        // --- 1. THE FIX: Check for existing and continue 'new_app_loop ---
+        for (_name, app_identity) in config.apps.iter_mut() {
+            if app_identity.path == new_app_path {
+                // Found it! This is the "update" logic.
+                if app_identity.hash != new_app_hash {
+                    // Move the hash here. This is fine, because
+                    // we are about to 'continue' the outer loop.
+                    app_identity.hash = new_app_hash; 
+                }
+                
+                // We've handled this app. Skip the "add new" logic
+                // entirely by continuing the outer loop.
+                continue 'new_app_loop;
+            }
+        }
+
+        // --- 2. If path was NOT found, ADD IT AS NEW ---
+        // This code is now *only* reachable if the inner loop
+        // completed without finding a match.
+
+        let Some(file_name) = new_app_path.file_name() else {
+            eprintln!("Skipping app with invalid path (no filename): {}", new_app_path.display());
+            continue;
+        };
+        
+        let new_app_name = file_name.to_string_lossy().to_string();
+
+        // Handle name collisions
+        let mut final_name = new_app_name.clone();
+        let mut i = 1;
+        while config.apps.contains_key(&final_name) {
+            final_name = format!("{}_{}", new_app_name, i);
+            i += 1;
+        }
+        
+        // Move the hash here. This is the *only* other place
+        // it can be moved, and the logic guarantees it's one or the other.
+        config.apps.insert(final_name, AppIdentity {
+            path: new_app_path,
+            hash: new_app_hash,
+        });
+    }
+
+    save_app_ids(path, &config)?;
+    Ok(())
+}
+
+// Overwrites current app_identity.toml file with a new config
+fn save_app_ids(path: &path::Path, config: &ApplicationAllowlistConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let toml_content = toml::to_string_pretty(config)?; // Serialize toml using string_pretty (makes it looks nice for humans)
+
+    // write to file, overwriting contents
+    fs::write(path, toml_content)?;
+
+    //**** DEBUG REMOVE LATER
+    // this is so my app_identity file in my development environment is changed as well
+    let dev_environment_app_ids = path::Path::new("/home/torch/Documents/FireWhal/app_identity.toml");
+    let toml_content = toml::to_string_pretty(config)?;
+    fs::write(dev_environment_app_ids, toml_content.clone())?;
+    Ok(())
 }
 
 /// Launches a child process, optionally as a specific user.
@@ -304,8 +376,22 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     FireWhalMessage::AddAppIds(message) => {
                         if message.component == "TUI" {
                             println!("[Supervisor] Received AddAppIds command from TUI");
-                            for (app_id, hash) in message.app_ids_to_add {
-                                println!("{} : {}", app_id, hash);
+                            let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
+                            // Add app ids and then overwrite current file
+                            add_app_ids(app_id_path, message.app_ids_to_add);
+                            // load from overwritten file and the send, less efficient but single point of truth
+                            match load_app_ids(app_id_path) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::LoadAppIds(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send app ids: {}", e);
+                                    } else {
+                                        println!("[Supervisor] App IDs successfully sent to firewall.");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load app ids: {}", e);
+                                }
                             }
                         }
 

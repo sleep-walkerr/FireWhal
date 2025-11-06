@@ -1,45 +1,35 @@
-# I'm thinking I'll just keep it as a binary name, nothing fancy
-# So what do we keep here? Key: app_id, Value: (path, hash)
-[apps."brave"]
-path = "/opt/brave-bin/brave"
-hash = "96e979373ba7635248086fe5e87ecc9f33421460bf593a19ca35cdcc89db34d8" 
-
-[apps."systemd-resolved"]
-path = "/usr/lib/systemd/systemd-resolved"
-hash = "40d031e9d88fb23b715fccce3da1adc74017d5c6e553969e561be0943e6e9b4a"
-
-[apps."ssh"]
-path = "/usr/bin/ssh"
-hash = "e21c8774a91322e81eb84922ae6719b30ede7efc194346991922f8c6cbb2940a"
-
-[apps."sshd"]
-path = "/usr/bin/sshd"
-hash = "8d127c26993ea530f01110387aaf0c6bb445d3dbd540c461875952d7fd5ec333"
-
-[apps."ping"]
-path = "/usr/bin/ping"
-hash = "d99fc96281f3ea11913f9ff3b750ce6fbd5d0c84035c2f93dc52c0bb9fa3144b"
-
-# [apps."curl"]
-# path = "/usr/bin/curl"
-# hash = "00c5d31285b525975f526a2c2ce8365a1b545f6fe003a9ded69f7198f67b8f9c"
-
-[apps."vscodium"]
-path = "/opt/vscodium-bin/codium"
-hash = "de3df78022e8e63941de42da1acca55268eef022540eabfb8a3071760d1c0409"
-
-[apps."discord"]
+[apps.Discord]
 path = "/opt/discord/Discord"
 hash = "12d6707e5d14aecfb35d3c43a1395318134af0b52d5b566c4820bf8efe6d893c"
 
-[apps."firewhal-daemon"]
+[apps.NetworkManager]
+path = "/usr/bin/NetworkManager"
+hash = "617599123153495d709e9639d67e9c8495e5d0d6add0b32be4594e76dd89ca42"
+
+[apps.ping]
+path = "/usr/bin/ping"
+hash = "d99fc96281f3ea11913f9ff3b750ce6fbd5d0c84035c2f93dc52c0bb9fa3144b"
+
+[apps.systemd-resolved]
+path = "/usr/lib/systemd/systemd-resolved"
+hash = "40d031e9d88fb23b715fccce3da1adc74017d5c6e553969e561be0943e6e9b4a"
+
+[apps.brave]
+path = "/opt/brave-bin/brave"
+hash = "96e979373ba7635248086fe5e87ecc9f33421460bf593a19ca35cdcc89db34d8"
+
+[apps.firewhal-daemon]
 path = "/usr/local/sbin/firewhal-daemon"
-hash = "3bc37fcc57cd9a82105bedd19b6863af55e6c027b6f0d35709df38be0cb0f6b1"
+hash = "debb04a345a1cfcba2992cbcef39f7c3529f54e4669bd34edf9b2dbd951838c6"
 
-[apps."zoom"]
-path = "/opt/zoom/ZoomLauncher"
-hash = "0aebf049cefabf95eefda441d399753d958c1353eeb220787835f6fb4bc06a46"
+[apps.codium]
+path = "/opt/vscodium-bin/codium"
+hash = "de3df78022e8e63941de42da1acca55268eef022540eabfb8a3071760d1c0409"
 
-[apps."steam"]
-path = "/home/torch/.local/share/Steam/ubuntu12_32/steam"
-hash = "0317e60a6b84b27a4680120993cdd9aa6437446cfdbbc4fd60cbfa48acefed00"
+[apps.curl]
+path = "/usr/bin/curl"
+hash = "00c5d31285b525975f526a2c2ce8365a1b545f6fe003a9ded69f7198f67b8f9c"
+
+[apps.ssh]
+path = "/usr/bin/ssh"
+hash = "e21c8774a91322e81eb84922ae6719b30ede7efc194346991922f8c6cbb2940a"
