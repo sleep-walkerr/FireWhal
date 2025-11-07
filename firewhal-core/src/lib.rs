@@ -173,7 +173,8 @@ pub struct Rule {
 // List of rules to be sent to firewall
 #[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
 pub struct FireWhalConfig {
-    pub rules: Vec<Rule>,
+    pub outgoing_rules: Vec<Rule>,
+    pub incoming_rules: Vec<Rule>
 }
 
 // Represents the value for an app id key in the app_id.toml file
@@ -205,7 +206,14 @@ pub enum FireWhalMessage {
     EnablePermissiveMode(PermissiveModeEnable),
     DisablePermissiveMode(PermissiveModeDisable),
     PermissiveModeTuple(ProcessLineageTuple),
-    AddAppIds(AppIdsToAdd)
+    AddAppIds(AppIdsToAdd),
+    RulesRequest(TUIRulesRequest),
+    RulesResponse(FireWhalConfig),
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct TUIRulesRequest {
+    pub component: String,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

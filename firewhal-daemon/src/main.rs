@@ -396,6 +396,24 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                         }
 
                     }
+                    FireWhalMessage::RulesRequest(message) => {
+                        if message.component == "TUI" {
+                            println!("[Supervisor] Received RuleRequest command from TUI");
+                            match load_rules(path::Path::new("/opt/firewhal/bin/firewall_rules.toml")) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::RulesResponse(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send rules: {}", e);
+                                    } else {
+                                        println!("[Supervisor] Rules successfully sent to TUI");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load rules for TUI: {}", e);
+                                }
+                            }
+                        }
+                    }
                     _ => {
 
                     }

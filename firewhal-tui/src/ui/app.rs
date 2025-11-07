@@ -1,5 +1,11 @@
 use std::time::Instant;
-use crate::ui::{debug_print::DebugPrintState, interface_selection::{InterfaceList, InterfaceListState, ToggledInterfaces}, main_menu::MainMenuState, permissive_mode::{PermissiveListState, ProcessLineageTupleList, ToggledPaths}};
+use crate::ui::{
+    debug_print::DebugPrintState, 
+    interface_selection::{InterfaceList, InterfaceListState, ToggledInterfaces}, 
+    main_menu::MainMenuState, 
+    permissive_mode::{PermissiveListState, ProcessLineageTupleList, ToggledPaths},
+    rule_management::{RuleList}
+};
 use tokio::sync::mpsc;
 use firewhal_core::FireWhalMessage;
 
@@ -19,7 +25,8 @@ pub struct App<'a> {
     pub toggled_interfaces: ToggledInterfaces,
     pub process_lineage_tuple_list: ProcessLineageTupleList,
     pub permissive_mode_list_state: PermissiveListState,
-    pub toggled_paths: ToggledPaths
+    pub toggled_paths: ToggledPaths,
+    pub rule_list: RuleList
 }
 
 #[derive(Debug)]
@@ -27,7 +34,8 @@ pub enum AppScreen {
     MainMenu,
     DebugPrint,
     InterfaceSelection,
-    PermissiveMode
+    PermissiveMode,
+    RuleManagement
 }
 
 impl Default for AppScreen {
@@ -42,7 +50,8 @@ impl<'a> App<'a> {
             AppScreen::MainMenu => AppScreen::DebugPrint,
             AppScreen::DebugPrint => AppScreen::InterfaceSelection,
             AppScreen::InterfaceSelection => AppScreen::PermissiveMode,
-            AppScreen::PermissiveMode => AppScreen::MainMenu
+            AppScreen::PermissiveMode => AppScreen::RuleManagement,
+            AppScreen::RuleManagement => AppScreen::MainMenu,
         };
         self.index = (self.index + 1) % self.titles.len();
     }
@@ -67,7 +76,8 @@ impl Default for App<'_> {
             toggled_interfaces: ToggledInterfaces::default(),
             permissive_mode_list_state: PermissiveListState::default(),
             process_lineage_tuple_list: ProcessLineageTupleList::default(),
-            toggled_paths: ToggledPaths::default()
+            toggled_paths: ToggledPaths::default(),
+            rule_list: RuleList::default()
         }
     }
 }

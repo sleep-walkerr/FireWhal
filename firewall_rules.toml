@@ -1,5 +1,13 @@
-# We will be adding app_id as a field soon, which can either be none, or a specific app_id used to match in the hash and path file
-[[rules]]
+[[incoming_rules]]
+action = "Allow"
+protocol = "Tcp"
+#source_ip = None 
+#source_port = None 
+#dest_ip = None 
+dest_port = 443 
+description = "Dummy incoming rule" 
+
+[[outgoing_rules]]
 action = "Allow"
 protocol = "Tcp"
 #source_ip = None 
@@ -8,7 +16,7 @@ protocol = "Tcp"
 dest_port = 443 
 description = "Allow outgoing HTTPS" 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol =  "Udp"
 #source_ip = None 
@@ -17,7 +25,7 @@ protocol =  "Udp"
 dest_port = 443 
 description = "Allow outgoing HTTPS via UDP (for QUIC)" 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol = "Tcp"
 #source_ip = None 
@@ -26,7 +34,7 @@ protocol = "Tcp"
 dest_port = 80 
 description = "Allow outgoing HTTP" 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol = "Udp"
 #source_ip = None 
@@ -35,14 +43,14 @@ protocol = "Udp"
 dest_port = 80 
 description = "Allow outgoing HTTP" 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 #source_ip = None 
 source_port = 22 
 #dest_ip = None 
 description = "Incoming SSH (Turn Off Later)" 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 #source_ip = None 
 dest_port = 22 
@@ -50,7 +58,7 @@ dest_port = 22
 description = "Outgoing SSH" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol = "Tcp"
 #source_ip = None 
@@ -60,7 +68,7 @@ dest_port = 11371
 description = "Pacman Port" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol =  "Udp"
 #source_ip = None 
@@ -70,7 +78,7 @@ dest_port = 11371
 description = "Pacman Port" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol =  "Udp"
 #source_ip = None 
@@ -80,7 +88,7 @@ dest_port = 7777
 description = "Wireguard" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol =  "Udp"
 #source_ip = None 
@@ -90,7 +98,7 @@ dest_port = 67
 description = "Router communication" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol = "Tcp"
 #source_ip = None 
@@ -100,7 +108,7 @@ dest_port = 67
 description = "Router communication" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol = "Tcp"
 #source_ip = None 
@@ -110,7 +118,7 @@ dest_port = 22
 description = "Outgoing SSH" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol =  "Udp"
 #source_ip = None 
@@ -120,7 +128,7 @@ dest_port = 123
 description = "NTP for getting time" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol = "Tcp"
 #source_ip = None 
@@ -130,7 +138,7 @@ dest_port = 8443
 description = "Https Alternate" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol =  "Udp"
 #source_ip = None 
@@ -140,7 +148,7 @@ dest_port = 5355
 description = "LLMNR" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol = "Tcp"
 #source_ip = None 
@@ -150,7 +158,7 @@ dest_port = 636
 description = "Lastpass" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol =  "Udp"
 #source_ip = None 
@@ -160,7 +168,7 @@ dest_port = 53
 description = "Unencrypted DNS" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol = "Tcp"
 #source_ip = None 
@@ -170,7 +178,7 @@ dest_port = 853
 description = "DNS-Over-TLS" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Allow"
 protocol =  "Udp"
 #source_ip = None 
@@ -179,7 +187,7 @@ dest_ip = "127.0.0.1"
 #dest_port  = None 
 description = "Block a specific malicious IP" 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Deny" 
 protocol = "Tcp"
 #source_ip = None 
@@ -189,7 +197,7 @@ dest_ip = "172.168.8.7"
 description = "Block a specific malicious IP" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Deny" 
 #protocol  = None 
 #source_ip = None 
@@ -199,7 +207,7 @@ dest_ip = "7.0.0.5"
 description = "Block a specific malicious IP" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Deny" 
 protocol =  "Udp"
 #source_ip = None 
@@ -209,7 +217,7 @@ dest_ip = "172.168.8.7"
 description = "Block a specific malicious IP" 
 
 
-[[rules]]
+[[outgoing_rules]]
 action = "Deny" 
 #protocol  = None 
 #source_ip = None 

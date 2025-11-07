@@ -287,7 +287,7 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfi
 
     if let Ok(mut rulelist) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("RULES").unwrap()) {
 
-    for rule in config.rules {
+    for rule in config.outgoing_rules {
             // Create Key from Rule
             let mut new_key = RuleKey {
                 protocol: rule.protocol.unwrap_or(firewhal_core::Protocol::Wildcard) as u32,

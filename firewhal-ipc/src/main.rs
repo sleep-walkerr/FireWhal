@@ -239,6 +239,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     router.send(payload, 0);
                 }
             }
+            FireWhalMessage::RulesRequest(message) => {
+                if let Some(daemon_identity) = clients.get("Daemon") && message.component == "TUI" {
+                    println!("[ROUTER] Forwarding RuleRequest to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::RulesResponse(message) => {
+                if let Some(tui_identity) = clients.get("TUI") {
+                    println!("[ROUTER] Forwarding RuleResponse to TUI.");
+                    router.send(tui_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
             _ => {
                 // For other messages, we might not know the source component unless it's registered.
                 // We'll just identify it by its raw identity for the debug message.
