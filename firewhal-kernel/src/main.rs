@@ -280,69 +280,105 @@ async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file:
 
     Ok(())
 }
-
 async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfig) -> Result<(), anyhow::Error> {
     let mut bpf = bpf.lock().await;
     info!("[Kernel] [Rule] Applying ruleset...");
 
-    if let Ok(mut rulelist) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("RULES").unwrap()) {
+    let mut rulelist = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("RULES").unwrap())?;
 
-    for rule in config.outgoing_rules {
-            // Create Key from Rule
-            let mut new_key = RuleKey {
-                protocol: rule.protocol.unwrap_or(firewhal_core::Protocol::Wildcard) as u32,
-                dest_ip: 0, // Set placeholder IPs for now
-                dest_port: rule.dest_port.unwrap_or(0), // Wildcard port if not specified
-                source_ip: 0, // Set placeholder IPs for now
-                source_port: rule.source_port.unwrap_or(0), // Wildcard port if not specified,
-            };
+    // This set will hold all the keys that *should* be in the map.
+    let mut new_rule_keys = HashSet::<RuleKey>::new();
 
-            
-            // Allow/Block matching to build RuleAction
-            let action: firewhal_kernel_common::RuleAction;
-            match(rule.action) {
-                firewhal_core::Action::Allow => {
-                    action = firewhal_kernel_common::RuleAction {
-                        action: firewhal_kernel_common::Action::Allow,
-                        rule_id: 127 // Placeholder value for now
-                    };
-                }
-                firewhal_core::Action::Deny => {
-                    action = firewhal_kernel_common::RuleAction {
-                        action: firewhal_kernel_common::Action::Deny,
-                        rule_id: 127 // Placeholder value for now
-                    };
-                }
-            }
+    // -----------------------------------------------------------------
+    // PASS 1: Insert and update all new rules
+    // -----------------------------------------------------------------
+    info!("[Kernel] [Rule] Upserting new/updated rules...");
+    for rule in config.outgoing_rules { // Assuming this is now config.rules
+        
+        // --- FIX 1: Your protocol is u8 in the common struct, not u32 ---
+        let mut new_key = RuleKey {
+            protocol: rule.protocol.unwrap_or(firewhal_core::Protocol::Wildcard) as u32, // <-- Changed to u8
+            dest_ip: 0,
+            dest_port: rule.dest_port.unwrap_or(0),
+            source_ip: 0,
+            source_port: rule.source_port.unwrap_or(0),
+        };
+
+        let action = match rule.action {
+            firewhal_core::Action::Allow => firewhal_kernel_common::RuleAction {
+                action: firewhal_kernel_common::Action::Allow,
+                rule_id: 127,
+            },
+            firewhal_core::Action::Deny => firewhal_kernel_common::RuleAction {
+                action: firewhal_kernel_common::Action::Deny,
+                rule_id: 127,
+            },
+        };
 
         let dest_is_v4 = rule.dest_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
         let src_is_v4 = rule.source_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
 
-        if dest_is_v4 || src_is_v4 { //This will be used to decide which map to insert the rule into in the future
-            // Convert src and dst IP addresses
+        if dest_is_v4 || src_is_v4 {
             let src_ip_u32: u32;
             let dst_ip_u32: u32;
+
+            // --- CRITICAL FIX 2: Use from_be_bytes for Network Byte Order ---
+            // eBPF maps and packet headers use Network Byte Order (Big Endian).
+            // `from_le_bytes` was inserting the wrong byte order into the map.
             if let Some(IpAddr::V4(source_ip)) = rule.source_ip {
-                src_ip_u32 = u32::from_le_bytes(source_ip.octets());
+                src_ip_u32 = u32::from_be_bytes(source_ip.octets()); // <-- Use from_be_bytes
             } else { src_ip_u32 = 0; }
             if let Some(IpAddr::V4(destination_ip)) = rule.dest_ip {
-                dst_ip_u32 = u32::from_le_bytes(destination_ip.octets());
-            } else { dst_ip_u32 = 0; } 
-            // Add them to the key
+                dst_ip_u32 = u32::from_be_bytes(destination_ip.octets()); // <-- Use from_be_bytes
+            } else { dst_ip_u32 = 0; }
+            
             new_key.source_ip = src_ip_u32;
             new_key.dest_ip = dst_ip_u32;
-        } else {} // IPv6 Logic
+        }
 
-        // Insertion of completed key
+        // Add the key to our userspace set for the next pass
+        new_rule_keys.insert(new_key);
+
+        // Insertion of completed key into eBPF map
         if let Err(e) = rulelist.insert(&new_key, action, 0) {
             warn!("[Kernel] Failed to insert rule: {}", e);
         } else {
+            // Your logging logic was fine, but let's correct the IP display.
+            // Ipv4Addr::from() expects host-endian, so we must convert back from network-endian (BE).
             info!("[Kernel] [Rule] Applied: {:?} traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}",
-            if action.action as u32 == 0 { "Allow" } else { "Deny" }, new_key.protocol, Ipv4Addr::from(u32::from_be(new_key.dest_ip)), new_key.dest_port, Ipv4Addr::from(u32::from_be(new_key.source_ip)), new_key.source_port);
+            action.action, new_key.protocol, Ipv4Addr::from(u32::from_be(new_key.dest_ip)), new_key.dest_port, Ipv4Addr::from(u32::from_be(new_key.source_ip)), new_key.source_port);
         }
     }
-}
-    Ok(()) // Return Ok to signify success.
+
+    // -----------------------------------------------------------------
+    // PASS 2: Prune stale rules
+    // -----------------------------------------------------------------
+    info!("[Kernel] [Rule] Pruning stale rules...");
+    let mut stale_keys = Vec::new();
+
+    // We must collect keys to delete first, as we can't delete while iterating.
+    for previous_rule_result in rulelist.iter() {
+        if let Ok((key, _value)) = previous_rule_result {
+            // This is the O(1) check, much faster than Vec::contains
+            if !new_rule_keys.contains(&key) {
+                // This key is in the eBPF map but NOT in our new ruleset. It's stale.
+                stale_keys.push(key);
+            }
+        } else if let Err(e) = previous_rule_result {
+            warn!("[Kernel] Failed to read map entry during stale check: {}", e);
+        }
+    }
+
+    // Now, delete all the stale keys we found.
+    info!("[Kernel] [Rule] Found {} stale rules to remove.", stale_keys.len());
+    for key in stale_keys {
+        if let Err(e) = rulelist.remove(&key) {
+            warn!("[Kernel] Failed to remove stale rule: {}", e);
+        }
+    }
+
+    info!("[Kernel] [Rule] Ruleset successfully applied.");
+    Ok(())
 }
 
 // Function to load app identities

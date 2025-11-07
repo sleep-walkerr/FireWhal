@@ -124,15 +124,8 @@ fn add_app_ids(path: &path::Path, app_ids_to_add: Vec<(String, String)>) -> Resu
 // Overwrites current app_identity.toml file with a new config
 fn save_app_ids(path: &path::Path, config: &ApplicationAllowlistConfig) -> Result<(), Box<dyn std::error::Error>> {
     let toml_content = toml::to_string_pretty(config)?; // Serialize toml using string_pretty (makes it looks nice for humans)
-
     // write to file, overwriting contents
     fs::write(path, toml_content)?;
-
-    //**** DEBUG REMOVE LATER
-    // this is so my app_identity file in my development environment is changed as well
-    let dev_environment_app_ids = path::Path::new("/home/torch/Documents/FireWhal/app_identity.toml");
-    let toml_content = toml::to_string_pretty(config)?;
-    fs::write(dev_environment_app_ids, toml_content.clone())?;
     Ok(())
 }
 
@@ -223,15 +216,6 @@ fn main() {
             Err(e) => eprintln!("[Privileged] Failed to launch {}: {}", path, e),
         }
     }
-    // TEST CODE, DELETE LATER
-    // match launch_process("/opt/firewhal/bin/firewhal-discord-bot", &vec![], Some("nobody"), Some("/opt/firewhal")) {
-    //     Ok(pid) => {
-    //         writer.write_all(&pid.to_ne_bytes()).unwrap();
-    //     }
-    //     Err(e) => {
-    //         eprintln!("[Privileged] Failed to launch /opt/firewhal/bin/firewhal-discord-bot: {}", e);
-    //     }
-    // }
     drop(writer)
     
     
