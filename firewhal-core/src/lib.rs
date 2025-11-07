@@ -157,7 +157,7 @@ pub enum Protocol {
 }
 
 
-#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
+#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct Rule {
     // Consider adding rule ids to rules for debugging purposes
     pub action: Action,

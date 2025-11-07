@@ -153,7 +153,11 @@ async fn main() -> Result<(), io::Error> {
                 }
                 FireWhalMessage::RulesResponse(rules_message) => {
                     app_guard.debug_print.add_message(format!("[TUI]: RulesResponse Received."));
-
+                    // Clear existing rules and add new ones
+                    app_guard.rules.clear();
+                    // For now, we only show outgoing rules. This can be expanded later.
+                    app_guard.rules.extend(rules_message.outgoing_rules);
+                    app_guard.rules.extend(rules_message.incoming_rules);
                 }
                 _ => {}
             }
@@ -240,6 +244,9 @@ async fn main() -> Result<(), io::Error> {
                                     },
                                     AppScreen::PermissiveMode => {
                                         ui::permissive_mode::handle_key_event(key.code, &mut app_guard);
+                                    },
+                                    AppScreen::RuleManagement => {
+                                        ui::rule_management::handle_key_event(key.code, &mut app_guard);
                                     }
                                     AppScreen::MainMenu => {
                                     },

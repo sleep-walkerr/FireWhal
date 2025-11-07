@@ -4,7 +4,7 @@ use crate::ui::{
     interface_selection::{InterfaceList, InterfaceListState, ToggledInterfaces}, 
     main_menu::MainMenuState, 
     permissive_mode::{PermissiveListState, ProcessLineageTupleList, ToggledPaths},
-    rule_management::{RuleList}
+    rule_management::{RuleListState, RuleManagementMode}
 };
 use tokio::sync::mpsc;
 use firewhal_core::FireWhalMessage;
@@ -26,7 +26,8 @@ pub struct App<'a> {
     pub process_lineage_tuple_list: ProcessLineageTupleList,
     pub permissive_mode_list_state: PermissiveListState,
     pub toggled_paths: ToggledPaths,
-    pub rule_list: RuleList
+    pub rule_list_state: RuleListState,
+    pub rules: Vec<firewhal_core::Rule>,
 }
 
 #[derive(Debug)]
@@ -77,7 +78,8 @@ impl Default for App<'_> {
             permissive_mode_list_state: PermissiveListState::default(),
             process_lineage_tuple_list: ProcessLineageTupleList::default(),
             toggled_paths: ToggledPaths::default(),
-            rule_list: RuleList::default()
+            rule_list_state: RuleListState::default(),
+            rules: Vec::new(),
         }
     }
 }
