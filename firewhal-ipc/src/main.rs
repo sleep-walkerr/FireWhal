@@ -253,6 +253,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     router.send(payload, 0);
                 }
             }
+            FireWhalMessage::UpdateRules(message) => {
+                if let Some(daemon_identity) = clients.get("Daemon") {
+                    println!("[ROUTER] Forwarding UpdateRules to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
             _ => {
                 // For other messages, we might not know the source component unless it's registered.
                 // We'll just identify it by its raw identity for the debug message.

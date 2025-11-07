@@ -27,6 +27,7 @@ pub struct App<'a> {
     pub permissive_mode_list_state: PermissiveListState,
     pub toggled_paths: ToggledPaths,
     pub rule_list_state: RuleListState,
+    pub rules_modified: bool,
     pub rules: Vec<firewhal_core::Rule>,
 }
 
@@ -79,6 +80,7 @@ impl Default for App<'_> {
             process_lineage_tuple_list: ProcessLineageTupleList::default(),
             toggled_paths: ToggledPaths::default(),
             rule_list_state: RuleListState::default(),
+            rules_modified: false,
             rules: Vec::new(),
         }
     }

@@ -209,6 +209,7 @@ pub enum FireWhalMessage {
     AddAppIds(AppIdsToAdd),
     RulesRequest(TUIRulesRequest),
     RulesResponse(FireWhalConfig),
+    UpdateRules(FireWhalConfig),
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

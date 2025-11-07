@@ -120,6 +120,13 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
                 };
             }
         }
+        KeyCode::Char('p') => {
+            // Apply changes
+            if app.rules_modified {
+                send_rules_to_daemon(app);
+                app.rules_modified = false;
+            }
+        }
         _ => {}
     }
 }
@@ -157,8 +164,8 @@ fn handle_editing_keys(key_code: KeyCode, app: &mut App) {
                     // Adding new rule
                     app.rules.push(new_rule);
                 }
-                send_rules_to_daemon(app);
                 app.rule_list_state.mode = RuleManagementMode::Viewing;
+                app.rules_modified = true;
             }
 
             // -- Toggle Fields --
@@ -237,8 +244,10 @@ fn send_rules_to_daemon(app: &mut App) {
         incoming_rules: vec![],
     };
     if let Some(tx) = &app.to_zmq_tx {
-        if let Err(e) = tx.try_send(FireWhalMessage::LoadRules(config)) {
+        if let Err(e) = tx.try_send(FireWhalMessage::UpdateRules(config)) {
             app.debug_print.add_message(format!("[TUI] Failed to send rules to daemon: {}", e));
+        } else {
+            app.debug_print.add_message("[TUI] Sent rules to daemon.".to_string());
         }
     }
 }
@@ -253,8 +262,8 @@ fn handle_confirm_delete_keys(key_code: KeyCode, app: &mut App) {
                 if *selected_yes {
                     if let Some(selected_index) = app.rule_list_state.table_state.selected() {
                         if selected_index < app.rules.len() {
-                            app.rules.remove(selected_index);                            
-                            send_rules_to_daemon(app);
+                            app.rules.remove(selected_index);
+                            app.rules_modified = true;
                         }
                     }
                     app.rule_list_state.table_state.select(None); // Deselect
@@ -391,10 +400,13 @@ fn render_form_field(f: &mut Frame, area: Rect, title: &str, value: &str, is_foc
 }
 
 fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
+    let title = if app.rules_modified { "Rule Management* (a: add, e: edit, d: delete, p: apply)" } else { "Rule Management (a: add, e: edit, d: delete)" };
+
     let header_cells = ["Action", "Protocol", "Src IP", "Src Port", "Dest IP", "Dest Port", "Description"]
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().fg(Color::Rgb(255, 165, 0)).bold()));
     let header = Row::new(header_cells).height(1).bottom_margin(1);
+
 
     let rows = app.rules.iter().map(|rule| {
         let cells = vec![
@@ -420,7 +432,7 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
     ];
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("Rule Management (a: add, e: edit, d: delete)"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .row_highlight_style(Style::default().bg(Color::DarkGray));
 
     f.render_stateful_widget(table, area, &mut app.rule_list_state.table_state);

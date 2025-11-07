@@ -47,6 +47,16 @@ fn load_rules(path: &path::Path) -> Result<FireWhalConfig, Box<dyn std::error::E
     Ok(config)
 }
 
+// Serializes the new set of firewall rules to a file
+fn save_rules(path: &path::Path, config: &FireWhalConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let toml_content = toml::to_string_pretty(config)?; // Serialize toml using string_pretty (makes it looks nice for humans)
+
+    // write to file, overwriting contents
+    fs::write(path, toml_content)?;
+
+    Ok(())
+}
+
 // Loads and deserializes the defined applications that will be used in filtering
 fn load_app_ids(path: &path::Path) -> Result<ApplicationAllowlistConfig, Box<dyn std::error::Error>> {
     let toml_content = fs::read_to_string(path)?;
@@ -413,6 +423,24 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                                 }
                             }
                         }
+                    }
+                    FireWhalMessage::UpdateRules(message) => {
+                       println!("[Supervisor] Received UpdateRules command from TUI"); 
+                       let path = path::Path::new("/opt/firewhal/bin/firewall_rules.toml");
+                       save_rules(path, &message)?;
+                       match load_rules(path) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::LoadRules(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send rules: {}", e);
+                                    } else {
+                                        println!("[Supervisor] Rules successfully sent to firewall.");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load firewall rules: {}", e);
+                                }
+                            }
                     }
                     _ => {
 
