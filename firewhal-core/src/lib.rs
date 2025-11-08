@@ -178,7 +178,7 @@ pub struct FireWhalConfig {
 }
 
 // Represents the value for an app id key in the app_id.toml file
-#[derive(Debug, Deserialize, Serialize, Encode, Decode, Clone)]
+#[derive(Debug, Deserialize, Serialize, Encode, Decode, Clone, Eq, PartialEq)]
 pub struct AppIdentity {
     pub path: PathBuf,
     pub hash: String,
@@ -211,7 +211,8 @@ pub enum FireWhalMessage {
     RulesResponse(FireWhalConfig),
     UpdateRules(FireWhalConfig),
     AppsRequest(TUIAppsRequest),
-    AppsResponse(ApplicationAllowlistConfig)
+    AppsResponse(ApplicationAllowlistConfig),
+    UpdateAppIds(ApplicationAllowlistConfig),
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

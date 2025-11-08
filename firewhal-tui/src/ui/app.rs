@@ -1,5 +1,6 @@
 use std::time::Instant;
 use crate::ui::{
+    app_management::AppListState,
     debug_print::DebugPrintState, 
     interface_selection::{InterfaceList, InterfaceListState, ToggledInterfaces}, 
     main_menu::MainMenuState, 
@@ -7,7 +8,7 @@ use crate::ui::{
     rule_management::{RuleListState, RuleManagementMode}
 };
 use tokio::sync::mpsc;
-use firewhal_core::FireWhalMessage;
+use firewhal_core::{FireWhalMessage, AppIdentity};
 
 #[derive(Debug)]
 pub struct App<'a> {
@@ -29,6 +30,9 @@ pub struct App<'a> {
     pub rule_list_state: RuleListState,
     pub rules_modified: bool,
     pub rules: Vec<firewhal_core::Rule>,
+    pub app_list_state: AppListState,
+    pub apps_modified: bool,
+    pub apps: Vec<(String, AppIdentity)>,
 }
 
 #[derive(Debug)]
@@ -84,6 +88,9 @@ impl Default for App<'_> {
             rule_list_state: RuleListState::default(),
             rules_modified: false,
             rules: Vec::new(),
+            app_list_state: AppListState::default(),
+            apps_modified: false,
+            apps: Vec::new(),
         }
     }
 }

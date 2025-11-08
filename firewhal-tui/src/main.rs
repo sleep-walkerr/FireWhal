@@ -161,6 +161,11 @@ async fn main() -> Result<(), io::Error> {
                 }
                 FireWhalMessage::AppsResponse(app_id_message) => {
                     app_guard.debug_print.add_message(format!("[TUI]: AppIdsResponse Received."));
+                    // Clear existing apps and add new ones
+                    app_guard.apps.clear();
+                    app_guard.apps.extend(app_id_message.apps.into_iter());
+                    // Sort by name for consistent display
+                    app_guard.apps.sort_by(|a, b| a.0.cmp(&b.0));
                 }
                 _ => {}
             }
@@ -258,6 +263,9 @@ async fn main() -> Result<(), io::Error> {
                                     },
                                     AppScreen::RuleManagement => {
                                         ui::rule_management::handle_key_event(key.code, &mut app_guard);
+                                    }
+                                    AppScreen::AppManagement => {
+                                        ui::app_management::handle_key_event(key.code, &mut app_guard);
                                     }
                                     AppScreen::MainMenu => {
                                     },

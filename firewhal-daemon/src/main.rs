@@ -445,6 +445,25 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
 
                             }
                     }
+                    FireWhalMessage::UpdateAppIds(message) => {
+                        println!("[Supervisor] Received UpdateAppIds command from TUI");
+                        let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
+                        save_app_ids(app_id_path, &message)?;
+                        match load_app_ids(app_id_path) {
+                            Ok(config) => {
+                                let msg = FireWhalMessage::LoadAppIds(config);
+                                if let Err(e) = to_zmq_tx.send(msg).await {
+                                    eprintln!("[Supervisor] Failed to send app id list: {}", e);
+                                } else {
+                                    println!("[Supervisor] App ID list successfully sent to TUI.");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Supervisor] Failed to load app ids: {}", e);
+                            }
+
+                        }
+                    }
                     _ => {
 
                     }

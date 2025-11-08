@@ -16,6 +16,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         AppScreen::InterfaceSelection => interface_selection::render(f, app),
         AppScreen::PermissiveMode => permissive_mode::render(f, app),
         AppScreen::RuleManagement => rule_management::render(f, app),
-        AppScreen::AppManagement => app_management::render(f, app),
+        AppScreen::AppManagement => app_management::render(f, app)
     }
 }
