@@ -210,6 +210,13 @@ pub enum FireWhalMessage {
     RulesRequest(TUIRulesRequest),
     RulesResponse(FireWhalConfig),
     UpdateRules(FireWhalConfig),
+    AppsRequest(TUIAppsRequest),
+    AppsResponse(ApplicationAllowlistConfig)
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct TUIAppsRequest {
+    pub component: String,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

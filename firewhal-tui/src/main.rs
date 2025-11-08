@@ -159,6 +159,9 @@ async fn main() -> Result<(), io::Error> {
                     app_guard.rules.extend(rules_message.outgoing_rules);
                     app_guard.rules.extend(rules_message.incoming_rules);
                 }
+                FireWhalMessage::AppsResponse(app_id_message) => {
+                    app_guard.debug_print.add_message(format!("[TUI]: AppIdsResponse Received."));
+                }
                 _ => {}
             }
         }
@@ -229,6 +232,14 @@ async fn main() -> Result<(), io::Error> {
                                 // Send rule request to daemon
                                 if let Some(zmq_sender) = &app_guard.to_zmq_tx {
                                     if let Err(e) = zmq_sender.try_send(FireWhalMessage::RulesRequest(firewhal_core::TUIRulesRequest { component: "TUI".to_string() })) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Found no zmq sender".to_string()); }
+                            }
+                            AppScreen::AppManagement => {
+                                // Send app request to daemon
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(FireWhalMessage::AppsRequest(firewhal_core::TUIAppsRequest { component: "TUI".to_string() })) {
                                         _ = &app_guard.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
                                     }
                                 } else { _ = &app_guard.debug_print.add_message("Found no zmq sender".to_string()); }

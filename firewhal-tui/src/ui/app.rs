@@ -37,7 +37,8 @@ pub enum AppScreen {
     DebugPrint,
     InterfaceSelection,
     PermissiveMode,
-    RuleManagement
+    RuleManagement,
+    AppManagement
 }
 
 impl Default for AppScreen {
@@ -53,7 +54,8 @@ impl<'a> App<'a> {
             AppScreen::DebugPrint => AppScreen::InterfaceSelection,
             AppScreen::InterfaceSelection => AppScreen::PermissiveMode,
             AppScreen::PermissiveMode => AppScreen::RuleManagement,
-            AppScreen::RuleManagement => AppScreen::MainMenu,
+            AppScreen::RuleManagement => AppScreen::AppManagement,
+            AppScreen::AppManagement => AppScreen::MainMenu
         };
         self.index = (self.index + 1) % self.titles.len();
     }

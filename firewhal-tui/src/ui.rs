@@ -4,6 +4,7 @@ pub mod app;
 pub mod interface_selection;
 pub mod permissive_mode;
 pub mod rule_management;
+pub mod app_management;
 
 use app::{App, AppScreen};
 use ratatui::{prelude::*, Frame};
@@ -15,5 +16,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         AppScreen::InterfaceSelection => interface_selection::render(f, app),
         AppScreen::PermissiveMode => permissive_mode::render(f, app),
         AppScreen::RuleManagement => rule_management::render(f, app),
+        AppScreen::AppManagement => app_management::render(f, app),
     }
 }
