@@ -1,0 +1,4 @@
+enforced_interfaces = [
+    "eth0",
+    "wlp5s0"
+]

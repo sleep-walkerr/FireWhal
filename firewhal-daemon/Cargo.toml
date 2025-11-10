@@ -12,3 +12,4 @@ bincode = { workspace = true }
 serde = { workspace = true }
 toml = "0.9.8"
 tokio = { workspace=true }
+pnet = "0.35.0"

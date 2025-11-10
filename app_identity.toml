@@ -28,7 +28,7 @@ hash = "de3df78022e8e63941de42da1acca55268eef022540eabfb8a3071760d1c0409"
 
 [apps.curl]
 path = "/usr/bin/curl"
-hash = "00c5d31285b525975f526a2c2ce8365a1b545f6fe003a9ded69f7198f67b8f9c"
+hash = "b453174c3ab08455046e292aee8d01ff5179859fbb66f4ae0cbf726e4fe4f6fc"
 
 [apps.ssh]
 path = "/usr/bin/ssh"

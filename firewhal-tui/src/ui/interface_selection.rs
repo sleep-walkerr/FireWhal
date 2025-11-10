@@ -96,7 +96,7 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
             }
         }
         KeyCode::Enter => {
-            let selected_interfaces: Vec<String> = app.toggled_interfaces.iter().cloned().collect();
+            let selected_interfaces: HashSet<String> = app.toggled_interfaces.iter().cloned().collect();
             let msg = FireWhalMessage::UpdateInterfaces(UpdateInterfaces { source: ("TUI".to_string()), interfaces: (selected_interfaces) });
             
             // Send interface selection message to firewhal-kernel

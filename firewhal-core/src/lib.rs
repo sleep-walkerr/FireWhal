@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::{fmt, fs, path};
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use bincode::{config, Encode, Decode};
 //use serde::de::{value, Error};
 use serde::{Deserialize, Serialize};
@@ -189,6 +189,11 @@ pub struct ApplicationAllowlistConfig {
     pub apps: HashMap<String, AppIdentity>, // Key is the app_id
 }
 
+#[derive(Debug, Deserialize, Serialize, Encode, Decode, Clone)]
+pub struct InterfaceStateConfig {
+    pub enforced_interfaces: HashSet<String>, // Key is the app_id
+}
+
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum FireWhalMessage {
     CommandShutdown(ShutdownCommand),
@@ -199,6 +204,7 @@ pub enum FireWhalMessage {
     LoadAppIds(ApplicationAllowlistConfig),
     InterfaceRequest(NetInterfaceRequest),
     InterfaceResponse(NetInterfaceResponse),
+    LoadInterfaceState(InterfaceStateConfig),
     UpdateInterfaces(UpdateInterfaces),
     Ping(StatusPing),
     Pong(StatusPong),
@@ -265,7 +271,7 @@ pub struct StatusPong {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct UpdateInterfaces {
     pub source: String,
-    pub interfaces: Vec<String>,
+    pub interfaces: HashSet<String>,
 }
 
 
@@ -277,7 +283,8 @@ pub struct NetInterfaceRequest {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct NetInterfaceResponse {
     pub source: String,
-    pub interfaces: Vec<String>,
+    pub interface_state: InterfaceStateConfig,
+    pub current_interfaces: HashSet<String>,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

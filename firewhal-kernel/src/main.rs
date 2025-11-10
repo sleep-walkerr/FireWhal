@@ -81,12 +81,12 @@ fn read_from_buffer<T: Copy>(buf: &[u8]) -> Result<T, &'static str> {
     }
 }
 
-fn get_all_interfaces() -> Vec<String> {
-    datalink::interfaces()
-        .into_iter()
-        .map(|iface| iface.name)
-        .collect()
-}
+// fn get_all_interfaces() -> Vec<String> {
+//     datalink::interfaces()
+//         .into_iter()
+//         .map(|iface| iface.name)
+//         .collect()
+// }
 
 // Helper function to get PPID and process name
 fn get_process_info(pid: u32) -> Option<(u32, String, String)> {
@@ -762,10 +762,10 @@ async fn main() -> Result<(), anyhow::Error> {
     let bpf = Arc::new(Mutex::new(bpf));
 
     let cgroup_file = File::open(&opt.cgroup_path)?;
-    let initial_interfaces = get_all_interfaces();
+    // let initial_interfaces = get_all_interfaces();
     // attach_xdp_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_xdp_interfaces.clone()).await?;
     attach_cgroup_programs(Arc::clone(&bpf), cgroup_file).await?;
-    attach_tc_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_tc_interfaces.clone()).await?;
+    // attach_tc_programs(Arc::clone(&bpf), initial_interfaces.clone(), active_tc_interfaces.clone()).await?;
     
     // Set Permissive Mode To False just to be safe
     update_permissive_mode_flag(Arc::clone(&permissive_mode_shared), false).await?;
@@ -788,29 +788,10 @@ async fn main() -> Result<(), anyhow::Error> {
                         info!("[Kernel] Received app IDs from TUI");
                         load_app_ids( Arc::clone(&app_ids_for_id_update), incoming_app_ids).await?;
                     },
-                    FireWhalMessage::InterfaceRequest(request) => { // If the TUI requests a list of network interface
-                        info!("[Kernel] Received interface request from TUI.");
-                        let interface_list = match task::spawn_blocking(get_all_interfaces).await {
-                            Ok(list) => list,
-                            Err(e) => {
-                                warn!("[Kernel] Failed to spawn blocking task for interfaces: {}", e);
-                                vec![] // Send back an empty list on error
-                            }
-                        };
-                        
-                        let response = FireWhalMessage::InterfaceResponse(NetInterfaceResponse {
-                            source: "Firewall".to_string(), // The firewall is the source of the list
-                            interfaces: interface_list,
-                        });
-                        
-                        if let Err(e) = to_zmq_tx.send(response).await {
-                            warn!("[Kernel] Failed to send interface list: {}", e);
-                        }
-                    },
-                    FireWhalMessage::UpdateInterfaces(update) => {
+                    FireWhalMessage::LoadInterfaceState(interface_state_message) => {
                         // if update.source == "TUI" {
-                        info!("[Kernel] Received interface update from TUI {:?}.", update.interfaces);
-                        let interfaces = update.interfaces;
+                        info!("[Kernel] Received interface update from TUI {:?}.", interface_state_message.enforced_interfaces);
+                        let interfaces: Vec<String> = interface_state_message.enforced_interfaces.iter().cloned().collect();
                         // attach_xdp_programs(Arc::clone(&bpf), interfaces.clone(), active_xdp_interfaces.clone()).await?; 
                         attach_tc_programs(Arc::clone(&bpf), interfaces, active_tc_interfaces.clone()).await?;
                         //}

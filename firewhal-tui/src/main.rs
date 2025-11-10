@@ -114,11 +114,12 @@ async fn main() -> Result<(), io::Error> {
                     app_guard.debug_print.add_message(formatted_msg);
                 }
                 FireWhalMessage::InterfaceResponse(response) => {
-                    if response.source == "Firewall" {
+                    if response.source == "Daemon" {
                         // Clear vector entries
                         app_guard.available_interfaces.clear_interfaces();
                         // Add new entries
-                        for interface in response.interfaces {app_guard.available_interfaces.add_interface(interface);}
+                        for interface in response.current_interfaces.iter() {app_guard.available_interfaces.add_interface(interface.to_string());}
+                        for interface in response.interface_state.enforced_interfaces.iter() {app_guard.toggled_interfaces.insert(interface.to_string());}
                     }
                 }
                 FireWhalMessage::Pong(pong) => {   

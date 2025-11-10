@@ -130,20 +130,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             FireWhalMessage::InterfaceRequest(NetInterfaceRequest {source}) => {
                 source_component = source.clone();
                 if &source_component == "TUI" {
-                    if let Some(firewall_identity) = clients.get("Firewall") {
-                        println!("[ROUTER] Forwarding InterfaceRequest command to firewall.");
-                        router.send(firewall_identity, zmq::SNDMORE)?;
+                    if let Some(daemon_identity) = clients.get("Daemon") {
+                        println!("[ROUTER] Forwarding InterfaceRequest command to daemon.");
+                        router.send(daemon_identity, zmq::SNDMORE)?;
                         router.send(payload, 0)?;
                     } else {
-                        eprintln!("[ROUTER] Received InterfaceRequest command, but firewall client is not registered!");
+                        eprintln!("[ROUTER] Received InterfaceRequest command, but daemon client is not registered!");
                     }
                 }
             }
             // Interface Response message processing
             FireWhalMessage::InterfaceResponse(NetInterfaceResponse {source, ..}) => {
                 source_component = source.clone();
-                if source_component == "Firewall" {
-                    println!("[ROUTER] Forwarding InterfaceResponse from firewall to TUI.");
+                if source_component == "Daemon" {
+                    println!("[ROUTER] Forwarding InterfaceResponse from daemon to TUI.");
                     if let Some(tui_identity) = clients.get("TUI") {
                         router.send(tui_identity, zmq::SNDMORE)?;
                         router.send(payload, 0)?;
@@ -152,16 +152,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            // Load Interface State message processing
+            FireWhalMessage::LoadInterfaceState(_) => {
+                source_component = "Daemon".to_string();
+
+                if let Some(firewall_identity) = clients.get("Firewall") {
+                    println!("[ROUTER] Forwarding LoadInterfaceState command to firewall.");
+                    router.send(firewall_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0)?;
+                } else {
+                    eprintln!("[ROUTER] Received LoadInterfaceState command, but firewall client is not registered!");
+                }
+            }   
             // Update Interfaces message processing
             FireWhalMessage::UpdateInterfaces(update) => {
                 source_component = update.source.clone();
                 if source_component == "TUI" {
-                    if let Some(firewall_identity) = clients.get("Firewall") {
-                        println!("[ROUTER] Forwarding UpdateInterfaces command to firewall.");
-                        router.send(firewall_identity, zmq::SNDMORE)?;
+                    if let Some(daemon_identity) = clients.get("Daemon") {
+                        println!("[ROUTER] Forwarding UpdateInterfaces command to daemon.");
+                        router.send(daemon_identity, zmq::SNDMORE)?;
                         router.send(payload, 0)?
                     } else {
-                        eprintln!("[ROUTER] Received UpdateInterfaces command, but firewall client is not registered!");
+                        eprintln!("[ROUTER] Received UpdateInterfaces command, but daemon client is not registered!");
                     }
                 }
             }

@@ -20,9 +20,10 @@ use tokio::task;
 use tokio::time::{sleep, Duration};
 use serde::Deserialize;
 use toml;
+use pnet::{datalink};
 
 // Standard library imports
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::{fs, fs::File};
 use std::io::{Read, Write};
@@ -34,7 +35,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, FireWhalConfig, StatusPong, StatusUpdate, ApplicationAllowlistConfig, AppIdentity};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, zmq_client_connection};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -125,6 +126,33 @@ fn add_app_ids(path: &path::Path, app_ids_to_add: Vec<(String, String)>) -> Resu
 fn save_app_ids(path: &path::Path, config: &ApplicationAllowlistConfig) -> Result<(), Box<dyn std::error::Error>> {
     let toml_content = toml::to_string_pretty(config)?; // Serialize toml using string_pretty (makes it looks nice for humans)
     // write to file, overwriting contents
+    fs::write(path, toml_content)?;
+    Ok(())
+}
+
+// Gets a list of currently available interfaces
+fn get_all_interfaces() -> HashSet<String> {
+    datalink::interfaces()
+        .into_iter()
+        .map(|iface| iface.name)
+        .collect()
+}
+
+// Loads enforced_interfaces.toml file that contains interfaces that the firewall is currently enforcing rules on
+fn load_interface_state(path: &path::Path) -> Result<InterfaceStateConfig, Box<dyn std::error::Error>> {
+    let toml_content = fs::read_to_string(path)?; // Use ? to return error if read fails
+    let mut interface_state: InterfaceStateConfig = toml::from_str(&toml_content)?; // Use ? to return error if parse fails
+    // Remove interfaces that no longer exist
+    let current_interfaces = get_all_interfaces();
+    interface_state.enforced_interfaces.retain(|x| current_interfaces.contains(x));
+    Ok(interface_state)
+}
+
+fn save_interface_state(path: &path::Path, interfaces: &HashSet<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let interface_state = InterfaceStateConfig {
+        enforced_interfaces: interfaces.clone(),
+    };
+    let toml_content = toml::to_string_pretty(&interface_state)?;
     fs::write(path, toml_content)?;
     Ok(())
 }
@@ -357,6 +385,21 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                                     eprintln!("[Supervisor] FAILED to load app ids: {}", e);
                                 }
                             }
+                            // Load interface state and send to userspace loader
+                            let interface_state_path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
+                            match load_interface_state(interface_state_path) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::LoadInterfaceState(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send interface state: {}", e);
+                                    } else {
+                                        println!("[Supervisor] Interface state successfully sent to firewall.");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load interface state: {}", e);
+                                }
+                            }
                         }
                     }
                     FireWhalMessage::Ping(_) => {
@@ -464,8 +507,48 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
 
                         }
                     }
+                    FireWhalMessage::InterfaceRequest(message) => {
+                        println!("[Superivsor] Received InterfaceRequest command from TUI");
+                        let path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
+                        match load_interface_state(path) {
+                            Ok(interface_state) => {
+                                let msg = FireWhalMessage::InterfaceResponse(
+                                    NetInterfaceResponse {
+                                        source: "Daemon".to_string(),
+                                        interface_state: interface_state,
+                                        current_interfaces: get_all_interfaces()
+                                    }
+                                );
+                                if let Err(e) = to_zmq_tx.send(msg).await {
+                                    eprintln!("[Supervisor] Failed to send interface list: {}", e);
+                                } else {
+                                    println!("[Supervisor] Interface list successfully sent to TUI.");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Supervisor] Failed to load interface list: {}", e);
+                            }
+                        }
+                    }
+                    FireWhalMessage::UpdateInterfaces(message) => {
+                        println!("[Supervisor] Received UpdateInterfaces command from TUI");
+                        let path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
+                        save_interface_state(path, &message.interfaces)?;
+                        match load_interface_state(path) {
+                            Ok(interface_state) => {
+                                let msg = FireWhalMessage::LoadInterfaceState(interface_state);
+                                if let Err(e) = to_zmq_tx.send(msg).await {
+                                    eprintln!("[Supervisor] Failed to send LoadInterfaceState message to Firewall.")
+                                } else {
+                                    println!("[Supervisor] Successfully sent LoadInterfaceState message to Firewall.")
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Supervisor] Failed to load interface list: {}", e);
+                            }
+                        }
+                    }
                     _ => {
-
                     }
                 }
             },
