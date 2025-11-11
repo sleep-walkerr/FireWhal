@@ -20,7 +20,9 @@ pub struct ProcessLineageTupleList {
 
 impl ProcessLineageTupleList {
  pub fn add_tuple(&mut self, tuple: Vec<(String, String)>) {
-    self.process_lineage_tuple_list.push(tuple);
+    if !self.process_lineage_tuple_list.contains(&tuple) {
+        self.process_lineage_tuple_list.push(tuple);
+    }
  }
  pub fn clear_interfaces(&mut self) {
     self.process_lineage_tuple_list.clear();
