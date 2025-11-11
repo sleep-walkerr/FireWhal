@@ -26,9 +26,6 @@ hash = "debb04a345a1cfcba2992cbcef39f7c3529f54e4669bd34edf9b2dbd951838c6"
 path = "/opt/vscodium-bin/codium"
 hash = "de3df78022e8e63941de42da1acca55268eef022540eabfb8a3071760d1c0409"
 
-[apps.curl]
-path = "/usr/bin/curl"
-hash = "b453174c3ab08455046e292aee8d01ff5179859fbb66f4ae0cbf726e4fe4f6fc"
 
 [apps.ssh]
 path = "/usr/bin/ssh"

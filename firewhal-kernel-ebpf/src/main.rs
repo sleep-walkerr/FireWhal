@@ -431,27 +431,56 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
      info!(&ctx, "[Kernel] [egress_tc] ConnectionKey: {} {} {} {} {}", debug_saddr, debug_daddr, debug_sport, debug_dport, incoming_connection_key.protocol as u8);
      // Lookup in TRUSTED_CONNECTIONS_MAP
      if let Some(tgid_match) = unsafe { TRUSTED_CONNECTIONS_MAP.get(&incoming_connection_key) } {
-        info!(&ctx, "[Kernel] [egress_tc] Trusted Connection for {}, continuing.", *tgid_match);
-        // Already approved connection, do nothing
-     } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&incoming_connection_key) } {
+        
+        // --- YOUR NEW LOGIC GOES HERE ---
+        // Check if the associated PID is *still* trusted
+        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
+            if pid_info.action == Action::Allow {
+                // PID is still trusted, refresh the connection's timestamp in the LRU map
+                unsafe { TRUSTED_CONNECTIONS_MAP.insert(&incoming_connection_key, tgid_match, 0) }.map_err(|_| ())?;
+                info!(&ctx, "[Kernel] [egress_tc] Trusted Connection for TGID {} refreshed.", *tgid_match);
+                // Fall through to the final Ok(1) to allow the packet
+            } else {
+                // PID is in the map, but is explicitly DENIED. Block the packet.
+                info!(&ctx, "[Kernel] [egress_tc] Connection for TGID {} is explicitly DENIED. Blocking.", *tgid_match);
+                return Ok(TC_ACT_SHOT);
+            }
+        } else {
+            // RACE CONDITION HANDLED:
+            // The connection is known, but the PID (TGID) is no longer in the trusted map.
+            // This is a stale connection. Block it and remove it.
+            info!(&ctx, "[Kernel] [egress_tc] Stale connection for untrusted TGID {}. Blocking and removing.", *tgid_match);
+            unsafe { TRUSTED_CONNECTIONS_MAP.remove(&incoming_connection_key) }.map_err(|_| ())?;
+            return Ok(TC_ACT_SHOT);
+        }
+        
+    // 2. Check if the connection is new and pending verification
+    } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&incoming_connection_key) } {
         info!(&ctx, "[Kernel] [egress_tc] Pending Connection for {}, checking.", *tgid_match);
-        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&tgid_match) } {
+        
+        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
             if pid_info.action == Action::Allow {
                 info!(&ctx, "[Kernel] [egress_tc] Pending Connection Allowed {}", *tgid_match);
-            //Let the connection pass
+                // Move from PENDING to TRUSTED
+                unsafe {
+                    TRUSTED_CONNECTIONS_MAP.insert(&incoming_connection_key, tgid_match, 0).map_err(|_| ())?;
+                    PENDING_CONNECTIONS_MAP.remove(&incoming_connection_key).map_err(|_| ())?;
+                }
+                // Fall through to the final Ok(1) to allow the packet
             } else { 
-                info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked {}", *tgid_match);
-                return Ok(TC_ACT_SHOT)
-             } // Block the connection
+                info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked (PID Denied) {}", *tgid_match);
+                return Ok(TC_ACT_SHOT); // Block the connection
+             }
         } else {
-            info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked, No PID Found.");
-            return Ok(TC_ACT_SHOT)
+            info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked (PID Not Found).");
+            return Ok(TC_ACT_SHOT);
         }
-     } else {
-        info!(&ctx, "[Kernel] [egress_tc] Connection Not Found in Either Map");
-        // Not found in either map, default to block
-        return Ok(TC_ACT_SHOT)
-     }
+    
+    // 3. Not found in either map
+    } else {
+        info!(&ctx, "[Kernel] [egress_tc] Connection Not Found in Either Map. Blocking.");
+        return Ok(TC_ACT_SHOT);
+    }
 
     
     

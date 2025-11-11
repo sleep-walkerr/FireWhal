@@ -215,16 +215,6 @@ async fn main() -> Result<(), io::Error> {
                                 //app_guard.process_lineage_tuple_list.clear_interfaces();
                             }
                             AppScreen::MainMenu => {
-                                // FIX ME, permissive mode will have a toggle button in its interface, for now, just send the disable message when you swap to main
-                                let disable_message = FireWhalMessage::DisablePermissiveMode(firewhal_core::PermissiveModeDisable { component: ("TUI".to_string()) });
-                                // Send enable message to enable permissive mode
-                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
-                                    if let Err(e) = zmq_sender.try_send(disable_message) {
-                                        _ = &app_guard.debug_print.add_message(format!("Failed to send EnablePermissiveMode message: {}", e));
-                                    }
-                                } else { _ = &app_guard.debug_print.add_message("Permissive Mode found no zmq sender".to_string()); }
-
-
                                 // Reset Status Values
                                 app_guard.main_menu.reset_status_values();
                                 // Send ping to components
@@ -235,6 +225,14 @@ async fn main() -> Result<(), io::Error> {
                                 } else { _ = &app_guard.debug_print.add_message("Main Menu found no zmq sender".to_string()); }
                             }
                             AppScreen::RuleManagement => {
+                                // FIX ME, permissive mode will have a toggle button in its interface, for now, just send the disable message when you swap to main
+                                let disable_message = FireWhalMessage::DisablePermissiveMode(firewhal_core::PermissiveModeDisable { component: ("TUI".to_string()) });
+                                // Send enable message to enable permissive mode
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(disable_message) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send EnablePermissiveMode message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Permissive Mode found no zmq sender".to_string()); }
                                 // Send rule request to daemon
                                 if let Some(zmq_sender) = &app_guard.to_zmq_tx {
                                     if let Err(e) = zmq_sender.try_send(FireWhalMessage::RulesRequest(firewhal_core::TUIRulesRequest { component: "TUI".to_string() })) {

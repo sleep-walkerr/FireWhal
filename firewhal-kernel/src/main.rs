@@ -48,7 +48,8 @@ use firewhal_core::{
     StatusUpdate,
     PermissiveModeEnable,
     PermissiveModeDisable,
-    ProcessLineageTuple
+    ProcessLineageTuple,
+    ProcessInfo
 };
 use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey, ConnectionKey};
 
@@ -207,52 +208,6 @@ async fn attach_tc_programs(
     Ok(())
 }
 
-// async fn attach_xdp_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, updated_interfaces: Vec<String>, active_xdp_programs: Arc<Mutex<ActiveXdpInterfaces>>) -> Result<(), anyhow::Error>{ // This should be renamed to represent TC program attachment
-//     let mut bpf = bpf.lock().await;
-//     let mut active_xdp_programs = active_xdp_programs.lock().await;
-
-//     // XDP 
-//     info!("[Kernel] Applying XDP programs to interfaces {}...", updated_interfaces.join(","));
-//     let xdp_program: &mut Xdp = bpf.program_mut("firewhal_xdp").unwrap().try_into().unwrap();
-//     let _ = xdp_program.load();
-
-//     //Iterate
-//     let new_set: HashSet<&String> = updated_interfaces.iter().collect();
-
-//     let interfaces_to_remove: Vec<String> = active_xdp_programs.active_links.keys().filter(|&iface_name| !updated_interfaces.contains(iface_name)).cloned().collect();
-    
-//     // Now, iterate through that list, remove each from the map, and detach.
-//     info!("Interfaces to Remove: {:?}", interfaces_to_remove);
-//     for iface in interfaces_to_remove {
-//         // .remove() gives us ownership of the XdpLinkId.
-//         if let Some(link_id) = active_xdp_programs.active_links.remove(&iface) {
-//             info!("[Kernel] Detaching XDP from '{}'...", iface);
-//             if let Err(e) = xdp_program.detach(link_id) {
-//                 warn!("[Kernel] Failed to detach from '{}': {}", iface, e);
-//             }
-//         }
-//     }
-
-//     // --- 2. Attach to new interfaces that were not previously active ---
-//     for iface in updated_interfaces {
-//         // If our map of active links DOES NOT already contain this interface, attach it.
-//         if !active_xdp_programs.active_links.contains_key(&iface) {
-//             info!("[Kernel] Attaching XDP to '{}'...", iface);
-//             match xdp_program.attach(&iface, XdpFlags::default()) {
-//                 Ok(link_id) => {
-//                     // Success! Save the new link_id in our map.
-//                     active_xdp_programs.active_links.insert(iface.clone(), link_id);
-//                 }
-//                 Err(e) => {
-//                     warn!("[Kernel] Failed to attach to '{}': {}", iface, e);
-//                 }
-//             }
-//         }
-//     }
-//     info!("[Kernel] XDP programs applied.");
-//     Ok(())
-// }
-
 async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file: File) -> Result<(), anyhow::Error>{
     let mut bpf = bpf.lock().await;
     // CGROUP
@@ -382,13 +337,64 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfi
 }
 
 // Function to load app identities
-async fn load_app_ids(app_ids: Arc<Mutex<HashMap<PathBuf, String>>>, config: ApplicationAllowlistConfig) -> Result<(), anyhow::Error> {
-    let mut app_ids = app_ids.lock().await;
-    app_ids.clear(); // clear first then insert new app_ids
-    for app_id in config.apps {
-        info!("[Kernel] Loaded app {}:{:?}", app_id.0, app_id.1);
-        app_ids.insert(app_id.1.path, app_id.1.hash);
+async fn load_app_ids(
+    app_ids_arc: Arc<Mutex<HashMap<PathBuf, String>>>,
+    cache_arc: Arc<Mutex<HashMap<u32, ProcessInfo>>>, // The userspace cache
+    trusted_pids_arc: Arc<Mutex<AyaHashMap<MapData, u32, PidTrustInfo>>>, // The kernel map
+    config: ApplicationAllowlistConfig,
+) -> Result<(), anyhow::Error> {
+    
+    // --- 1. Build the new allowlist in memory ---
+    let mut new_app_ids = HashMap::<PathBuf, String>::new();
+    for (app_id_key, app_identity) in config.apps {
+        info!("[Kernel] Loading new app identity for app_id: '{}', path: {:?}", app_id_key, app_identity.path);
+        new_app_ids.insert(app_identity.path, app_identity.hash);
     }
+
+    // --- 2. Lock all the maps we need to modify ---
+    let mut app_ids_guard = app_ids_arc.lock().await;
+    let mut cache_guard = cache_arc.lock().await;
+    let mut trusted_pids_guard = trusted_pids_arc.lock().await;
+
+    // --- 3. Find Stale TGIDs ---
+    // Iterate over our userspace cache of *active* processes
+    let mut stale_tgids = Vec::new();
+    for (tgid, process_info) in cache_guard.iter() {
+        
+        // Check if the path for this active TGID is in the *new* allowlist
+        match new_app_ids.get(&process_info.path) {
+            Some(new_hash) => {
+                // Path is still in the list. Now check if the hash has changed.
+                if *new_hash != process_info.hash {
+                    // The hash has changed! This process is now stale/untrusted.
+                    info!("[Kernel] Stale PID (Hash Mismatch): {}. Marking for removal.", tgid);
+                    stale_tgids.push(*tgid);
+                }
+                // If hash matches, do nothing. The process is still trusted.
+            }
+            None => {
+                // Path is no longer in the allowlist at all.
+                info!("[Kernel] Stale PID (Path Removed): {}. Marking for removal.", tgid);
+                stale_tgids.push(*tgid);
+            }
+        }
+    }
+
+    // --- 4. Prune Stale TGIDs from both caches ---
+    for tgid in stale_tgids {
+        // Remove from userspace cache
+        cache_guard.remove(&tgid);
+        
+        // Remove from eBPF kernel map
+        if let Err(e) = trusted_pids_guard.remove(&tgid) {
+            warn!("[Kernel] Failed to remove stale TGID {} from TRUSTED_PIDS map: {}", tgid, e);
+        }
+    }
+
+    // --- 5. Finally, update the main allowlist with the new one ---
+    *app_ids_guard = new_app_ids;
+
+    info!("[Kernel] App allowlist reloaded and stale PIDs pruned.");
     Ok(())
 }
 
@@ -489,7 +495,15 @@ async fn main() -> Result<(), anyhow::Error> {
     let app_ids_for_event_processing = Arc::clone(&app_ids);
     let app_ids_for_id_update = Arc::clone(&app_ids);
 
+    // Create active process cache, for removal of trusted PIDs and connections when the app list changes or when permissive mode is used
+    let active_process_cache: Arc<Mutex<HashMap<u32, ProcessInfo>>> = 
+        Arc::new(Mutex::new(HashMap::new()));
+    let active_process_cache_for_event_processing = Arc::clone(&active_process_cache);
+    let active_process_cache_for_id_update = Arc::clone(&active_process_cache);
+    
+    
 
+    // Initialize event logger
     if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
 
     // 2. Take ownership of the EVENTS map and move it to the event handler task.
@@ -501,6 +515,8 @@ async fn main() -> Result<(), anyhow::Error> {
     let trusted_pids_aya_map = AyaHashMap::<_, u32, PidTrustInfo>::try_from(trusted_pids_map_raw)?;
     // Create a sharable reference to the map
     let trusted_pids_shared = Arc::new(tokio::sync::Mutex::new(trusted_pids_aya_map));
+    let trusted_pids_for_id_update = Arc::clone(&trusted_pids_shared);
+
 
 
     // Take ownership of PENDING AND TRUSTED CONNECTIONS MAPS
@@ -539,37 +555,43 @@ async fn main() -> Result<(), anyhow::Error> {
             let pending_connections_for_task = Arc::clone(&pending_connections_shared);
             let trusted_connections_for_task = Arc::clone(&trusted_connections_shared);
             let permissive_mode_for_task = Arc::clone(&permissive_mode_for_cpu);
-
+            let cache_for_task = Arc::clone(&active_process_cache_for_event_processing);
             
 
             tokio::spawn(async move {
-                
-
-                
                 let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
                 loop {
                     let events = buf.read_events(&mut buffers).await.unwrap();
                     for i in 0..events.read {
-                        if let Ok(kernel_event) = read_from_buffer::<KernelEvent>(&buffers[i]) { // modify this to accept KernelEvents, which could be a connection attempt or a block event for notifications
+                        if let Ok(kernel_event) = read_from_buffer::<KernelEvent>(&buffers[i]) {
                             
                             let pid = kernel_event.tgid;
 
+                            // --- 1. Top-Level Cache Check (This is the only one we need) ---
+                            { // Scoped lock
+                                let cache_guard = cache_for_task.lock().await;
+                                if cache_guard.contains_key(&pid) {
+                                    // info!("[Events] CACHE_HIT: TGID {} already processed.", pid);
+                                    continue; // Skip to the next event
+                                }
+                            } // Lock released
+                            info!("[Events] CACHE_MISS: New TGID {} detected. Verifying...", pid);
+
+                            // --- 2. Gather Process Info (This is now only run on a cache miss) ---
                             let (comm_slice, comm_str) = {
                                 let null_pos = kernel_event.comm.iter().position(|&c| c == 0).unwrap_or(kernel_event.comm.len());
                                 let slice = &kernel_event.comm[0..null_pos];
                                 (slice, String::from_utf8_lossy(slice))
                             };
 
-                            // Build a process lineage string
                             let mut lineage_info = Vec::new();
-                            let mut lineage_paths = Vec::<PathBuf>::new(); // Change to hashmap for speed in the future
+                            let mut lineage_paths = Vec::<PathBuf>::new();
                             let mut current_pid = pid;
-                            let mut visited_pids = HashSet::new(); // To prevent infinite loops in case of /proc anomalies
+                            let mut visited_pids = HashSet::new();
 
-                            // Traverse up to 10 levels to avoid infinite loops and keep logs reasonable
                             for _ in 0..10 { 
                                 if current_pid == 0 || current_pid == 1 || visited_pids.contains(&current_pid) {
-                                    break; // Stop at init (PID 1), kernel (PID 0), or if we've seen this PID
+                                    break;
                                 }
                                 visited_pids.insert(current_pid);
 
@@ -588,16 +610,16 @@ async fn main() -> Result<(), anyhow::Error> {
                                 }
                             }
 
-                            // Reverse the lineage so the root parent is first
                             lineage_info.reverse();
                             let lineage_string = if lineage_info.is_empty() {
                                 format!("No lineage info for PID {}", pid)
                             } else {
                                 lineage_info.join(" -> ")
                             };
+
+                            // --- 3. Match on Event Type (Now that we have all info) ---
                             match kernel_event.event_type {
                                 EventType::ConnectionAttempt => {
-                                    // Get key from payload 
                                     let connection_key: ConnectionKey = unsafe { kernel_event.payload.connection_attempt.key };
                                     
                                     info!(
@@ -605,111 +627,130 @@ async fn main() -> Result<(), anyhow::Error> {
                                         kernel_event.pid,
                                         kernel_event.tgid,
                                         comm_str,
-                                        Ipv4Addr::from(u32::from_be(connection_key.saddr)),
-                                        connection_key.sport,
-                                        Ipv4Addr::from(u32::from_be(connection_key.daddr)),
-                                        connection_key.dport,
+                                        Ipv4Addr::from(u32::from_le(connection_key.saddr)), // Use from_le for logging
+                                        u16::from_le(connection_key.sport),             // Use from_le for logging
+                                        Ipv4Addr::from(u32::from_le(connection_key.daddr)), // Use from_le for logging
+                                        u16::from_le(connection_key.dport),             // Use from_le for logging
                                         connection_key.protocol,
                                         lineage_string
                                     );
-                                    // Now that this is working, these are the next steps
-                                    // First a prototype:
-                                    // Send process info here to be parsed, assume that all applications are a part of the application allowlist
-                                    // Insert their PID (really the TGID) into the map of trusted PIDs\
-                                    // TGID is used as it is the ID for all processes for a grouping of threads associated with one process
-                                    // Then from within the ebpf code, check the pid to see if it's in the list after the info has been checked here
-                                    // If it's there, allow egress for that pid
+                                    
+                                    // --- THE REDUNDANT CACHE CHECK HAS BEEN REMOVED FROM HERE ---
 
-                                    // So far, final path matching works, now lets test blocking or allowing based on that
-                                    lineage_paths.reverse();
-                                    let app_ids_guard = app_ids_for_task.lock().await;
-                                    // Data structure for permissive mode messages 
-                                    let mut permissive_app_ids_defined = Vec::<(String, String)>::new();
+                                    // --- Check Permissive Mode Flag ---
+                                    let permissive_flag = match get_permissive_mode_value(Arc::clone(&permissive_mode_for_task)).await {
+                                        Ok(flag) => flag,
+                                        Err(e) => {
+                                            warn!("[Events] Failed to get permissive mode flag: {}. Defaulting to OFF.", e);
+                                            0
+                                        }
+                                    };
 
-                                    if let Ok(permissive_flag) = get_permissive_mode_value(Arc::clone(&permissive_mode_for_task)).await {
-                                            for app_path in lineage_paths {        
-                                                // Match path found in app_ids
-                                                if let Some(app_hash) = app_ids_guard.get(&app_path) {
-                                                    // Hash application at path here, then compare to app_hash
-                                                    // Get Hash
-                                                    let current_hash = calculate_file_hash(app_path.clone()).await.unwrap();
-    
-                                                    info!("[Kernel] [AppMatching] Hash for [Path:{}, PID:{}]: {}", app_path.to_str().unwrap(), kernel_event.tgid, current_hash);
-                                                    if *app_hash == current_hash {
-                                                        if let Some(debug_app_path) = app_path.clone().to_str() {
-                                                            info!("[Kernel] [AppMatching] MATCH FOUND FOR {}:{}", debug_app_path, app_hash);
-                                                        } else {
-                                                            info!("[Kernel] [AppMatching] MATCH FOUND but path couldn't be parsed for {}.", app_hash);
-                                                        }
-                                                        let trust_info = PidTrustInfo {
-                                                            action: Action::Allow,
-                                                            last_seen_ns: 0,
-                                                        };
-                                                        // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
-                                                        let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                                        let mut trusted_connections = trusted_connections_for_task.lock().await;
-                                                        let mut pending_connections = pending_connections_for_task.lock().await;
-                                                        // Insert PID into trusted pids map
-                                                        if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
-                                                            warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
-                                                        } else {
-                                                            info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
-                                                        }
-                                                        // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
-                                                        if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
-                                                            //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
-                                                        } else {
-                                                            //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
-                                                        }
-                                                        // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
-                                                        if let Err(e) = pending_connections.remove(&connection_key) {
-                                                            
-                                                        }
-                                                    }
-                                                    return;
-                                                } else if permissive_flag == 1 {   
-                                                    let current_hash = calculate_file_hash(app_path.clone()).await.unwrap();
-                                                    info!("[Kernel] [Permissive] Hash for [Path:{}, PID:{}]: {}", app_path.to_str().unwrap(), kernel_event.tgid, current_hash);
-                                                    permissive_app_ids_defined.push((app_path.to_str().unwrap().to_string(), current_hash)); 
+                                    // --- 4. Make Decision (Permissive or Strict) ---
+                                    let (decision, proc_info) = if permissive_flag == 1 {
+                                        // --- 4a. PERMISSIVE MODE IS ON ---
+                                        info!("[Events] PERMISSIVE_MODE: Allowing new TGID {}", pid);
+                                        lineage_paths.reverse();
+                                        let mut permissive_app_ids_defined = Vec::<(String, String)>::new();
+                                        let mut final_path = PathBuf::new();
 
-                                                    let trust_info = PidTrustInfo {
-                                                        action: Action::Allow,
-                                                        last_seen_ns: 0,
-                                                    };
-                                                    // This lock shouldn't cause a deadlock due to lifetime ending directly after insertion
-                                                    let mut trusted_pids = trusted_pids_for_task.lock().await;
-                                                    let mut trusted_connections = trusted_connections_for_task.lock().await;
-                                                    let mut pending_connections = pending_connections_for_task.lock().await;
-                                                    // Insert PID into trusted pids map
-                                                    if let Err(e) = trusted_pids.insert(&pid, trust_info, 0) { 
-                                                        warn!("[Kernel] [Permissive] Failed to insert trusted PID {}: {}", pid, e);
-                                                    } else {
-                                                        info!("[Kernel] [Permissive] Successfully inserted trusted PID: {}", pid);
-                                                    }
-                                                    // Insert ConnectionKey into TRUSTED_CONNECTIONS_MAP   
-                                                    if let Err(e) = trusted_connections.insert(&connection_key, kernel_event.tgid, 0) { 
-                                                        //warn!("[Kernel] [AppMatching] Failed to insert trusted PID {}: {}", pid, e);
-                                                    } else {
-                                                        //info!("[Kernel] [AppMatching] Successfully inserted trusted PID: {}", pid);
-                                                    }
-                                                    // Remove ConnectionKey from PENDING_CONNECTIONS_MAP
-                                                    if let Err(e) = pending_connections.remove(&connection_key) {
-                                                        
-                                                    }           
+                                        for app_path in &lineage_paths {
+                                            if let Ok(current_hash) = calculate_file_hash(app_path.clone()).await {
+                                                permissive_app_ids_defined.push((
+                                                    app_path.to_string_lossy().into_owned(),
+                                                    current_hash.clone()
+                                                ));
+                                                if final_path.as_os_str().is_empty() {
+                                                    final_path = app_path.clone();
                                                 }
                                             }
-                                        if permissive_flag == 1 {
-                                            let path_tuple_to_send = 
-                                                ProcessLineageTuple {
-                                                    component: "Firewall".to_string(),
-                                                    lineage_tuple: permissive_app_ids_defined.clone()
-                                                };
-                                            
-                                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::PermissiveModeTuple(path_tuple_to_send)).await {
-                                                warn!("[Events] Failed to send block event: {}", e);
+                                        }
+                                        
+                                        let path_tuple_to_send = ProcessLineageTuple {
+                                            component: "Firewall".to_string(),
+                                            lineage_tuple: permissive_app_ids_defined,
+                                        };
+                                        if let Err(e) = task_zmq_tx.send(FireWhalMessage::PermissiveModeTuple(path_tuple_to_send)).await {
+                                            warn!("[Events] Failed to send permissive mode tuple: {}", e);
+                                        }
+
+                                        (Action::Allow, ProcessInfo {
+                                            path: final_path,
+                                            hash: "PERMISSIVE_ALLOW".to_string(),
+                                            action: firewhal_core::Action::Allow,
+                                        })
+                                    } else {
+                                        // --- 4b. PERMISSIVE MODE IS OFF ---
+                                        info!("[Events] Verifying TGID {} against allowlist...", pid);
+                                        lineage_paths.reverse(); 
+                                        
+                                        let mut decision = Action::Deny;
+                                        let mut matched_path = PathBuf::new();
+                                        let mut matched_hash = String::new();
+
+                                        let app_ids_guard = app_ids_for_task.lock().await;
+                                        for app_path in &lineage_paths {
+                                            if let Some(expected_hash) = app_ids_guard.get(app_path) {
+                                                info!("[Verify] Path match for TGID {}: {}. Checking hash.", pid, app_path.display());
+                                                
+                                                match calculate_file_hash(app_path.clone()).await {
+                                                    Ok(actual_hash) => {
+                                                        if expected_hash == &actual_hash {
+                                                            info!("[Verify] Hash MATCH for {}. Allowing.", app_path.display());
+                                                            decision = Action::Allow;
+                                                            matched_path = app_path.clone();
+                                                            matched_hash = actual_hash;
+                                                        } else {
+                                                            info!("[Verify] HASH MISMATCH for {}. Blocking.", app_path.display());
+                                                            decision = Action::Deny;
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        info!("[Verify] Failed to hash {}: {}. Blocking.", app_path.display(), e);
+                                                        decision = Action::Deny;
+                                                    }
+                                                }
+                                                break; 
                                             }
                                         }
-                                    } else { warn!("[Events] Failed to get permissive mode flag.") }
+                                        
+                                        let core_action = match decision {
+                                            Action::Allow => firewhal_core::Action::Allow,
+                                            Action::Deny => firewhal_core::Action::Deny,
+                                        };
+
+                                        (decision, ProcessInfo {
+                                            path: matched_path,
+                                            hash: matched_hash,
+                                            action: core_action
+                                        })
+                                    };
+
+                                    // --- 5. Update Caches and Kernel Maps ---
+                                    let trust_info = PidTrustInfo {
+                                        action: decision,
+                                        last_seen_ns: 0,
+                                    };
+                                    
+                                    { // Scoped block for locks
+                                        let mut cache_guard = cache_for_task.lock().await;
+                                        let mut trusted_pids_guard = trusted_pids_for_task.lock().await;
+
+                                        cache_guard.insert(pid, proc_info);
+                                        
+                                        if let Err(e) = trusted_pids_guard.insert(&pid, trust_info, 0) {
+                                            warn!("[Kernel] Failed to insert trust for PID {}: {}", pid, e);
+                                        } else {
+                                            info!("[Kernel] Inserted trust for PID {}: {:?}", pid, trust_info.action);
+                                        }
+                                    }
+
+                                    if decision == Action::Allow {
+                                        let mut trusted_connections = trusted_connections_for_task.lock().await;
+                                        let mut pending_connections = pending_connections_for_task.lock().await;
+                                        let _ = trusted_connections.insert(&connection_key, pid, 0);
+                                        let _ = pending_connections.remove(&connection_key);
+                                    }
                                 }
                                 EventType::BlockEvent => {
                                     let payload = unsafe { kernel_event.payload.block_event };
@@ -784,9 +825,9 @@ async fn main() -> Result<(), anyhow::Error> {
                     FireWhalMessage::LoadRules(config) => {
                         apply_ruleset(Arc::clone(&bpf), config).await?;
                     },
-                    FireWhalMessage::LoadAppIds(incoming_app_ids) => {
+                    FireWhalMessage::LoadAppIds(incoming_app_ids_config) => {
                         info!("[Kernel] Received app IDs from TUI");
-                        load_app_ids( Arc::clone(&app_ids_for_id_update), incoming_app_ids).await?;
+                        load_app_ids( Arc::clone(&app_ids_for_id_update), Arc::clone(&active_process_cache_for_id_update), Arc::clone(&trusted_pids_for_id_update), incoming_app_ids_config).await?;
                     },
                     FireWhalMessage::LoadInterfaceState(interface_state_message) => {
                         // if update.source == "TUI" {

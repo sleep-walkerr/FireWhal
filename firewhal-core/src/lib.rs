@@ -138,9 +138,14 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
 
 
 // DATA STRUCTURES
+#[derive(Clone, Debug, PartialEq, Eq, Hash)] 
+pub struct ProcessInfo {
+    pub path: PathBuf,
+    pub hash: String, // Or whatever unique ID you get for the executable
+    pub action: Action, // The decision (Allow/Deny) made for this process
+}
 
-
-#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "PascalCase")]
 pub enum Action {
     Allow,
