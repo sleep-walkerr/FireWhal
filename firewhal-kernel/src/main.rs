@@ -472,6 +472,120 @@ async fn get_permissive_mode_value(
     Ok(permissive_flag)
 }
 
+async fn prune_denied_pids(
+    trusted_pids_map_arc: Arc<Mutex<AyaHashMap<MapData, u32, PidTrustInfo>>>,
+    active_process_cache_arc: Arc<Mutex<HashMap<u32, ProcessInfo>>>
+) -> Result<(), anyhow::Error> {
+    
+    info!("[Kernel] Pruning all 'Deny' entries from caches...");
+    
+    let mut stale_tgids_kernel = Vec::new();
+    let mut stale_tgids_userspace = Vec::new();
+
+    // 1. Find stale PIDs in the kernel map
+    {
+        let mut trusted_pids_guard = trusted_pids_map_arc.lock().await;
+        for entry in trusted_pids_guard.iter() {
+            if let Ok((tgid, info)) = entry {
+                if info.action == Action::Deny {
+                    stale_tgids_kernel.push(tgid);
+                }
+            }
+        }
+        
+        for tgid in stale_tgids_kernel {
+            let _ = trusted_pids_guard.remove(&tgid);
+        }
+    } // Kernel map lock released
+
+    // 2. Find stale PIDs in the userspace cache
+    {
+        let mut cache_guard = active_process_cache_arc.lock().await;
+        for (tgid, info) in cache_guard.iter() {
+            if info.action == firewhal_core::Action::Deny {
+                stale_tgids_userspace.push(*tgid);
+            }
+        }
+
+        for tgid in stale_tgids_userspace {
+            cache_guard.remove(&tgid);
+        }
+    } // Userspace cache lock released
+    
+    info!("[Kernel] Pruning complete.");
+    Ok(())
+}
+
+/// Wipes all kernel and userspace trust caches.
+/// Called when permissive mode is disabled to force re-verification of all processes.
+async fn on_disable_permissive_mode(
+    trusted_pids_map_arc: Arc<Mutex<AyaHashMap<MapData, u32, PidTrustInfo>>>,
+    trusted_connections_map_arc: Arc<Mutex<AyaHashMap<MapData, ConnectionKey, u32>>>,
+    pending_connections_map_arc: Arc<Mutex<AyaHashMap<MapData, ConnectionKey, u32>>>,
+    active_process_cache_arc: Arc<Mutex<HashMap<u32, ProcessInfo>>>,
+) -> Result<(), anyhow::Error> {
+    
+    info!("[Kernel] Permissive mode disabled. Clearing all trust caches...");
+
+    // 1. Clear the kernel's TRUSTED_PIDS map
+    // We must iterate and remove, as eBPF maps don't have a `.clear()`
+    {
+        let mut trusted_pids_guard = trusted_pids_map_arc.lock().await;
+        
+        let keys: Vec<u32> = trusted_pids_guard.iter()
+            .filter_map(|result| result.ok())
+            .map(|(key, _value)| key)
+            .collect();
+
+        for key in keys {
+            if let Err(e) = trusted_pids_guard.remove(&key) {
+                warn!("[Kernel] Failed to remove PID {} from TRUSTED_PIDS map: {}", key, e);
+            }
+        }
+        info!("[Kernel] TRUSTED_PIDS map cleared.");
+    }
+
+    // 2. Clear the kernel's TRUSTED_CONNECTIONS_MAP
+    {
+        let mut trusted_connections_guard = trusted_connections_map_arc.lock().await;
+        
+        let keys: Vec<ConnectionKey> = trusted_connections_guard.iter()
+            .filter_map(|r| r.ok())
+            .map(|(k, _)| k)
+            .collect();
+            
+        for key in keys {
+            let _ = trusted_connections_guard.remove(&key); // Ignore errors
+        }
+        info!("[Kernel] TRUSTED_CONNECTIONS_MAP cleared.");
+    }
+
+    // 3. Clear the kernel's PENDING_CONNECTIONS_MAP
+    {
+        let mut pending_connections_guard = pending_connections_map_arc.lock().await;
+        
+        let keys: Vec<ConnectionKey> = pending_connections_guard.iter()
+            .filter_map(|r| r.ok())
+            .map(|(k, _)| k)
+            .collect();
+
+        for key in keys {
+            let _ = pending_connections_guard.remove(&key); // Ignore errors
+        }
+        info!("[Kernel] PENDING_CONNECTIONS_MAP cleared.");
+    }
+
+    // 4. Clear your userspace cache (this one *does* have .clear())
+    {
+        let mut active_cache_guard = active_process_cache_arc.lock().await;
+        active_cache_guard.clear();
+        info!("[Kernel] Userspace ActiveProcessCache cleared.");
+    }
+
+    info!("[Kernel] All caches cleared. Re-verification will occur on next connection.");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse(); // Remove later
@@ -528,6 +642,12 @@ async fn main() -> Result<(), anyhow::Error> {
     // Create a sharable reference to the maps
     let pending_connections_shared = Arc::new(tokio::sync::Mutex::new(pending_connections_map));
     let trusted_connections_shared = Arc::new(tokio::sync::Mutex::new(trusted_connections_map));
+    let trusted_connections_for_id_update = Arc::clone(&trusted_connections_shared);
+
+    // Create a reference of pending connections for permissive and app id update
+    let pending_connections_for_id_update = Arc::clone(&pending_connections_shared);
+
+
 
     // Get map for permissive mode
     let permissive_mode_map_raw = bpf.take_map("PERMISSIVE_MODE_ENABLED").ok_or_else(|| anyhow::anyhow!("Failed to find PERMISSIVE_MODE_ENABLED map"))?;
@@ -850,9 +970,19 @@ async fn main() -> Result<(), anyhow::Error> {
                     },
                     FireWhalMessage::EnablePermissiveMode(_) => { 
                         update_permissive_mode_flag(Arc::clone(&permissive_mode_for_main_loop), true).await?;
+                        prune_denied_pids(
+                            Arc::clone(&trusted_pids_for_id_update),
+                            Arc::clone(&active_process_cache_for_id_update) // Make sure you have a clone for this
+                        ).await?;
                     },
                     FireWhalMessage::DisablePermissiveMode(_) => {
                         update_permissive_mode_flag(Arc::clone(&permissive_mode_for_main_loop), false).await?;
+                        on_disable_permissive_mode(
+                            Arc::clone(&trusted_pids_for_id_update),
+                            Arc::clone(&trusted_connections_for_id_update),
+                            Arc::clone(&pending_connections_for_id_update),
+                            Arc::clone(&active_process_cache)
+                        ).await?;
                     },
                     _ => {}
                 }
