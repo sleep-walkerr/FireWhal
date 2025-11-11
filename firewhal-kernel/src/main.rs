@@ -808,14 +808,21 @@ async fn main() -> Result<(), anyhow::Error> {
                                         let mut matched_path = PathBuf::new();
                                         let mut matched_hash = String::new();
 
-                                        let app_ids_guard = app_ids_for_task.lock().await;
+                                        
                                         for app_path in &lineage_paths {
-                                            if let Some(expected_hash) = app_ids_guard.get(app_path) {
+                                            let expected_hash = {
+                                                let app_ids_guard = app_ids_for_task.lock().await;
+                                                app_ids_guard.get(app_path).cloned() // Clone the hash string
+                                            }; // 2. Lock is immediately released here
+
+                                            // 3. Now we check the hash
+                                            if let Some(expected_hash) = expected_hash {
+                                                // Path is in the allowlist. Now check the hash.
                                                 info!("[Verify] Path match for TGID {}: {}. Checking hash.", pid, app_path.display());
                                                 
                                                 match calculate_file_hash(app_path.clone()).await {
                                                     Ok(actual_hash) => {
-                                                        if expected_hash == &actual_hash {
+                                                        if expected_hash == actual_hash {
                                                             info!("[Verify] Hash MATCH for {}. Allowing.", app_path.display());
                                                             decision = Action::Allow;
                                                             matched_path = app_path.clone();
