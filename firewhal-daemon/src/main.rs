@@ -31,7 +31,7 @@ use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::{path, path::{PathBuf}, vec};
-use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
 
@@ -291,9 +291,9 @@ fn main() {
 async fn correct_hashes_in_app_id_config(
     mut apps_to_hash: HashMap<String, AppIdentity>,
 ) -> Result<HashMap<String, AppIdentity>, anyhow::Error> {
-    // Iterate over each application and calculate its hash sequentially.
-    // This is slower than the concurrent version but more stable, as it avoids
-    // spawning many processes at once which can lead to resource exhaustion.
+    // Reverting to a sequential loop. This is slower than concurrent versions
+    // but has proven to be the most stable, as it avoids spawning many
+    // processes at once, which was causing resource exhaustion and crashes.
     for identity in apps_to_hash.values_mut() {
         identity.hash = calculate_file_hash(identity.path.clone()).await?;
     }

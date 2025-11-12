@@ -1,7 +1,7 @@
 use ratatui::{prelude::*, widgets::*};
 use crossterm::event::{KeyCode, KeyModifiers};
 use firewhal_core::{FireWhalMessage, ApplicationAllowlistConfig, AppIdentity, RequestToUpdateHashes};
-use crate::ui::app::App;
+use crate::ui::app::{App, HashState};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -376,7 +376,11 @@ fn render_apps_table(f: &mut Frame, app: &mut App, area: Rect) {
         .bottom_margin(1);
 
     let rows = app.apps.iter().map(|(app_name, identity)| {
-        let hash_style = if app.invalid_hashes.contains(app_name) { Style::default().fg(Color::Red) } else { Style::default().fg(Color::Green) };
+        let hash_style = match app.hash_states.get(app_name) {
+            Some(HashState::Valid) => Style::default().fg(Color::Green),
+            Some(HashState::Invalid) => Style::default().fg(Color::Red),
+            _ => Style::default().fg(Color::White), // Default to white for Unchecked or if not found
+        };
         let hash_cell = Cell::from(identity.hash.clone()).style(hash_style);
 
         Row::new(vec![

@@ -1,6 +1,6 @@
 // import UI screens
 mod ui;
-use ui::app::{App, AppScreen};
+use ui::app::{App, AppScreen, HashState};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -164,6 +164,9 @@ async fn main() -> Result<(), io::Error> {
                     app_guard.debug_print.add_message(format!("[TUI]: AppIdsResponse Received."));
                     // Clear existing apps and add new ones
                     app_guard.apps.clear();
+                    // Also clear the hash states
+                    app_guard.hash_states.clear();
+
                     app_guard.apps.extend(app_id_message.apps.into_iter());
                     // Sort by name for consistent display
                     app_guard.apps.sort_by(|a, b| a.0.cmp(&b.0));
@@ -171,6 +174,11 @@ async fn main() -> Result<(), io::Error> {
                     // --- THE FIX: Send HashesRequest *after* receiving the app list ---
                     let apps_to_hash: std::collections::HashMap<_, _> = app_guard.apps.iter().cloned().collect();
                     if !apps_to_hash.is_empty() {
+                        // Set all hashes to unchecked initially
+                        for (name, _) in &apps_to_hash {
+                            app_guard.hash_states.insert(name.clone(), HashState::Unchecked);
+                        }
+
                         let hashes_request_msg = FireWhalMessage::HashesRequest(firewhal_core::TUIHashesRequest {
                             component: "TUI".to_string(),
                             apps_to_get_hashes_for: apps_to_hash,
@@ -184,15 +192,15 @@ async fn main() -> Result<(), io::Error> {
                 }
                 FireWhalMessage::HashesResponse(message) => {
                     app_guard.debug_print.add_message(format!("[TUI]: HashesResponse Received."));
-                    let apps_list = app_guard.apps.clone();
-                    for app in apps_list {
-                        if let Some(app_identity) = message.apps_with_updated_hashes.get(&app.0) {
-                            if app.1.hash != app_identity.hash {
-                                app_guard.debug_print.add_message(format!("Checking {} == {}", app.1.hash, app_identity.hash));
-                                
-                                app_guard.invalid_hashes.insert(app.0.clone());
-                                
-                            }
+                    // Iterate through the original apps list to compare hashes
+                    for (app_name, local_identity) in &app_guard.apps.clone() {
+                        if let Some(daemon_identity) = message.apps_with_updated_hashes.get(app_name) {
+                            let new_state = if local_identity.hash == daemon_identity.hash {
+                                HashState::Valid
+                            } else {
+                                HashState::Invalid
+                            };
+                            app_guard.hash_states.insert(app_name.clone(), new_state);
                         }
 
                     }
@@ -208,8 +216,7 @@ async fn main() -> Result<(), io::Error> {
         terminal.draw(|f| ui::render(f, &mut app_guard))?;
 
         let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
+            .checked_sub(last_tick.elapsed()).unwrap_or(Duration::from_secs(0));
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
