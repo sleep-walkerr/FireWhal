@@ -21,6 +21,7 @@ use tokio::time::{sleep, Duration};
 use serde::Deserialize;
 use toml;
 use pnet::{datalink};
+use anyhow::{bail, Context, Result};
 
 // Standard library imports
 use std::collections::{HashMap, HashSet};
@@ -208,6 +209,31 @@ fn launch_process(
         Err(e) => Err(format!("Failed to spawn '{}': {}", program, e)),
     }
 }
+
+/// Calculates a file's hash by spawning an external process as root.
+/// This is required to read files that may have restrictive permissions.
+async fn calculate_file_hash(path: PathBuf) -> Result<String, anyhow::Error> {
+    // 1. Build the command. Since the daemon runs as root, the child process
+    //    will inherit root privileges by default. No special setup is needed.
+    let mut command = tokio::process::Command::new("/opt/firewhal/bin/firewhal-hashing");
+    command.arg(path);
+
+    // 2. Execute the command asynchronously and capture the output.
+    let output = command.output()
+        .await
+        .context("Failed to spawn 'firewhal-hashing' command")?;
+
+    // 3. Check the result and return the hash or an error.
+    if output.status.success() {
+        let line = String::from_utf8_lossy(&output.stdout);
+        Ok(line.trim().to_string())
+    } else {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        bail!("firewhal-hashing failed with status {}: {}", output.status, error_message.trim());
+    }
+}
+
+
 
 
 /// Main entry point for the daemon.

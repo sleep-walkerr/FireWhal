@@ -1,6 +1,6 @@
 use ratatui::{prelude::*, widgets::*};
-use crossterm::event::KeyCode;
-use firewhal_core::{FireWhalMessage, ApplicationAllowlistConfig, AppIdentity};
+use crossterm::event::{KeyCode, KeyModifiers};
+use firewhal_core::{FireWhalMessage, ApplicationAllowlistConfig, AppIdentity, RequestToUpdateHashes};
 use crate::ui::app::App;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -58,7 +58,7 @@ impl Default for AppListState {
 }
 
 pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
-    match app.app_list_state.mode {
+    match app.app_list_state.mode { // This needs to be updated to handle modifiers
         AppManagementMode::Viewing => handle_viewing_keys(key_code, app),
         AppManagementMode::Editing(_) => handle_editing_keys(key_code, app),
         AppManagementMode::ConfirmingDelete { .. } => handle_confirm_delete_keys(key_code, app),
@@ -128,7 +128,52 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
                 app.apps_modified = false;
             }
         }
+        KeyCode::Char('h') => { // Re-hash selected application
+            if let Some(selected_index) = app.app_list_state.table_state.selected() {
+                if let Some((name, identity)) = app.apps.get(selected_index) {
+                    let mut app_to_rehash = std::collections::HashMap::new();
+                    app_to_rehash.insert(name.clone(), identity.clone());
+
+                    let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHashes {
+                        component: "TUI".to_string(),
+                        app_to_update_hash_for: app_to_rehash,
+                    });
+
+                    if let Some(tx) = &app.to_zmq_tx {
+                        if let Err(e) = tx.try_send(msg) {
+                            app.debug_print.add_message(format!("[TUI] Failed to send single HashUpdateRequest: {}", e));
+                        } else {
+                            app.debug_print.add_message(format!("[TUI] Sent HashUpdateRequest for '{}'", name));
+                            app.apps_modified = true; // Mark as modified
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+pub fn handle_key_event_with_modifiers(key_code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
+    if modifiers == KeyModifiers::CONTROL && key_code == KeyCode::Char('h') {
+        // Re-hash all applications
+        let all_apps_to_rehash = app.apps.iter().cloned().collect();
+        let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHashes {
+            component: "TUI".to_string(),
+            app_to_update_hash_for: all_apps_to_rehash,
+        });
+
+        if let Some(tx) = &app.to_zmq_tx {
+            if let Err(e) = tx.try_send(msg) {
+                app.debug_print.add_message(format!("[TUI] Failed to send bulk HashUpdateRequest: {}", e));
+            } else {
+                app.debug_print.add_message("[TUI] Sent HashUpdateRequest for all apps".to_string());
+                app.apps_modified = true; // Mark as modified
+            }
+        }
+    } else {
+        // If no modifiers, or not the one we're looking for, pass to the normal handler
+        handle_key_event(key_code, app);
     }
 }
 
@@ -201,9 +246,7 @@ fn send_apps_to_daemon(app: &mut App) {
     let config = ApplicationAllowlistConfig { apps: apps_hashmap };
 
     if let Some(tx) = &app.to_zmq_tx {
-        // This should be a new message type, e.g., UpdateApps
-        // For now, we'll imagine a message `UpdateApps` exists.
-        // Let's use `AddAppIds` for now as a placeholder for a full update.
+        // Use UpdateAppIds to send the complete, modified list to the daemon for saving.
         let msg = FireWhalMessage::UpdateAppIds(config);
 
         if let Err(e) = tx.try_send(msg) {
@@ -321,18 +364,25 @@ fn render_form_field(f: &mut Frame, area: Rect, title: &str, value: &str, is_foc
 }
 
 fn render_apps_table(f: &mut Frame, app: &mut App, area: Rect) {
-    let title = if app.apps_modified { "App Management* (a: add, e: edit, d: delete, p: apply)" } else { "App Management (a: add, e: edit, d: delete)" };
+    let title = if app.apps_modified {
+        "App Management* (a: add, e: edit, d: delete, h: re-hash, Ctrl+h: re-hash all, p: apply)"
+    } else {
+        "App Management (a: add, e: edit, d: delete, h: re-hash, Ctrl+h: re-hash all)"
+    };
 
     let header = Row::new(["Name", "Path", "Hash"])
         .style(Style::default().fg(Color::Rgb(255, 165, 0)).bold())
         .height(1)
         .bottom_margin(1);
 
-    let rows = app.apps.iter().map(|(name, identity)| {
+    let rows = app.apps.iter().map(|(app_name, identity)| {
+        let hash_style = if app.invalid_hashes.contains(app_name) { Style::default().fg(Color::Red) } else { Style::default().fg(Color::Green) };
+        let hash_cell = Cell::from(identity.hash.clone()).style(hash_style);
+
         Row::new(vec![
-            Cell::from(name.clone()),
+            Cell::from(app_name.clone()),
             Cell::from(identity.path.to_string_lossy().into_owned()),
-            Cell::from(identity.hash.clone()),
+            hash_cell,
         ]).height(1)
     });
 

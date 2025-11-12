@@ -8,6 +8,7 @@ use crate::ui::{
     rule_management::{RuleListState, RuleManagementMode}
 };
 use tokio::sync::mpsc;
+use std::collections::HashSet;
 use firewhal_core::{FireWhalMessage, AppIdentity};
 
 #[derive(Debug)]
@@ -33,6 +34,7 @@ pub struct App<'a> {
     pub app_list_state: AppListState,
     pub apps_modified: bool,
     pub apps: Vec<(String, AppIdentity)>,
+    pub invalid_hashes: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -91,6 +93,7 @@ impl Default for App<'_> {
             app_list_state: AppListState::default(),
             apps_modified: false,
             apps: Vec::new(),
+            invalid_hashes: HashSet::new(),
         }
     }
 }

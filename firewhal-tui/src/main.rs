@@ -264,7 +264,7 @@ async fn main() -> Result<(), io::Error> {
                                         ui::rule_management::handle_key_event(key.code, &mut app_guard);
                                     }
                                     AppScreen::AppManagement => {
-                                        ui::app_management::handle_key_event(key.code, &mut app_guard);
+                                        ui::app_management::handle_key_event_with_modifiers(key.code, key.modifiers, &mut app_guard);
                                     }
                                     AppScreen::MainMenu => {
                                     },
