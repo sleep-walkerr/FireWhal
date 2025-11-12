@@ -233,7 +233,7 @@ pub enum FireWhalMessage {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct RequestToUpdateHashes { // From TUI, request to update the hash for one or many applications
     pub component: String,
-    pub app_to_update_hash_for: HashMap<String, AppIdentity>
+    pub apps_to_update_hash_for: HashMap<String, AppIdentity>
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

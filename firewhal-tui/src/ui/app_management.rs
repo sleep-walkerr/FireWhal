@@ -67,17 +67,21 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
 
 fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
     match key_code {
-        KeyCode::Down => {
-            if !app.apps.is_empty() {
+        KeyCode::Down => { // This needs to be updated to handle modifiers
+            let app_vec = get_sorted_apps(app);
+            if !app_vec.is_empty() {
                 let i = app.app_list_state.table_state.selected().unwrap_or(0);
-                let next = if i >= app.apps.len() - 1 { 0 } else { i + 1 };
+                let next = if i >= app_vec.len() - 1 { 0 } else { i + 1 };
                 app.app_list_state.table_state.select(Some(next));
             }
         }
-        KeyCode::Up => {
-            if !app.apps.is_empty() {
+        KeyCode::Up => { // This needs to be updated to handle modifiers
+            let app_vec = get_sorted_apps(app);
+            if !app_vec.is_empty() {
                 let i = app.app_list_state.table_state.selected().unwrap_or(0);
-                let prev = if i == 0 { app.apps.len() - 1 } else { i - 1 };
+                let prev = if i == 0 {
+                    app_vec.len() - 1
+                } else { i - 1 };
                 app.app_list_state.table_state.select(Some(prev));
             }
         }
@@ -99,7 +103,8 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
         KeyCode::Char('e') => {
             // Edit selected app
             if let Some(selected_index) = app.app_list_state.table_state.selected() {
-                if let Some((name, identity)) = app.apps.get(selected_index).cloned() {
+                let app_vec = get_sorted_apps(app);
+                if let Some((name, identity)) = app_vec.get(selected_index).cloned() {
                     let focused_field = FormField::Name;
                     let input_buffer = name.clone(); // Start by editing the name
                     app.app_list_state.mode = AppManagementMode::Editing(EditState {
@@ -130,13 +135,14 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
         }
         KeyCode::Char('h') => { // Re-hash selected application
             if let Some(selected_index) = app.app_list_state.table_state.selected() {
-                if let Some((name, identity)) = app.apps.get(selected_index) {
+                let app_vec = get_sorted_apps(app);
+                if let Some((name, identity)) = app_vec.get(selected_index) {
                     let mut app_to_rehash = std::collections::HashMap::new();
                     app_to_rehash.insert(name.clone(), identity.clone());
 
                     let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHashes {
                         component: "TUI".to_string(),
-                        app_to_update_hash_for: app_to_rehash,
+                        apps_to_update_hash_for: app_to_rehash
                     });
 
                     if let Some(tx) = &app.to_zmq_tx {
@@ -157,10 +163,10 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
 pub fn handle_key_event_with_modifiers(key_code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
     if modifiers == KeyModifiers::CONTROL && key_code == KeyCode::Char('h') {
         // Re-hash all applications
-        let all_apps_to_rehash = app.apps.iter().cloned().collect();
+        let all_apps_to_rehash = app.apps.clone();
         let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHashes {
             component: "TUI".to_string(),
-            app_to_update_hash_for: all_apps_to_rehash,
+            apps_to_update_hash_for: all_apps_to_rehash,
         });
 
         if let Some(tx) = &app.to_zmq_tx {
@@ -202,13 +208,17 @@ fn handle_editing_keys(key_code: KeyCode, app: &mut App) {
                 let new_name = state.name.clone();
                 let new_identity = state.identity.clone();
 
-                if let Some(index) = state.app_index {
-                    // Editing existing app
-                    app.apps[index] = (new_name, new_identity);
+                if state.app_index.is_some() {
+                    // Editing existing app. Remove the old one if the name changed.
+                    if state.original_name != new_name {
+                        app.apps.remove(&state.original_name);
+                    }
+                    app.apps.insert(new_name, new_identity);
                 } else {
                     // Adding new app
-                    app.apps.push((new_name, new_identity));
+                    app.apps.insert(new_name, new_identity);
                 }
+
                 app.app_list_state.mode = AppManagementMode::Viewing;
                 app.apps_modified = true;
             }
@@ -242,7 +252,7 @@ fn field_to_string(name: &str, identity: &AppIdentity, field: FormField) -> Stri
 }
 
 fn send_apps_to_daemon(app: &mut App) {
-    let apps_hashmap = app.apps.iter().cloned().collect();
+    let apps_hashmap = app.apps.clone();
     let config = ApplicationAllowlistConfig { apps: apps_hashmap };
 
     if let Some(tx) = &app.to_zmq_tx {
@@ -266,8 +276,10 @@ fn handle_confirm_delete_keys(key_code: KeyCode, app: &mut App) {
             KeyCode::Enter => {
                 if *selected_yes {
                     if let Some(selected_index) = app.app_list_state.table_state.selected() {
-                        if selected_index < app.apps.len() {
-                            app.apps.remove(selected_index);
+                        let app_vec = get_sorted_apps(app);
+                        if let Some((name, _)) = app_vec.get(selected_index) {
+                            // Remove from the HashMap using the name as the key
+                            app.apps.remove(name);
                             app.apps_modified = true;
                         }
                     }
@@ -281,6 +293,13 @@ fn handle_confirm_delete_keys(key_code: KeyCode, app: &mut App) {
             _ => {}
         }
     }
+}
+
+/// Helper to get a sorted Vec from the app's HashMap for consistent display.
+fn get_sorted_apps(app: &App) -> Vec<(String, AppIdentity)> {
+    let mut app_vec: Vec<_> = app.apps.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    app_vec.sort_by(|a, b| a.0.cmp(&b.0));
+    app_vec
 }
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -375,7 +394,8 @@ fn render_apps_table(f: &mut Frame, app: &mut App, area: Rect) {
         .height(1)
         .bottom_margin(1);
 
-    let rows = app.apps.iter().map(|(app_name, identity)| {
+    let sorted_apps = get_sorted_apps(app);
+    let rows = sorted_apps.iter().map(|(app_name, identity)| {
         let hash_style = match app.hash_states.get(app_name) {
             Some(HashState::Valid) => Style::default().fg(Color::Green),
             Some(HashState::Invalid) => Style::default().fg(Color::Red),

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{hash::Hash, time::Instant};
 use crate::ui::{
     app_management::AppListState,
     debug_print::DebugPrintState, 
@@ -39,7 +39,7 @@ pub struct App<'a> {
     pub rules: Vec<firewhal_core::Rule>,
     pub app_list_state: AppListState,
     pub apps_modified: bool,
-    pub apps: Vec<(String, AppIdentity)>,
+    pub apps: HashMap<String, AppIdentity>,
     pub hash_states: HashMap<String, HashState>,
 }
 
@@ -98,7 +98,7 @@ impl Default for App<'_> {
             rules: Vec::new(),
             app_list_state: AppListState::default(),
             apps_modified: false,
-            apps: Vec::new(),
+            apps: HashMap::new(),
             hash_states: HashMap::new(),
         }
     }

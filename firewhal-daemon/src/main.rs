@@ -37,7 +37,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashesResponse, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, zmq_client_connection};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashesResponse, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashesResponse, zmq_client_connection};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -608,6 +608,17 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     }
                     FireWhalMessage::HashUpdateRequest(message) => {
                         println!("[Supervisor] Received HashUpdateRequest command from TUI");
+                        let updated_hashes = correct_hashes_in_app_id_config(message.apps_to_update_hash_for).await?;
+                        let msg = FireWhalMessage::HashUpdateResponse(
+                            UpdatedHashesResponse {
+                                component: "Daemon".to_string(),
+                                updated_apps: updated_hashes,
+                            }
+                        );
+                        if let Err(e) = to_zmq_tx.send(msg).await {
+                            eprintln!("[Supervisor] Failed to send hashes: {}", e);
+                        }
+                        
                     }
                     _ => {
                     }

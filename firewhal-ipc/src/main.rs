@@ -308,10 +308,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             FireWhalMessage::HashUpdateRequest(_) => {
-                
+                if let Some(daemon_identity) = clients.get("Daemon") {
+                    println!("[ROUTER] Forwarding HashUpdateRequest to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
             }
             FireWhalMessage::HashUpdateResponse(_) => {
-                
+                if let Some(tui_identity) = clients.get("TUI") {
+                    println!("[ROUTER] Forwarding HashUpdateResponse to TUI.");
+                    router.send(tui_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            
             }
             _ => {
                 // For other messages, we might not know the source component unless it's registered.

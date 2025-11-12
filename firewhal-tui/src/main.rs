@@ -168,14 +168,12 @@ async fn main() -> Result<(), io::Error> {
                     app_guard.hash_states.clear();
 
                     app_guard.apps.extend(app_id_message.apps.into_iter());
-                    // Sort by name for consistent display
-                    app_guard.apps.sort_by(|a, b| a.0.cmp(&b.0));
 
                     // --- THE FIX: Send HashesRequest *after* receiving the app list ---
-                    let apps_to_hash: std::collections::HashMap<_, _> = app_guard.apps.iter().cloned().collect();
+                    let apps_to_hash: std::collections::HashMap<String, firewhal_core::AppIdentity> = app_guard.apps.clone();
                     if !apps_to_hash.is_empty() {
                         // Set all hashes to unchecked initially
-                        for (name, _) in &apps_to_hash {
+                        for name in apps_to_hash.keys() {
                             app_guard.hash_states.insert(name.clone(), HashState::Unchecked);
                         }
 
@@ -194,13 +192,25 @@ async fn main() -> Result<(), io::Error> {
                     app_guard.debug_print.add_message(format!("[TUI]: HashesResponse Received."));
                     // Iterate through the original apps list to compare hashes
                     for (app_name, local_identity) in &app_guard.apps.clone() {
-                        if let Some(daemon_identity) = message.apps_with_updated_hashes.get(app_name) {
-                            let new_state = if local_identity.hash == daemon_identity.hash {
+                        if let Some(app_identity) = message.apps_with_updated_hashes.get(app_name) {
+                            let new_state = if local_identity.hash == app_identity.hash {
                                 HashState::Valid
                             } else {
                                 HashState::Invalid
                             };
                             app_guard.hash_states.insert(app_name.clone(), new_state);
+                        }
+
+                    }
+                }
+                FireWhalMessage::HashUpdateResponse(message) => {
+                    app_guard.debug_print.add_message(format!("[TUI]: HashUpdateResponse Received."));
+                    // Iterate through the original apps list to compare hashes
+                    for (app_name, local_identity) in &app_guard.apps.clone() {
+                        if let Some(app_identity) = message.updated_apps.get(app_name) {
+                            let valid_state = HashState::Valid; // All applications are valid at this point
+                            app_guard.hash_states.insert(app_name.clone(), valid_state);
+                            app_guard.apps.insert(app_name.clone(), app_identity.clone());
                         }
 
                     }
