@@ -224,20 +224,34 @@ pub enum FireWhalMessage {
     AppsRequest(TUIAppsRequest),
     AppsResponse(ApplicationAllowlistConfig),
     UpdateAppIds(ApplicationAllowlistConfig),
-    HashRequest(TUIHashRequest),
-    HashResponse(DaemonHashResponse),
+    HashesRequest(TUIHashesRequest),
+    HashesResponse(DaemonHashesResponse),
+    HashUpdateRequest(RequestToUpdateHashes),
+    HashUpdateResponse(UpdatedHashesResponse),
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
-pub struct DaemonHashResponse {
+pub struct RequestToUpdateHashes { // From TUI, request to update the hash for one or many applications
     pub component: String,
-    pub hashed_applications: HashMap<String, String>
+    pub app_to_update_hash_for: HashMap<String, AppIdentity>
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
-pub struct TUIHashRequest {
+pub struct UpdatedHashesResponse {
     pub component: String,
-    pub apps_to_hash: Vec<String>
+    pub updated_apps: HashMap<String, AppIdentity>
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct DaemonHashesResponse {
+    pub component: String,
+    pub apps_with_updated_hashes: HashMap<String, AppIdentity>
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct TUIHashesRequest {
+    pub component: String,
+    pub apps_to_get_hashes_for: HashMap<String, AppIdentity>
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
