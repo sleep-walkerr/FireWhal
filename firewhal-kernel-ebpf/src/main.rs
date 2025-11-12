@@ -115,17 +115,12 @@ fn app_tracking(prog_name: &str, ctx: &SockAddrContext) {
             }
 }
 
-fn rule_matching(ctx: &TcContext, tuple: ConnectionTuple, info: ConnectionInfo) -> Result<i32, i32>{
-    // Create debug printing fields
-    let debug_saddr = Ipv4Addr::from(u32::from_be(tuple.saddr));
-    let debug_daddr = Ipv4Addr::from(u32::from_be(tuple.daddr));
-    let debug_sport = tuple.sport;
-    let debug_dport = tuple.dport;
-
-    // DUMMY BLOCK EVENT
-    // Create payload to send in KernelEvent
+#[inline(always)]
+fn rule_matching(ctx: &TcContext, tuple: ConnectionTuple, info: ConnectionInfo) -> Result<i32, ()> {
+    // --- 1. Prepare Block Event (in case we need it) ---
     let pid_tgid = bpf_get_current_pid_tgid();
     let tgid = (pid_tgid >> 32) as u32;
+
     let block_event_payload = BlockEventPayload {
         key: ConnectionKey {
             sport: tuple.sport,
@@ -135,180 +130,73 @@ fn rule_matching(ctx: &TcContext, tuple: ConnectionTuple, info: ConnectionInfo) 
             daddr: tuple.daddr,
             _padding: [0; 3],
         },
-        reason: BlockReason::IpBlockedEgressTcp,
+        // Set a more accurate block reason based on protocol
+        reason: match tuple.protocol as u32 {
+            6 => BlockReason::IpBlockedEgressTcp,
+            17 => BlockReason::IpBlockedEgressUdp,
+            _ => BlockReason::IpBlockedEgressTcp, // Default
+        },
     };
     let block_event = KernelEvent {
-        event_type: EventType::BlockEvent, // Specific event type
+        event_type: EventType::BlockEvent,
         pid: pid_tgid as u32,
         tgid: tgid,
         comm: [0; 16],
-        payload: firewhal_kernel_common::KernelEventPayload { block_event: (block_event_payload) }
+        payload: firewhal_kernel_common::KernelEventPayload {
+            block_event: (block_event_payload),
+        },
     };
 
-    // Get a reference to the RULES hashmap
-    let rules_ptr =  core::ptr::addr_of_mut!(RULES);
+    // --- 2. Define Rule Keys to Check, from most to least specific ---
+    let keys_to_check = [
+        // Most specific: Proto + IP + Port
+        RuleKey { protocol: tuple.protocol as u32, dest_ip: tuple.daddr, dest_port: tuple.dport, source_ip: 0, source_port: 0 },
+        // Wildcard Port: Proto + IP
+        RuleKey { protocol: tuple.protocol as u32, dest_ip: tuple.daddr, dest_port: 0, source_ip: 0, source_port: 0 },
+        // Wildcard IP: Proto + Port
+        RuleKey { protocol: tuple.protocol as u32, dest_ip: 0, dest_port: tuple.dport, source_ip: 0, source_port: 0 },
+        // Wildcard Protocol: IP + Port
+        RuleKey { protocol: 0, dest_ip: tuple.daddr, dest_port: tuple.dport, source_ip: 0, source_port: 0 },
+        // Wildcard Protocol & Port: IP only
+        RuleKey { protocol: 0, dest_ip: tuple.daddr, dest_port: 0, source_ip: 0, source_port: 0 },
+        // Wildcard Protocol & IP: Port only
+        RuleKey { protocol: 0, dest_ip: 0, dest_port: tuple.dport, source_ip: 0, source_port: 0 },
+    ];
 
-    // Create keys to check for Rule Match
-    // Specific Match
-    let full_key = RuleKey {
-        protocol: tuple.protocol as u32, // Don't forget about wild card for protocol
-        source_port: 0, // Source port is irrelevant in this filter
-        dest_port: tuple.dport,
-        source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        dest_ip: tuple.daddr,
-    };
-    // Wildcard port match
-    let wildcard_port_key = RuleKey {
-        protocol: tuple.protocol as u32, // Don't forget about wild card for protocol
-        source_port: 0, // Source port is irrelevant in this filter
-        dest_port: 0,
-        source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        dest_ip: tuple.daddr,
-    };
-    // Wildcard IP match
-    let wildcard_ip_key = RuleKey {
-        protocol: tuple.protocol as u32, // Don't forget about wild card for protocol
-        source_port: 0, // Source port is irrelevant in this filter
-        dest_port: tuple.dport,
-        source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        dest_ip: 0,
-    };
-    // Wildcard Protocol Match on Dest IP
-    let ip_wildcard_proto_key = RuleKey {
-        protocol: 0,
-        source_port: 0,
-        dest_port: 0,
-        source_ip: 0,
-        dest_ip: tuple.daddr,
-    };
-    // Wildcard Protocol Match on Dest Port
-    let port_wildcard_proto_key = RuleKey {
-        protocol: 0,
-        source_port: 0,
-        dest_port: tuple.dport,
-        source_ip: 0,
-        dest_ip: 0,
-    };
-    // Wildcard Protocol Match on Dest IP and Port
-    let full_wildcard_proto_key = RuleKey {
-        protocol: 0,
-        source_port: 0,
-        dest_port: tuple.dport,
-        source_ip: 0,
-        dest_ip: tuple.daddr,
-    };
+    // --- 3. Check for a matching rule ---
+    let mut matched_action: Option<&RuleAction> = None;
 
-        // Check all keys
-    if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
-        // New matching 
-        match action.action {
-            Action::Deny => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
+    // The verifier can unroll this sequence of checks.
+    if let Some(action) = unsafe { RULES.get(&keys_to_check[0]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[1]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[2]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[3]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[4]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[5]) } { matched_action = Some(action); }
+
+    // --- 4. Process the matched rule ---
+    if let Some(action) = matched_action {
+        return match action.action {
             Action::Allow => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
+                info!(ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection to {}:{}", action.rule_id, Ipv4Addr::from(u32::from_be(tuple.daddr)), tuple.dport);
+                // Add to stateful map for return traffic
+                if unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) }.is_err() {
                     info!(ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
+                    return Ok(TC_ACT_SHOT);
                 }
-                return Ok(TC_ACT_OK);
+                Ok(TC_ACT_OK)
             }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
-        match action.action {
             Action::Deny => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
+                info!(ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection to {}:{}", action.rule_id, Ipv4Addr::from(u32::from_be(tuple.daddr)), tuple.dport);
                 unsafe { EVENTS.output(ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
+                Ok(TC_ACT_SHOT)
             }
-            Action::Allow => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
-        match action.action {
-            Action::Deny => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&ip_wildcard_proto_key) } {
-        match action.action {
-            Action::Deny => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&port_wildcard_proto_key) } {
-        match action.action {
-            Action::Deny => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&full_wildcard_proto_key) } {
-        match action.action {
-            Action::Deny => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
+        };
     }
+
+    // --- 5. Default Action: No rule matched ---
+    // If we reach here, no rule matched. Your previous logic defaulted to block.
+    info!(ctx, "[Kernel] [egress_tc] No rule matched. Blocking connection to {}:{}", Ipv4Addr::from(u32::from_be(tuple.daddr)), tuple.dport);
     Ok(TC_ACT_SHOT)
 }
 
@@ -624,7 +512,7 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     info!(&ctx, "[Kernel] [egress_tc] CHECKING TRAFFIC: [{}:{}, {}:{}]", debug_saddr, debug_sport, debug_daddr, debug_dport);
 
     // Insert fxn call here
-    let rule_matching_result = rule_matching(&ctx, tuple, info).unwrap();
+    let rule_matching_result = rule_matching(&ctx, tuple, info)?;
 
     Ok(rule_matching_result) // Default: Block All 
 }
