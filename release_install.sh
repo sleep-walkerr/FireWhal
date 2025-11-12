@@ -35,13 +35,11 @@ fi
 
 echo "Killing previous instances of FireWhal"
 sudo pkill -f firewhal-daemon
-sudo pkill -f firewhal-kernel
-sudo pkill -f firewhal-ipc
-sudo pkill -f firewhal-discord-bot
 
-echo "Installing Rule and App ID files."
-sudo cp app_identity.toml /opt/firewhal/bin
-sudo cp firewall_rules.toml /opt/firewhal/bin
+# echo "Installing Rule, App ID, and Interface State files."
+# sudo cp app_identity.toml /opt/firewhal/bin
+# sudo cp firewall_rules.toml /opt/firewhal/bin
+# sudo cp interface_state.toml /opt/firewhal/bin
 
 echo "Building binaries"
 # Build all binaries in the workspace in release mode

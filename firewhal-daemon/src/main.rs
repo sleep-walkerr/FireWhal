@@ -20,21 +20,24 @@ use tokio::task;
 use tokio::time::{sleep, Duration};
 use serde::Deserialize;
 use toml;
+use pnet::{datalink};
+use anyhow::{bail, Context, Result};
 
 // Standard library imports
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::{fs, fs::File};
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::{path, vec};
+use std::{path, path::{PathBuf}, vec};
+use futures::stream::{self, StreamExt};
 use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, FireWhalConfig, StatusPong, StatusUpdate, ApplicationAllowlistConfig};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashesResponse, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashesResponse, zmq_client_connection};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -47,11 +50,113 @@ fn load_rules(path: &path::Path) -> Result<FireWhalConfig, Box<dyn std::error::E
     Ok(config)
 }
 
+// Serializes the new set of firewall rules to a file
+fn save_rules(path: &path::Path, config: &FireWhalConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let toml_content = toml::to_string_pretty(config)?; // Serialize toml using string_pretty (makes it looks nice for humans)
+
+    // write to file, overwriting contents
+    fs::write(path, toml_content)?;
+
+    Ok(())
+}
+
 // Loads and deserializes the defined applications that will be used in filtering
 fn load_app_ids(path: &path::Path) -> Result<ApplicationAllowlistConfig, Box<dyn std::error::Error>> {
     let toml_content = fs::read_to_string(path)?;
     let config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
     Ok(config)
+}
+
+// Same as load_app_ids but this time adds new applications sent from permissive mode
+// This function will load the app ids, add new ones to the struct, serialize the new struct, and then send the new struct to the firewall
+fn add_app_ids(path: &path::Path, app_ids_to_add: Vec<(String, String)>) -> Result<(), Box<dyn std::error::Error>> {
+    let toml_content = fs::read_to_string(path)?;
+    let mut config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
+
+    // Use a label to break from the inner loop and continue the outer one
+    'new_app_loop: for (new_app_path_str, new_app_hash) in app_ids_to_add {
+        let new_app_path = PathBuf::from(new_app_path_str);
+
+        // --- 1. THE FIX: Check for existing and continue 'new_app_loop ---
+        for (_name, app_identity) in config.apps.iter_mut() {
+            if app_identity.path == new_app_path {
+                // Found it! This is the "update" logic.
+                if app_identity.hash != new_app_hash {
+                    // Move the hash here. This is fine, because
+                    // we are about to 'continue' the outer loop.
+                    app_identity.hash = new_app_hash; 
+                }
+                
+                // We've handled this app. Skip the "add new" logic
+                // entirely by continuing the outer loop.
+                continue 'new_app_loop;
+            }
+        }
+
+        // --- 2. If path was NOT found, ADD IT AS NEW ---
+        // This code is now *only* reachable if the inner loop
+        // completed without finding a match.
+
+        let Some(file_name) = new_app_path.file_name() else {
+            eprintln!("Skipping app with invalid path (no filename): {}", new_app_path.display());
+            continue;
+        };
+        
+        let new_app_name = file_name.to_string_lossy().to_string();
+
+        // Handle name collisions
+        let mut final_name = new_app_name.clone();
+        let mut i = 1;
+        while config.apps.contains_key(&final_name) {
+            final_name = format!("{}_{}", new_app_name, i);
+            i += 1;
+        }
+        
+        // Move the hash here. This is the *only* other place
+        // it can be moved, and the logic guarantees it's one or the other.
+        config.apps.insert(final_name, AppIdentity {
+            path: new_app_path,
+            hash: new_app_hash,
+        });
+    }
+
+    save_app_ids(path, &config)?;
+    Ok(())
+}
+
+// Overwrites current app_identity.toml file with a new config
+fn save_app_ids(path: &path::Path, config: &ApplicationAllowlistConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let toml_content = toml::to_string_pretty(config)?; // Serialize toml using string_pretty (makes it looks nice for humans)
+    // write to file, overwriting contents
+    fs::write(path, toml_content)?;
+    Ok(())
+}
+
+// Gets a list of currently available interfaces
+fn get_all_interfaces() -> HashSet<String> {
+    datalink::interfaces()
+        .into_iter()
+        .map(|iface| iface.name)
+        .collect()
+}
+
+// Loads enforced_interfaces.toml file that contains interfaces that the firewall is currently enforcing rules on
+fn load_interface_state(path: &path::Path) -> Result<InterfaceStateConfig, Box<dyn std::error::Error>> {
+    let toml_content = fs::read_to_string(path)?; // Use ? to return error if read fails
+    let mut interface_state: InterfaceStateConfig = toml::from_str(&toml_content)?; // Use ? to return error if parse fails
+    // Remove interfaces that no longer exist
+    let current_interfaces = get_all_interfaces();
+    interface_state.enforced_interfaces.retain(|x| current_interfaces.contains(x));
+    Ok(interface_state)
+}
+
+fn save_interface_state(path: &path::Path, interfaces: &HashSet<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let interface_state = InterfaceStateConfig {
+        enforced_interfaces: interfaces.clone(),
+    };
+    let toml_content = toml::to_string_pretty(&interface_state)?;
+    fs::write(path, toml_content)?;
+    Ok(())
 }
 
 /// Launches a child process, optionally as a specific user.
@@ -106,6 +211,31 @@ fn launch_process(
     }
 }
 
+/// Calculates a file's hash by spawning an external process as root.
+/// This is required to read files that may have restrictive permissions.
+async fn calculate_file_hash(path: PathBuf) -> Result<String, anyhow::Error> {
+    // 1. Build the command. Since the daemon runs as root, the child process
+    //    will inherit root privileges by default. No special setup is needed.
+    let mut command = tokio::process::Command::new("/opt/firewhal/bin/firewhal-hashing");
+    command.arg(path);
+
+    // 2. Execute the command asynchronously and capture the output.
+    let output = command.output()
+        .await
+        .context("Failed to spawn 'firewhal-hashing' command")?;
+
+    // 3. Check the result and return the hash or an error.
+    if output.status.success() {
+        let line = String::from_utf8_lossy(&output.stdout);
+        Ok(line.trim().to_string())
+    } else {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        bail!("firewhal-hashing failed with status {}: {}", output.status, error_message.trim());
+    }
+}
+
+
+
 
 /// Main entry point for the daemon.
 fn main() {
@@ -141,15 +271,6 @@ fn main() {
             Err(e) => eprintln!("[Privileged] Failed to launch {}: {}", path, e),
         }
     }
-    // TEST CODE, DELETE LATER
-    // match launch_process("/opt/firewhal/bin/firewhal-discord-bot", &vec![], Some("nobody"), Some("/opt/firewhal")) {
-    //     Ok(pid) => {
-    //         writer.write_all(&pid.to_ne_bytes()).unwrap();
-    //     }
-    //     Err(e) => {
-    //         eprintln!("[Privileged] Failed to launch /opt/firewhal/bin/firewhal-discord-bot: {}", e);
-    //     }
-    // }
     drop(writer)
     
     
@@ -164,6 +285,21 @@ fn main() {
         }
         Err(e) => eprintln!("[Daemon] Error starting daemon: {}", e),
     }
+}
+
+// Takes an app_id_config and then uses the hasher to rehash each application and then update the config with the updated hashes
+async fn correct_hashes_in_app_id_config(
+    mut apps_to_hash: HashMap<String, AppIdentity>,
+) -> Result<HashMap<String, AppIdentity>, anyhow::Error> {
+    // Reverting to a sequential loop. This is slower than concurrent versions
+    // but has proven to be the most stable, as it avoids spawning many
+    // processes at once, which was causing resource exhaustion and crashes.
+    for identity in apps_to_hash.values_mut() {
+        identity.hash = calculate_file_hash(identity.path.clone()).await?;
+    }
+
+    // Return the modified map by value.
+    Ok(apps_to_hash)
 }
 
 /// The main async logic for the supervisor daemon.
@@ -291,6 +427,21 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                                     eprintln!("[Supervisor] FAILED to load app ids: {}", e);
                                 }
                             }
+                            // Load interface state and send to userspace loader
+                            let interface_state_path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
+                            match load_interface_state(interface_state_path) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::LoadInterfaceState(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send interface state: {}", e);
+                                    } else {
+                                        println!("[Supervisor] Interface state successfully sent to firewall.");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load interface state: {}", e);
+                                }
+                            }
                         }
                     }
                     FireWhalMessage::Ping(_) => {
@@ -301,8 +452,175 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                             eprintln!("[Supervisor] FAILED to send pong: {}", e);
                         }
                     }
-                    _ => {
+                    FireWhalMessage::AddAppIds(message) => {
+                        if message.component == "TUI" {
+                            println!("[Supervisor] Received AddAppIds command from TUI");
+                            let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
+                            // Add app ids and then overwrite current file
+                            add_app_ids(app_id_path, message.app_ids_to_add);
+                            // load from overwritten file and the send, less efficient but single point of truth
+                            match load_app_ids(app_id_path) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::LoadAppIds(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send app ids: {}", e);
+                                    } else {
+                                        println!("[Supervisor] App IDs successfully sent to firewall.");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load app ids: {}", e);
+                                }
+                            }
+                        }
 
+                    }
+                    FireWhalMessage::RulesRequest(message) => {
+                        if message.component == "TUI" {
+                            println!("[Supervisor] Received RuleRequest command from TUI");
+                            match load_rules(path::Path::new("/opt/firewhal/bin/firewall_rules.toml")) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::RulesResponse(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send rules: {}", e);
+                                    } else {
+                                        println!("[Supervisor] Rules successfully sent to TUI");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load rules for TUI: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    FireWhalMessage::UpdateRules(message) => {
+                       println!("[Supervisor] Received UpdateRules command from TUI"); 
+                       let path = path::Path::new("/opt/firewhal/bin/firewall_rules.toml");
+                       save_rules(path, &message)?;
+                       match load_rules(path) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::LoadRules(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] FAILED to send rules: {}", e);
+                                    } else {
+                                        println!("[Supervisor] Rules successfully sent to firewall.");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] FAILED to load firewall rules: {}", e);
+                                }
+                            }
+                    }
+                    FireWhalMessage::AppsRequest(message) => {
+                        println!("[Supervisor] Received AppsRequest command from TUI"); 
+                        // Load app ids and hashes and send to userspace loader
+                            let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
+                            match load_app_ids(app_id_path) {
+                                Ok(config) => {
+                                    let msg = FireWhalMessage::AppsResponse(config);
+                                    if let Err(e) = to_zmq_tx.send(msg).await {
+                                        eprintln!("[Supervisor] Failed to send app id list: {}", e);
+                                    } else {
+                                        println!("[Supervisor] App ID list successfully sent to TUI.");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[Supervisor] Failed to load app ids: {}", e);
+                                }
+
+                            }
+                    }
+                    FireWhalMessage::UpdateAppIds(message) => {
+                        println!("[Supervisor] Received UpdateAppIds command from TUI");
+                        let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
+                        save_app_ids(app_id_path, &message)?;
+                        match load_app_ids(app_id_path) {
+                            Ok(config) => {
+                                let msg = FireWhalMessage::LoadAppIds(config);
+                                if let Err(e) = to_zmq_tx.send(msg).await {
+                                    eprintln!("[Supervisor] Failed to send app id list: {}", e);
+                                } else {
+                                    println!("[Supervisor] App ID list successfully sent to TUI.");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Supervisor] Failed to load app ids: {}", e);
+                            }
+
+                        }
+                    }
+                    FireWhalMessage::InterfaceRequest(message) => {
+                        println!("[Superivsor] Received InterfaceRequest command from TUI");
+                        let path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
+                        match load_interface_state(path) {
+                            Ok(interface_state) => {
+                                let msg = FireWhalMessage::InterfaceResponse(
+                                    NetInterfaceResponse {
+                                        source: "Daemon".to_string(),
+                                        interface_state: interface_state,
+                                        current_interfaces: get_all_interfaces()
+                                    }
+                                );
+                                if let Err(e) = to_zmq_tx.send(msg).await {
+                                    eprintln!("[Supervisor] Failed to send interface list: {}", e);
+                                } else {
+                                    println!("[Supervisor] Interface list successfully sent to TUI.");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Supervisor] Failed to load interface list: {}", e);
+                            }
+                        }
+                    }
+                    FireWhalMessage::UpdateInterfaces(message) => {
+                        println!("[Supervisor] Received UpdateInterfaces command from TUI");
+                        let path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
+                        save_interface_state(path, &message.interfaces)?;
+                        match load_interface_state(path) {
+                            Ok(interface_state) => {
+                                let msg = FireWhalMessage::LoadInterfaceState(interface_state);
+                                if let Err(e) = to_zmq_tx.send(msg).await {
+                                    eprintln!("[Supervisor] Failed to send LoadInterfaceState message to Firewall.")
+                                } else {
+                                    println!("[Supervisor] Successfully sent LoadInterfaceState message to Firewall.")
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Supervisor] Failed to load interface list: {}", e);
+                            }
+                        }
+                    }
+                    FireWhalMessage::HashesRequest(message) => {
+                        println!("[Supervisor] Received HashesRequest command from TUI");
+                        // Collect update all hashes in app list and then send back
+                        let updated_hashes = correct_hashes_in_app_id_config(message.apps_to_get_hashes_for).await?;
+                        let msg = FireWhalMessage::HashesResponse(
+                            DaemonHashesResponse {
+                                component: "Daemon".to_string(),
+                                apps_with_updated_hashes: updated_hashes,
+                            }
+                        );
+                        if let Err(e) = to_zmq_tx.send(msg).await {
+                            eprintln!("[Supervisor] Failed to send hashes: {}", e);
+                        } else {
+                            println!("[Supervisor] Hashes successfully sent to TUI.");
+                        }
+                    }
+                    FireWhalMessage::HashUpdateRequest(message) => {
+                        println!("[Supervisor] Received HashUpdateRequest command from TUI");
+                        let updated_hashes = correct_hashes_in_app_id_config(message.apps_to_update_hash_for).await?;
+                        let msg = FireWhalMessage::HashUpdateResponse(
+                            UpdatedHashesResponse {
+                                component: "Daemon".to_string(),
+                                updated_apps: updated_hashes,
+                            }
+                        );
+                        if let Err(e) = to_zmq_tx.send(msg).await {
+                            eprintln!("[Supervisor] Failed to send hashes: {}", e);
+                        }
+                        
+                    }
+                    _ => {
                     }
                 }
             },

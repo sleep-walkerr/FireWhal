@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::{fmt, fs, path};
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use bincode::{config, Encode, Decode};
 //use serde::de::{value, Error};
 use serde::{Deserialize, Serialize};
@@ -138,9 +138,14 @@ pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
 
 
 // DATA STRUCTURES
+#[derive(Clone, Debug, PartialEq, Eq, Hash)] 
+pub struct ProcessInfo {
+    pub path: PathBuf,
+    pub hash: String, // Or whatever unique ID you get for the executable
+    pub action: Action, // The decision (Allow/Deny) made for this process
+}
 
-
-#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "PascalCase")]
 pub enum Action {
     Allow,
@@ -157,7 +162,7 @@ pub enum Protocol {
 }
 
 
-#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
+#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
 pub struct Rule {
     // Consider adding rule ids to rules for debugging purposes
     pub action: Action,
@@ -173,11 +178,12 @@ pub struct Rule {
 // List of rules to be sent to firewall
 #[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
 pub struct FireWhalConfig {
-    pub rules: Vec<Rule>,
+    pub outgoing_rules: Vec<Rule>,
+    pub incoming_rules: Vec<Rule>
 }
 
 // Represents the value for an app id key in the app_id.toml file
-#[derive(Debug, Deserialize, Serialize, Encode, Decode, Clone)]
+#[derive(Debug, Deserialize, Serialize, Encode, Decode, Clone, Eq, PartialEq)]
 pub struct AppIdentity {
     pub path: PathBuf,
     pub hash: String,
@@ -186,6 +192,11 @@ pub struct AppIdentity {
 #[derive(Debug, Deserialize, Serialize, Encode, Decode, Clone)]
 pub struct ApplicationAllowlistConfig {
     pub apps: HashMap<String, AppIdentity>, // Key is the app_id
+}
+
+#[derive(Debug, Deserialize, Serialize, Encode, Decode, Clone)]
+pub struct InterfaceStateConfig {
+    pub enforced_interfaces: HashSet<String>, // Key is the app_id
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -198,12 +209,71 @@ pub enum FireWhalMessage {
     LoadAppIds(ApplicationAllowlistConfig),
     InterfaceRequest(NetInterfaceRequest),
     InterfaceResponse(NetInterfaceResponse),
+    LoadInterfaceState(InterfaceStateConfig),
     UpdateInterfaces(UpdateInterfaces),
     Ping(StatusPing),
     Pong(StatusPong),
     DiscordBlockNotify(DiscordBlockNotification),
     EnablePermissiveMode(PermissiveModeEnable),
     DisablePermissiveMode(PermissiveModeDisable),
+    PermissiveModeTuple(ProcessLineageTuple),
+    AddAppIds(AppIdsToAdd),
+    RulesRequest(TUIRulesRequest),
+    RulesResponse(FireWhalConfig),
+    UpdateRules(FireWhalConfig),
+    AppsRequest(TUIAppsRequest),
+    AppsResponse(ApplicationAllowlistConfig),
+    UpdateAppIds(ApplicationAllowlistConfig),
+    HashesRequest(TUIHashesRequest),
+    HashesResponse(DaemonHashesResponse),
+    HashUpdateRequest(RequestToUpdateHashes),
+    HashUpdateResponse(UpdatedHashesResponse),
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct RequestToUpdateHashes { // From TUI, request to update the hash for one or many applications
+    pub component: String,
+    pub apps_to_update_hash_for: HashMap<String, AppIdentity>
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct UpdatedHashesResponse {
+    pub component: String,
+    pub updated_apps: HashMap<String, AppIdentity>
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct DaemonHashesResponse {
+    pub component: String,
+    pub apps_with_updated_hashes: HashMap<String, AppIdentity>
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct TUIHashesRequest {
+    pub component: String,
+    pub apps_to_get_hashes_for: HashMap<String, AppIdentity>
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct TUIAppsRequest {
+    pub component: String,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct TUIRulesRequest {
+    pub component: String,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct AppIdsToAdd {
+    pub component: String,
+    pub app_ids_to_add: Vec<(String, String)>
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct ProcessLineageTuple {
+    pub component: String,
+    pub lineage_tuple: Vec<(String, String)>
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -234,7 +304,7 @@ pub struct StatusPong {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct UpdateInterfaces {
     pub source: String,
-    pub interfaces: Vec<String>,
+    pub interfaces: HashSet<String>,
 }
 
 
@@ -246,7 +316,8 @@ pub struct NetInterfaceRequest {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct NetInterfaceResponse {
     pub source: String,
-    pub interfaces: Vec<String>,
+    pub interface_state: InterfaceStateConfig,
+    pub current_interfaces: HashSet<String>,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

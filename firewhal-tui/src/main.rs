@@ -1,6 +1,6 @@
 // import UI screens
 mod ui;
-use ui::app::{App, AppScreen};
+use ui::app::{App, AppScreen, HashState};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -114,11 +114,12 @@ async fn main() -> Result<(), io::Error> {
                     app_guard.debug_print.add_message(formatted_msg);
                 }
                 FireWhalMessage::InterfaceResponse(response) => {
-                    if response.source == "Firewall" {
+                    if response.source == "Daemon" {
                         // Clear vector entries
                         app_guard.available_interfaces.clear_interfaces();
                         // Add new entries
-                        for interface in response.interfaces {app_guard.available_interfaces.add_interface(interface);}
+                        for interface in response.current_interfaces.iter() {app_guard.available_interfaces.add_interface(interface.to_string());}
+                        for interface in response.interface_state.enforced_interfaces.iter() {app_guard.toggled_interfaces.insert(interface.to_string());}
                     }
                 }
                 FireWhalMessage::Pong(pong) => {   
@@ -140,6 +141,80 @@ async fn main() -> Result<(), io::Error> {
                     
                     }
                 }
+                FireWhalMessage::PermissiveModeTuple(tuple_message) =>
+                {
+                    if tuple_message.component == "Firewall" {
+                        for lineage_tuple in tuple_message.lineage_tuple.clone() {
+                            app_guard.debug_print.add_message(format!("[TUI]: Permissive Mode Tuple Received: [{}]", lineage_tuple.0));
+                        }
+                        app_guard.process_lineage_tuple_list.add_tuple(tuple_message.lineage_tuple.iter().cloned().collect());
+                        // app_guard.debug_print.add_message("[TUI]: Permissive Mode Tuple Received".to_string());
+                    }
+                    
+                }
+                FireWhalMessage::RulesResponse(rules_message) => {
+                    app_guard.debug_print.add_message(format!("[TUI]: RulesResponse Received."));
+                    // Clear existing rules and add new ones
+                    app_guard.rules.clear();
+                    // For now, we only show outgoing rules. This can be expanded later.
+                    app_guard.rules.extend(rules_message.outgoing_rules);
+                    app_guard.rules.extend(rules_message.incoming_rules);
+                }
+                FireWhalMessage::AppsResponse(app_id_message) => {
+                    app_guard.debug_print.add_message(format!("[TUI]: AppIdsResponse Received."));
+                    // Clear existing apps and add new ones
+                    app_guard.apps.clear();
+                    // Also clear the hash states
+                    app_guard.hash_states.clear();
+
+                    app_guard.apps.extend(app_id_message.apps.into_iter());
+
+                    // --- THE FIX: Send HashesRequest *after* receiving the app list ---
+                    let apps_to_hash: std::collections::HashMap<String, firewhal_core::AppIdentity> = app_guard.apps.clone();
+                    if !apps_to_hash.is_empty() {
+                        // Set all hashes to unchecked initially
+                        for name in apps_to_hash.keys() {
+                            app_guard.hash_states.insert(name.clone(), HashState::Unchecked);
+                        }
+
+                        let hashes_request_msg = FireWhalMessage::HashesRequest(firewhal_core::TUIHashesRequest {
+                            component: "TUI".to_string(),
+                            apps_to_get_hashes_for: apps_to_hash,
+                        });
+
+                        if let Some(tx) = &app_guard.to_zmq_tx {
+                            // Use try_send as we are in an async block but don't want to block it.
+                            let _ = tx.try_send(hashes_request_msg);
+                        }
+                    }
+                }
+                FireWhalMessage::HashesResponse(message) => {
+                    app_guard.debug_print.add_message(format!("[TUI]: HashesResponse Received."));
+                    // Iterate through the original apps list to compare hashes
+                    for (app_name, local_identity) in &app_guard.apps.clone() {
+                        if let Some(app_identity) = message.apps_with_updated_hashes.get(app_name) {
+                            let new_state = if local_identity.hash == app_identity.hash {
+                                HashState::Valid
+                            } else {
+                                HashState::Invalid
+                            };
+                            app_guard.hash_states.insert(app_name.clone(), new_state);
+                        }
+
+                    }
+                }
+                FireWhalMessage::HashUpdateResponse(message) => {
+                    app_guard.debug_print.add_message(format!("[TUI]: HashUpdateResponse Received."));
+                    // Iterate through the original apps list to compare hashes
+                    for (app_name, local_identity) in &app_guard.apps.clone() {
+                        if let Some(app_identity) = message.updated_apps.get(app_name) {
+                            let valid_state = HashState::Valid; // All applications are valid at this point
+                            app_guard.hash_states.insert(app_name.clone(), valid_state);
+                            app_guard.apps.insert(app_name.clone(), app_identity.clone());
+                        }
+
+                    }
+                }
                 _ => {}
             }
         }
@@ -151,8 +226,7 @@ async fn main() -> Result<(), io::Error> {
         terminal.draw(|f| ui::render(f, &mut app_guard))?;
 
         let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
+            .checked_sub(last_tick.elapsed()).unwrap_or(Duration::from_secs(0));
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
@@ -175,7 +249,17 @@ async fn main() -> Result<(), io::Error> {
                                         _ = &app_guard.debug_print.add_message(format!("Failed to send InterfaceRequest message: {}", e));
                                     }
                                 } else { _ = &app_guard.debug_print.add_message("Interface Selection found no zmq sender".to_string()); }
-                            },
+                            }
+                            AppScreen::PermissiveMode => {
+                                let enable_message = FireWhalMessage::EnablePermissiveMode(firewhal_core::PermissiveModeEnable { component: ("TUI".to_string()) });
+                                // Send enable message to enable permissive mode
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(enable_message) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send EnablePermissiveMode message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Permissive Mode found no zmq sender".to_string()); }
+                                //app_guard.process_lineage_tuple_list.clear_interfaces();
+                            }
                             AppScreen::MainMenu => {
                                 // Reset Status Values
                                 app_guard.main_menu.reset_status_values();
@@ -185,7 +269,32 @@ async fn main() -> Result<(), io::Error> {
                                         _ = &app_guard.debug_print.add_message(format!("Failed to send Ping message: {}", e));
                                     }
                                 } else { _ = &app_guard.debug_print.add_message("Main Menu found no zmq sender".to_string()); }
-                            },
+                            }
+                            AppScreen::RuleManagement => {
+                                // FIX ME, permissive mode will have a toggle button in its interface, for now, just send the disable message when you swap to main
+                                let disable_message = FireWhalMessage::DisablePermissiveMode(firewhal_core::PermissiveModeDisable { component: ("TUI".to_string()) });
+                                // Send enable message to enable permissive mode
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(disable_message) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send EnablePermissiveMode message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Permissive Mode found no zmq sender".to_string()); }
+                                // Send rule request to daemon
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(FireWhalMessage::RulesRequest(firewhal_core::TUIRulesRequest { component: "TUI".to_string() })) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Found no zmq sender".to_string()); }
+                            }
+                            AppScreen::AppManagement => {
+                                // Send app request to daemon
+                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                    if let Err(e) = zmq_sender.try_send(FireWhalMessage::AppsRequest(firewhal_core::TUIAppsRequest { component: "TUI".to_string() })) {
+                                        _ = &app_guard.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
+                                    }
+                                } else { _ = &app_guard.debug_print.add_message("Found no zmq sender".to_string()); }
+                                // The HashesRequest is now sent automatically after AppsResponse is received.
+                            }
                             _ => { 
                             }
                         }
@@ -195,6 +304,15 @@ async fn main() -> Result<(), io::Error> {
                                     AppScreen::InterfaceSelection => {
                                         ui::interface_selection::handle_key_event(key.code, &mut app_guard);
                                     },
+                                    AppScreen::PermissiveMode => {
+                                        ui::permissive_mode::handle_key_event(key.code, &mut app_guard);
+                                    },
+                                    AppScreen::RuleManagement => {
+                                        ui::rule_management::handle_key_event(key.code, &mut app_guard);
+                                    }
+                                    AppScreen::AppManagement => {
+                                        ui::app_management::handle_key_event_with_modifiers(key.code, key.modifiers, &mut app_guard);
+                                    }
                                     AppScreen::MainMenu => {
                                     },
                                     _ => {}

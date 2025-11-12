@@ -130,20 +130,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             FireWhalMessage::InterfaceRequest(NetInterfaceRequest {source}) => {
                 source_component = source.clone();
                 if &source_component == "TUI" {
-                    if let Some(firewall_identity) = clients.get("Firewall") {
-                        println!("[ROUTER] Forwarding InterfaceRequest command to firewall.");
-                        router.send(firewall_identity, zmq::SNDMORE)?;
+                    if let Some(daemon_identity) = clients.get("Daemon") {
+                        println!("[ROUTER] Forwarding InterfaceRequest command to daemon.");
+                        router.send(daemon_identity, zmq::SNDMORE)?;
                         router.send(payload, 0)?;
                     } else {
-                        eprintln!("[ROUTER] Received InterfaceRequest command, but firewall client is not registered!");
+                        eprintln!("[ROUTER] Received InterfaceRequest command, but daemon client is not registered!");
                     }
                 }
             }
             // Interface Response message processing
             FireWhalMessage::InterfaceResponse(NetInterfaceResponse {source, ..}) => {
                 source_component = source.clone();
-                if source_component == "Firewall" {
-                    println!("[ROUTER] Forwarding InterfaceResponse from firewall to TUI.");
+                if source_component == "Daemon" {
+                    println!("[ROUTER] Forwarding InterfaceResponse from daemon to TUI.");
                     if let Some(tui_identity) = clients.get("TUI") {
                         router.send(tui_identity, zmq::SNDMORE)?;
                         router.send(payload, 0)?;
@@ -152,16 +152,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            // Load Interface State message processing
+            FireWhalMessage::LoadInterfaceState(_) => {
+                source_component = "Daemon".to_string();
+
+                if let Some(firewall_identity) = clients.get("Firewall") {
+                    println!("[ROUTER] Forwarding LoadInterfaceState command to firewall.");
+                    router.send(firewall_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0)?;
+                } else {
+                    eprintln!("[ROUTER] Received LoadInterfaceState command, but firewall client is not registered!");
+                }
+            }   
             // Update Interfaces message processing
             FireWhalMessage::UpdateInterfaces(update) => {
                 source_component = update.source.clone();
                 if source_component == "TUI" {
-                    if let Some(firewall_identity) = clients.get("Firewall") {
-                        println!("[ROUTER] Forwarding UpdateInterfaces command to firewall.");
-                        router.send(firewall_identity, zmq::SNDMORE)?;
+                    if let Some(daemon_identity) = clients.get("Daemon") {
+                        println!("[ROUTER] Forwarding UpdateInterfaces command to daemon.");
+                        router.send(daemon_identity, zmq::SNDMORE)?;
                         router.send(payload, 0)?
                     } else {
-                        eprintln!("[ROUTER] Received UpdateInterfaces command, but firewall client is not registered!");
+                        eprintln!("[ROUTER] Received UpdateInterfaces command, but daemon client is not registered!");
                     }
                 }
             }
@@ -210,6 +222,105 @@ fn main() -> Result<(), Box<dyn Error>> {
                     router.send(discord_identity, zmq::SNDMORE)?;
                     router.send(payload, 0)?;
                 }
+            }
+            FireWhalMessage::EnablePermissiveMode(message) => {
+                if let Some(firewall_identity) = clients.get("Firewall") && message.component == "TUI" {
+                    println!("[ROUTER] Forwarding EnablePermissiveMode command to Firewall.");
+                    router.send(firewall_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::DisablePermissiveMode(message) => {
+                if let Some(firewall_identity) = clients.get("Firewall") && message.component == "TUI" {
+                    println!("[ROUTER] Forwarding DisablePermissiveMode command to Firewall.");
+                    router.send(firewall_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::PermissiveModeTuple(message) => {
+                if let Some(tui_identity) = clients.get("TUI") && message.component == "Firewall" {
+                    println!("[ROUTER] Forwarding PermissiveModeTuple to TUI.");
+                   router.send(tui_identity, zmq::SNDMORE)?;
+                   router.send(payload, 0); 
+                }
+            }
+            FireWhalMessage::AddAppIds(message) => {
+                if let Some(daemon_identity) = clients.get("Daemon") && message.component == "TUI" {
+                    println!("[ROUTER] Forwarding AddAppIds to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::RulesRequest(message) => {
+                if let Some(daemon_identity) = clients.get("Daemon") && message.component == "TUI" {
+                    println!("[ROUTER] Forwarding RuleRequest to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::RulesResponse(message) => {
+                if let Some(tui_identity) = clients.get("TUI") {
+                    println!("[ROUTER] Forwarding RuleResponse to TUI.");
+                    router.send(tui_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::UpdateRules(message) => {
+                if let Some(daemon_identity) = clients.get("Daemon") {
+                    println!("[ROUTER] Forwarding UpdateRules to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::AppsRequest(message) => {
+                if let Some(daemon_identity) = clients.get("Daemon") && message.component == "TUI" {
+                    println!("[ROUTER] Forwarding AppsRequest to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::AppsResponse(message) => {
+                if let Some(tui_identity) = clients.get("TUI") {
+                    println!("[ROUTER] Forwarding AppsResponse to TUI.");
+                    router.send(tui_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::UpdateAppIds(_) => {
+                if let Some(daemon_identity) = clients.get("Daemon") {
+                    println!("[ROUTER] Forwarding UpdateAppIds to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::HashesRequest(_) => {
+                if let Some(daemon_identity) = clients.get("Daemon") {
+                    println!("[ROUTER] Forwarding HashesRequest to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::HashesResponse(_) => {
+                if let Some(tui_identity) = clients.get("TUI") {
+                    println!("[ROUTER] Forwarding HashesResponse to TUI.");
+                    router.send(tui_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::HashUpdateRequest(_) => {
+                if let Some(daemon_identity) = clients.get("Daemon") {
+                    println!("[ROUTER] Forwarding HashUpdateRequest to Daemon.");
+                    router.send(daemon_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            }
+            FireWhalMessage::HashUpdateResponse(_) => {
+                if let Some(tui_identity) = clients.get("TUI") {
+                    println!("[ROUTER] Forwarding HashUpdateResponse to TUI.");
+                    router.send(tui_identity, zmq::SNDMORE)?;
+                    router.send(payload, 0);
+                }
+            
             }
             _ => {
                 // For other messages, we might not know the source component unless it's registered.

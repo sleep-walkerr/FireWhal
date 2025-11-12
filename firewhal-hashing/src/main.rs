@@ -11,7 +11,7 @@ fn calculate_file_hash(path: PathBuf) -> Result<String, io::Error> {
 
     // Use a more reasonable buffer size to avoid excessive memory allocation.
     // 1MB is a good balance for I/O performance.
-    const BUFFER_SIZE: usize = 1 * 1024 * 1024;
+    const BUFFER_SIZE: usize = 1 * 256 * 1024;
     let mut buffer = vec![0; BUFFER_SIZE];
 
     loop {
