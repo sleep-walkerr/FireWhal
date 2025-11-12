@@ -167,6 +167,35 @@ async fn main() -> Result<(), io::Error> {
                     app_guard.apps.extend(app_id_message.apps.into_iter());
                     // Sort by name for consistent display
                     app_guard.apps.sort_by(|a, b| a.0.cmp(&b.0));
+
+                    // --- THE FIX: Send HashesRequest *after* receiving the app list ---
+                    let apps_to_hash: std::collections::HashMap<_, _> = app_guard.apps.iter().cloned().collect();
+                    if !apps_to_hash.is_empty() {
+                        let hashes_request_msg = FireWhalMessage::HashesRequest(firewhal_core::TUIHashesRequest {
+                            component: "TUI".to_string(),
+                            apps_to_get_hashes_for: apps_to_hash,
+                        });
+
+                        if let Some(tx) = &app_guard.to_zmq_tx {
+                            // Use try_send as we are in an async block but don't want to block it.
+                            let _ = tx.try_send(hashes_request_msg);
+                        }
+                    }
+                }
+                FireWhalMessage::HashesResponse(message) => {
+                    app_guard.debug_print.add_message(format!("[TUI]: HashesResponse Received."));
+                    let apps_list = app_guard.apps.clone();
+                    for app in apps_list {
+                        if let Some(app_identity) = message.apps_with_updated_hashes.get(&app.0) {
+                            if app.1.hash != app_identity.hash {
+                                app_guard.debug_print.add_message(format!("Checking {} == {}", app.1.hash, app_identity.hash));
+                                
+                                app_guard.invalid_hashes.insert(app.0.clone());
+                                
+                            }
+                        }
+
+                    }
                 }
                 _ => {}
             }
@@ -247,6 +276,7 @@ async fn main() -> Result<(), io::Error> {
                                         _ = &app_guard.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
                                     }
                                 } else { _ = &app_guard.debug_print.add_message("Found no zmq sender".to_string()); }
+                                // The HashesRequest is now sent automatically after AppsResponse is received.
                             }
                             _ => { 
                             }

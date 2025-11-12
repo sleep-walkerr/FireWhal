@@ -874,6 +874,7 @@ dependencies = [
  "bincode",
  "daemonize",
  "firewhal-core",
+ "futures",
  "nix",
  "pnet",
  "serde",

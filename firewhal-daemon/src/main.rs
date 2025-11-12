@@ -31,12 +31,13 @@ use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::{path, path::{PathBuf}, vec};
+use futures::future::join_all;
 use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, zmq_client_connection};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashesResponse, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, zmq_client_connection};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -284,6 +285,21 @@ fn main() {
         }
         Err(e) => eprintln!("[Daemon] Error starting daemon: {}", e),
     }
+}
+
+// Takes an app_id_config and then uses the hasher to rehash each application and then update the config with the updated hashes
+async fn correct_hashes_in_app_id_config(
+    mut apps_to_hash: HashMap<String, AppIdentity>,
+) -> Result<HashMap<String, AppIdentity>, anyhow::Error> {
+    // Iterate over each application and calculate its hash sequentially.
+    // This is slower than the concurrent version but more stable, as it avoids
+    // spawning many processes at once which can lead to resource exhaustion.
+    for identity in apps_to_hash.values_mut() {
+        identity.hash = calculate_file_hash(identity.path.clone()).await?;
+    }
+
+    // Return the modified map by value.
+    Ok(apps_to_hash)
 }
 
 /// The main async logic for the supervisor daemon.
@@ -573,6 +589,25 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                                 eprintln!("[Supervisor] Failed to load interface list: {}", e);
                             }
                         }
+                    }
+                    FireWhalMessage::HashesRequest(message) => {
+                        println!("[Supervisor] Received HashesRequest command from TUI");
+                        // Collect update all hashes in app list and then send back
+                        let updated_hashes = correct_hashes_in_app_id_config(message.apps_to_get_hashes_for).await?;
+                        let msg = FireWhalMessage::HashesResponse(
+                            DaemonHashesResponse {
+                                component: "Daemon".to_string(),
+                                apps_with_updated_hashes: updated_hashes,
+                            }
+                        );
+                        if let Err(e) = to_zmq_tx.send(msg).await {
+                            eprintln!("[Supervisor] Failed to send hashes: {}", e);
+                        } else {
+                            println!("[Supervisor] Hashes successfully sent to TUI.");
+                        }
+                    }
+                    FireWhalMessage::HashUpdateRequest(message) => {
+                        println!("[Supervisor] Received HashUpdateRequest command from TUI");
                     }
                     _ => {
                     }
