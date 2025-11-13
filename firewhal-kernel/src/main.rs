@@ -1009,7 +1009,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
     shutdown_tx.send(()).unwrap();
-    let _ = zmq_handle.await;
+    // Wait for the ZMQ task to shut down, but with a timeout to prevent hangs.
+    if let Err(_) = time::timeout(Duration::from_secs(2), zmq_handle).await {
+        warn!("[Kernel] Timeout waiting for ZMQ task to shut down. It may be forcefully terminated.");
+    } else {
+        info!("[Kernel] ZMQ task shut down gracefully.");
+    }
 
     Ok(())
 }

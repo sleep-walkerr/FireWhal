@@ -174,11 +174,11 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
     }
 }
 
-pub fn render(f: &mut Frame, app: &App) {
+pub fn render(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
-        .split(f.area());
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
 
     // --- Styles ---
     let highlight_style = Style::default().bg(Color::DarkGray);

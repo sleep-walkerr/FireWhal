@@ -2,6 +2,7 @@ use ratatui::{prelude::*, widgets::*};
 use crossterm::event::{KeyCode, KeyModifiers};
 use firewhal_core::{FireWhalMessage, ApplicationAllowlistConfig, AppIdentity, RequestToUpdateHashes};
 use crate::ui::app::{App, HashState};
+use crate::ui::centered_rect;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -302,8 +303,7 @@ fn get_sorted_apps(app: &App) -> Vec<(String, AppIdentity)> {
     app_vec
 }
 
-pub fn render(f: &mut Frame, app: &mut App) {
-    let area = f.area();
+pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     render_apps_table(f, app, area);
 
     match &app.app_list_state.mode {
@@ -417,18 +417,4 @@ fn render_apps_table(f: &mut Frame, app: &mut App, area: Rect) {
         .row_highlight_style(Style::default().bg(Color::DarkGray));
 
     f.render_stateful_widget(table, area, &mut app.app_list_state.table_state);
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
-    ]).split(r);
-
-    Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
-    ]).split(popup_layout[1])[1]
 }

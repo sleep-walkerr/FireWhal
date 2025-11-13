@@ -2,6 +2,7 @@ use ratatui::{prelude::*, widgets::*};
 use crossterm::event::{KeyCode, KeyEvent};
 use firewhal_core::{FireWhalConfig, FireWhalMessage, Rule, Action, Protocol};
 use crate::ui::app::App;
+use crate::ui::centered_rect;
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
@@ -278,8 +279,7 @@ fn handle_confirm_delete_keys(key_code: KeyCode, app: &mut App) {
     }
 }
 
-pub fn render(f: &mut Frame, app: &mut App) {
-    let area = f.area();
+pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     
     // Base table
     render_rules_table(f, app, area);
@@ -436,25 +436,4 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
         .row_highlight_style(Style::default().bg(Color::DarkGray));
 
     f.render_stateful_widget(table, area, &mut app.rule_list_state.table_state);
-}
-
-/// Helper to create a centered rect for popups
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
 }

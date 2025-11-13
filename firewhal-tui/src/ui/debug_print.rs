@@ -18,16 +18,11 @@ impl DebugPrintState {
     }
 }
 
-pub fn render(f: &mut Frame, app: &mut App) {
+pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title("IPC Debug Log")
         .borders(Borders::ALL)
-        .title_alignment(Alignment::Center)
-        .border_type(BorderType::Rounded)
-        .title_style(Style::default().fg(Color::LightBlue));
-
-    let area = f.area();
-    // We get the inner area from the block BEFORE we render it and move it.
+        .border_style(Style::default().fg(Color::Magenta));
     let inner_area = block.inner(area);
     // Now we can render the block.
     f.render_widget(block, area); // `block` is consumed here.

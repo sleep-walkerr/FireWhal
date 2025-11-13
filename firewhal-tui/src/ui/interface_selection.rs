@@ -110,21 +110,9 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
     }
 }
 
-pub fn render(f: &mut Frame, app: &App) {
-    
-
-    // let block = Block::default()
-    //     .title("Interface Selection")
-    //     .borders(Borders::ALL)
-    //     .title_alignment(Alignment::Center)
-    //     .border_type(BorderType::Rounded)
-    //     .title_style(Style::default().fg(Color::LightBlue));
-
-    // let area = f.area();
-    // // We get the inner area from the block BEFORE we render it and move it.
-    // let inner_area = block.inner(area);
-    // // Now we can render the block.
-    // f.render_widget(block, area); // `block` is consumed here.
+pub fn render(f: &mut Frame, app: &App, area: Rect) {
+    // This function now only renders the content specific to the Interface Selection screen
+    // The main block and tabs are handled by the top-level UI layout.
 
     // Create a list of `ListItem`s from your data
     let items: Vec<ListItem> = app.available_interfaces
@@ -151,5 +139,5 @@ pub fn render(f: &mut Frame, app: &App) {
 
     // We pass a mutable reference to the ListState to the render function
     let mut list_state = app.interface_list_state.clone();
-    f.render_stateful_widget(list_widget, f.area(), &mut list_state.interface_list_state);
+    f.render_stateful_widget(list_widget, area, &mut list_state.interface_list_state);
 }
