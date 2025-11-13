@@ -14,10 +14,10 @@ pub mod rule_management;
 pub fn render(f: &mut Frame, app: &mut App) {
     // --- Overall Layout: Vertical Navigation (Left) + Content (Right) ---
     let main_layout = Layout::horizontal([
-        Constraint::Length(25), // Fixed width for navigation pane
+        Constraint::Length(26), // Fixed width for navigation pane
         Constraint::Min(0),     // Remaining space for content
     ])
-    .split(f.size());
+    .split(f.area());
 
     let nav_area = main_layout[0];
     let content_area = main_layout[1];
@@ -41,7 +41,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
 fn render_navigation_pane(f: &mut Frame, app: &mut App, area: Rect) {
     let firewhal_span = Span::styled(
-        "FireWhal ",
+        "FireWhal",
         Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
     );
     let icon_span = Span::styled(
@@ -60,19 +60,36 @@ fn render_navigation_pane(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_nav_area = nav_block.inner(area);
     f.render_widget(nav_block, area);
 
-    let nav_items: Vec<ListItem> = app.nav_items.iter().map(|screen| {
+    let nav_items: Vec<ListItem> = app.nav_items.iter().enumerate().map(|(i, screen)| {
         let text = screen.display_name();
-        ListItem::new(text).style(Style::default().fg(Color::Blue))
+        if i == app.nav_index {
+            // Create a "rounded" effect for the selected item
+            let inner_text = format!(" {} ", text);
+            let top_border = format!("╭{}╮", "─".repeat(inner_text.len()));
+            let middle_line = format!("│{}│", inner_text);
+            let bottom_border = format!("╰{}╯", "─".repeat(inner_text.len()));
+
+            let selected_style = Style::default().fg(Color::Rgb(255, 165, 0)).add_modifier(Modifier::BOLD);
+
+            let lines = vec![
+                Line::from(top_border).style(selected_style),
+                Line::from(middle_line).style(selected_style),
+                Line::from(bottom_border).style(selected_style),
+            ];
+            ListItem::new(lines).style(Style::default())
+        } else {
+            // Non-selected items are simpler
+            let lines = vec![
+                Line::from(""), // Spacer line
+                Line::from(format!("   {} ", text)),
+                Line::from(""), // Spacer line
+            ];
+            ListItem::new(lines).style(Style::default().fg(Color::Blue))
+        }
     }).collect();
 
     let nav_list = List::new(nav_items)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Rgb(255, 165, 0)) // Orange
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::REVERSED),
-        )
-        .highlight_symbol(">> ");
+        .highlight_style(Style::default()); // Highlighting is now done manually
 
     let mut list_state = ListState::default().with_selected(Some(app.nav_index));
     f.render_stateful_widget(nav_list, inner_nav_area, &mut list_state);
