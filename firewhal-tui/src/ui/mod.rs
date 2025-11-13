@@ -14,7 +14,7 @@ pub mod rule_management;
 pub fn render(f: &mut Frame, app: &mut App) {
     // --- Overall Layout: Vertical Navigation (Left) + Content (Right) ---
     let main_layout = Layout::horizontal([
-        Constraint::Length(26), // Fixed width for navigation pane
+        Constraint::Length(29), // Fixed width for navigation pane
         Constraint::Min(0),     // Remaining space for content
     ])
     .split(f.area());
@@ -63,13 +63,15 @@ fn render_navigation_pane(f: &mut Frame, app: &mut App, area: Rect) {
     let nav_items: Vec<ListItem> = app.nav_items.iter().enumerate().map(|(i, screen)| {
         let text = screen.display_name();
         if i == app.nav_index {
-            // Create a "rounded" effect for the selected item
-            let inner_text = format!(" {} ", text);
-            let top_border = format!("╭{}╮", "─".repeat(inner_text.len()));
-            let middle_line = format!("│{}│", inner_text);
-            let bottom_border = format!("╰{}╯", "─".repeat(inner_text.len()));
+            // Create a full-width "tab" for the selected item
+            let pane_width = inner_nav_area.width as usize;
+            let text_with_padding = format!(" {} ", text);
+            let middle_line = format!("│{:<width$}│", text_with_padding, width = pane_width - 2);
+            let bar_width = pane_width - 2;
+            let top_border = format!("╭{}╮", "─".repeat(bar_width));
+            let bottom_border = format!("╰{}╯", "─".repeat(bar_width));
 
-            let selected_style = Style::default().fg(Color::Rgb(255, 165, 0)).add_modifier(Modifier::BOLD);
+            let selected_style = Style::default().fg(Color::Rgb(255, 165, 0));
 
             let lines = vec![
                 Line::from(top_border).style(selected_style),
@@ -78,13 +80,35 @@ fn render_navigation_pane(f: &mut Frame, app: &mut App, area: Rect) {
             ];
             ListItem::new(lines).style(Style::default())
         } else {
-            // Non-selected items are simpler
+            // Create a full-width "tab" for non-selected items, displaced to the right
+            let right_shift = " "; // Displacement for non-selected items
+            let pane_width = (inner_nav_area.width as usize).saturating_sub(right_shift.len());
+
+            let border_style = Style::default().fg(Color::DarkGray);
+            let text_style = Style::default().fg(Color::Blue);
+
+            // --- Borders ---
+            let bar_width = pane_width - 2;
+            let top_border = format!("{}{}", right_shift, format!("╭{}╮", "─".repeat(bar_width)));
+            let bottom_border = format!("{}{}", right_shift, format!("╰{}╯", "─".repeat(bar_width)));
+
+            // --- Middle Line (with mixed styles) ---
+            let text_with_padding = format!(" {} ", text);
+            let remaining_width = pane_width.saturating_sub(text_with_padding.len() + 2); // -2 for the │
+            let middle_line = Line::from(vec![
+                Span::raw(right_shift),
+                Span::styled("│", border_style),
+                Span::styled(text_with_padding, text_style),
+                Span::raw(" ".repeat(remaining_width)),
+                Span::styled("│", border_style),
+            ]);
+
             let lines = vec![
-                Line::from(""), // Spacer line
-                Line::from(format!("   {} ", text)),
-                Line::from(""), // Spacer line
+                Line::from(top_border).style(border_style),
+                Line::from(middle_line).style(text_style),
+                Line::from(bottom_border).style(border_style),
             ];
-            ListItem::new(lines).style(Style::default().fg(Color::Blue))
+            ListItem::new(lines).style(Style::default())
         }
     }).collect();
 
