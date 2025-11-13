@@ -27,6 +27,19 @@ pub enum HashState {
     Valid,
     Invalid,
 }
+
+impl AppScreen {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            AppScreen::MainMenu => "Status",
+            AppScreen::InterfaceSelection => "Active Interfaces",
+            AppScreen::RuleManagement => "Firewall Rules",
+            AppScreen::AppManagement => "App Management",
+            AppScreen::PermissiveMode => "Permissive Detection",
+            AppScreen::Debug => "Debug",
+        }
+    }
+}
 #[derive(Debug)]
 pub struct App {
     pub screen: AppScreen,

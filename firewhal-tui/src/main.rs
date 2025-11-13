@@ -283,10 +283,6 @@ async fn main() -> Result<(), io::Error> {
         }
         if last_tick.elapsed() >= tick_rate {
             // Delegate updates to the active screen's state
-            // Only update if the main menu is the active screen
-            if app_guard.screen == AppScreen::MainMenu {
-                app_guard.main_menu.update_progress();
-            }
             // Other screens might have their own updates here
             last_tick = Instant::now();
         }

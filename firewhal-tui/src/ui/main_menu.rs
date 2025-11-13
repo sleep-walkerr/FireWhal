@@ -11,9 +11,6 @@ use crate::ui::app::App;
 /// Holds the state for the Main Menu screen.
 #[derive(Debug)]
 pub struct MainMenuState {
-    pub progress: f64,
-    pub progress_direction: i8,
-    pub last_tick: std::time::Instant,
     ipc_status: bool,
     daemon_status: bool,
     firewall_status: bool,
@@ -23,9 +20,6 @@ pub struct MainMenuState {
 impl Default for MainMenuState {
     fn default() -> Self {
         Self {
-            progress: 0.0,
-            progress_direction: 1,
-            last_tick: std::time::Instant::now(),
             ipc_status: false,
             daemon_status: false,
             firewall_status: false,
@@ -35,19 +29,6 @@ impl Default for MainMenuState {
 }
 
 impl MainMenuState {
-    pub fn update_progress(&mut self) {
-        self.progress += (self.progress_direction as f64) * 0.01; // Adjust speed as needed
-
-        // make this random later
-        if self.progress >= 1.0 {
-            self.progress = 1.0;
-            self.progress_direction = -1; // Reverse direction
-        } else if self.progress <= 0.0 {
-            self.progress = 0.0;
-            self.progress_direction = 1; // Reverse direction
-        }
-        self.last_tick = std::time::Instant::now();
-    }
     pub fn set_ipc_status(&mut self, status: bool) {
         self.ipc_status = status;
     }
@@ -71,11 +52,8 @@ impl MainMenuState {
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     // This function now only renders the content specific to the Main Menu screen
 
-    // Create a vertical layout for the status panel and network usage bar
-    let main_vertical_content_layout = Layout::vertical([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ]).split(area); // Use the provided `area` for splitting
+    // The main menu now only contains the status panel.
+    let main_vertical_content_layout = Layout::vertical([Constraint::Percentage(100)]).split(area);
 
     // --- STATUS PANEL (CENTERED) ---
     let status_box_block = Block::default()
@@ -136,13 +114,4 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(status_paragraph, system_status_area[1]);
 
     f.render_widget(status_box_block, main_vertical_content_layout[0]); // Render the block after its inner area is used
-
-    // --- NETWORK USAGE BAR (CENTERED BELOW STATUS) ---
-    let network_usage_bar = Gauge::default()
-        .block(Block::default().title("Network Usage").borders(Borders::ALL))
-        .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-        .percent((app.main_menu.progress * 100.0) as u16) // Use progress from MainMenuState
-        .label(format!("{:.0}%", app.main_menu.progress * 100.0)); // Display percentage
-
-    f.render_widget(network_usage_bar, main_vertical_content_layout[1]);
 }

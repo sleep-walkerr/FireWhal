@@ -299,6 +299,10 @@ async fn correct_hashes_in_app_id_config(
         if identity.path.is_file() { 
             println!("[Supervisor] Updating hash for '{}'.", identity.path.display());
             identity.hash = calculate_file_hash(identity.path.clone()).await?;
+        } else {
+            // Change path text to say INVALID PATH
+            identity.path = PathBuf::from("INVALID PATH");
+            identity.hash = "UNKNOWN".to_string();
         }
     }
 

@@ -61,7 +61,7 @@ fn render_navigation_pane(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(nav_block, area);
 
     let nav_items: Vec<ListItem> = app.nav_items.iter().map(|screen| {
-        let text = format!("{:?}", screen);
+        let text = screen.display_name();
         ListItem::new(text).style(Style::default().fg(Color::Blue))
     }).collect();
 
