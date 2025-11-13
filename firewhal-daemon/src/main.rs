@@ -295,7 +295,11 @@ async fn correct_hashes_in_app_id_config(
     // but has proven to be the most stable, as it avoids spawning many
     // processes at once, which was causing resource exhaustion and crashes.
     for identity in apps_to_hash.values_mut() {
-        identity.hash = calculate_file_hash(identity.path.clone()).await?;
+        // Check if file at path actually exists.
+        if identity.path.is_file() { 
+            println!("[Supervisor] Updating hash for '{}'.", identity.path.display());
+            identity.hash = calculate_file_hash(identity.path.clone()).await?;
+        }
     }
 
     // Return the modified map by value.
