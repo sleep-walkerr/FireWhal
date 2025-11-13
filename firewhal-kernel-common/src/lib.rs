@@ -241,6 +241,7 @@ pub enum BlockReason {
     IcmpBlocked = 1,
     IpBlockedEgressTcp = 2,
     IpBlockedEgressUdp = 3,
+    IpBlockedIngress = 5,
     BindBlocked = 4,
 }
 #[cfg(feature = "user")]

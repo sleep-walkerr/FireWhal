@@ -200,6 +200,71 @@ fn rule_matching(ctx: &TcContext, tuple: ConnectionTuple, info: ConnectionInfo) 
     Ok(TC_ACT_SHOT)
 }
 
+#[inline(always)]
+fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32, ()> {
+    // --- 1. Prepare Block Event (in case we need it) ---
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let tgid = (pid_tgid >> 32) as u32;
+
+    let block_event_payload = BlockEventPayload {
+        key: ConnectionKey {
+            sport: tuple.sport,
+            dport: tuple.dport,
+            protocol: tuple.protocol,
+            saddr: tuple.saddr,
+            daddr: tuple.daddr,
+            _padding: [0; 3],
+        },
+        reason: BlockReason::IpBlockedIngress, // A more specific reason
+    };
+    let block_event = KernelEvent {
+        event_type: EventType::BlockEvent,
+        pid: pid_tgid as u32,
+        tgid: tgid,
+        comm: [0; 16],
+        payload: firewhal_kernel_common::KernelEventPayload {
+            block_event: (block_event_payload),
+        },
+    };
+
+    // --- 2. Define Rule Keys for INGRESS traffic ---
+    // For ingress, we match against the SOURCE IP and PORT.
+    let keys_to_check = [
+        // Most specific: Proto + Source IP + Source Port
+        RuleKey { protocol: tuple.protocol as u32, source_ip: tuple.saddr, source_port: tuple.sport, dest_ip: 0, dest_port: 0 },
+        // Wildcard Port: Proto + Source IP
+        RuleKey { protocol: tuple.protocol as u32, source_ip: tuple.saddr, source_port: 0, dest_ip: 0, dest_port: 0 },
+        // Wildcard Protocol: Source IP only
+        RuleKey { protocol: 0, source_ip: tuple.saddr, source_port: 0, dest_ip: 0, dest_port: 0 },
+    ];
+
+    // --- 3. Check for a matching rule ---
+    let mut matched_action: Option<&RuleAction> = None;
+
+    if let Some(action) = unsafe { RULES.get(&keys_to_check[0]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[1]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[2]) } { matched_action = Some(action); }
+
+    // --- 4. Process the matched rule ---
+    if let Some(action) = matched_action {
+        return match action.action {
+            Action::Allow => {
+                info!(ctx, "[Kernel] [ingress_tc] Rule {} ALLOWED incoming connection from {}:{}", action.rule_id, Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
+                // For ingress, we just allow. No need to add to CONNECTION_MAP.
+                Ok(TC_ACT_OK)
+            }
+            Action::Deny => {
+                info!(ctx, "[Kernel] [ingress_tc] Rule {} BLOCKED incoming connection from {}:{}", action.rule_id, Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
+                unsafe { EVENTS.output(ctx, &block_event, 0) };
+                Ok(TC_ACT_SHOT)
+            }
+        };
+    }
+
+    // --- 5. Default Action: No rule matched ---
+    info!(ctx, "[Kernel] [ingress_tc] No ingress rule matched. Blocking connection from {}:{}", Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
+    Ok(TC_ACT_SHOT)
+}
 
 #[map]
 static mut BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
@@ -256,16 +321,16 @@ pub fn firewall_ingress_tc(ctx: TcContext) -> i32 {
 fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
 
         let result = || -> Result<i32, i32> {
-            if let Ok(incoming_tuple) = parse_packet_tuple(&ctx) {
+            if let Ok(tuple) = parse_packet_tuple(&ctx) {
                 // For ingress, we need to check for the REVERSE tuple, since we are
                 // looking for the return path of an outgoing connection.
                 let reversed_tuple = ConnectionTuple {
-                    saddr: incoming_tuple.daddr, // Swapped
-                    daddr: incoming_tuple.saddr, // Swapped
-                    sport: incoming_tuple.dport, // Swapped
-                    dport: incoming_tuple.sport, // Swapped
-                    protocol: incoming_tuple.protocol,
-                    ..incoming_tuple
+                    saddr: tuple.daddr, // Swapped
+                    daddr: tuple.saddr, // Swapped
+                    sport: tuple.dport, // Swapped
+                    dport: tuple.sport, // Swapped
+                    protocol: tuple.protocol,
+                    ..tuple
                 };
 
                 // Also check for a portless version for protocols like ICMP
@@ -308,7 +373,8 @@ fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
                     return Ok(TC_ACT_OK);
                 } else {
                     // info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
-                    return Ok(TC_ACT_SHOT)
+                    // If no stateful match, fall back to stateless ingress rule matching.
+                    return ingress_rule_matching(&ctx, tuple).map_err(|_| 0);
                 }
             } else {
                 info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
