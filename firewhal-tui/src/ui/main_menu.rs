@@ -63,55 +63,71 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     
     let inner_area = status_box_block.inner(main_vertical_content_layout[0]); // Get inner area before rendering block
 
-    let active_style = Style::default().fg(Color::Black).bg(Color::Green);
+    // Create a vertical layout for each status row
+    let rows_layout = Layout::vertical([
+        Constraint::Length(3), // Firewall
+        Constraint::Length(3), // IPC
+        Constraint::Length(3), // Daemon
+        Constraint::Length(3), // Discord Bot
+        Constraint::Min(0),    // Spacer
+    ]).split(inner_area);
 
-    // Changes
-
-    // Capture area being used and split it in half
-    let system_status_area = Layout::horizontal(
-        [
-        Constraint::Percentage(50),
-        Constraint::Percentage(50), // Two 50% constraints are enough
-        ]
-    ).split(inner_area);
-
-        let component_text = vec![
-        Line::from(vec![
-            Span::styled("Firewall:", Style::default().fg(Color::Rgb(255, 165, 0))),
-            Span::raw(" "),
-        ]).right_aligned(),
-        Line::from(vec![
-            Span::styled("IPC:", Style::default().fg(Color::Magenta)),
-            Span::raw(" "),
-        ]).right_aligned(),
-        Line::from(vec![
-            Span::styled("Daemon:", Style::default().fg(Color::Cyan)),
-        ]).right_aligned(),
-        Line::from(vec![
-            Span::styled("Discord Bot:", Style::default().fg(Color::Blue)),
-        ]).right_aligned(),
-        ];
-
-    let status_text = vec![
-        Line::from(vec![
-            if app.main_menu.firewall_status {Span::styled("Active", active_style)} else {Span::styled("Inactive", Style::default().fg(Color::Red))} 
-        ]).left_aligned(),
-        Line::from(vec![
-            if app.main_menu.ipc_status {Span::styled("Active", active_style)} else {Span::styled("Inactive", Style::default().fg(Color::Red))}
-        ]).left_aligned(),
-        Line::from(vec![
-            if app.main_menu.daemon_status {Span::styled("Active", active_style)} else {Span::styled("Inactive", Style::default().fg(Color::Red))}
-        ]).left_aligned(),
-        Line::from(vec![
-            if app.main_menu.discord_bot_status {Span::styled("Active", active_style)} else {Span::styled("Inactive", Style::default().fg(Color::Red))}
-        ]).left_aligned(),
+    // Define the statuses and their styles
+    let statuses = [
+        ("Firewall:", app.main_menu.firewall_status, Color::Rgb(255, 165, 0)),
+        ("IPC:", app.main_menu.ipc_status, Color::Magenta),
+        ("Daemon:", app.main_menu.daemon_status, Color::Cyan),
+        ("Discord Bot:", app.main_menu.discord_bot_status, Color::Blue),
     ];
 
-    let component_paragraph = Paragraph::new(component_text);
-    let status_paragraph = Paragraph::new(status_text);
+    // Render each status row
+    for (i, (name, is_active, color)) in statuses.iter().enumerate() {
+        let row_area = rows_layout[i];
 
-    f.render_widget(component_paragraph, system_status_area[0]);
-    f.render_widget(status_paragraph, system_status_area[1]);
+        // Create a centered area that is 50% of the row's width
+        let centered_row_area = Layout::horizontal([
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+        ]).split(row_area)[1];
+
+        // Determine styles based on active status
+        let (status_text, status_style, border_style) = if *is_active {
+            // If active: status text is green, border is the component's color
+            ("Active", Style::default().fg(Color::Green), Style::default().fg(*color))
+        } else {
+            // If inactive: status text is red, border is red
+            ("Inactive", Style::default().fg(Color::Red), Style::default().fg(Color::Red))
+        };
+
+        // Create a single block for the whole row, with border color reflecting status
+        let combined_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(border_style);
+
+        // Get the inner area of the block to create a new layout inside it
+        let inner_block_area = combined_block.inner(centered_row_area);
+
+        // Split the inner area to align the component name and status separately
+        let inner_chunks = Layout::horizontal([
+            Constraint::Percentage(50), // Left side for component name
+            Constraint::Percentage(50), // Right side for status
+        ]).split(inner_block_area);
+
+        // Component name paragraph (right-aligned)
+        let component_paragraph = Paragraph::new(Span::styled(*name, Style::default().fg(*color)))
+            .right_aligned();
+
+        // Status paragraph (left-aligned)
+        let status_paragraph = Paragraph::new(Span::styled(format!(" {}", status_text), status_style))
+            .left_aligned();
+
+        // Render the block first, then the content inside its chunks
+        f.render_widget(combined_block, centered_row_area);
+        f.render_widget(component_paragraph, inner_chunks[0]);
+        f.render_widget(status_paragraph, inner_chunks[1]);
+    }
 
     f.render_widget(status_box_block, main_vertical_content_layout[0]); // Render the block after its inner area is used
 }
