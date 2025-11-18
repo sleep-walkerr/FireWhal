@@ -77,14 +77,22 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
     match key_code {
         KeyCode::Up => {
             if !sorted_interfaces.is_empty() {
-                let current_selection = app.interface_list_state.selected().unwrap_or(0);
+                let current_selection = match app.interface_list_state.selected() {
+                    Some(i) => i,
+                    None => 0, // Default to first item if nothing is selected
+                };
                 let new_selection = current_selection.saturating_sub(1); // wrap around
                 app.interface_list_state.select(Some(new_selection));
             }
         }
         KeyCode::Down => {
             if !sorted_interfaces.is_empty() {
-                let current_selection = app.interface_list_state.selected().unwrap_or(0);
+                let current_selection = match app.interface_list_state.selected() {
+                    Some(i) => i,
+                    None => {
+                        0 // Default to first item if nothing is selected
+                    }
+                };
                 let new_selection = (current_selection + 1).min(sorted_interfaces.len() - 1);
                 app.interface_list_state.select(Some(new_selection));
             }
@@ -144,7 +152,12 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Percentage(37), // (100 - 25) / 2, rounded down
         ]).split(row_area)[1];
 
-        let is_selected = selected_index == Some(i);
+        // An item is only visually selected if the content pane has focus
+        let is_selected = if !app.focus_on_navigation {
+            selected_index == Some(i)
+        } else {
+            false
+        };
         let is_toggled = app.toggled_interfaces.contains(iface_name);
 
         // Determine styles based on toggled and selected state
@@ -153,11 +166,11 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(Color::Green)
         } else {
             // Untoggled: White border
-            Style::default()
+            Style::default().fg(Color::White)
         };
 
         // All interface text is blue by default
-        let mut iface_style = Style::default();
+        let mut iface_style = Style::default().fg(Color::Blue);
 
         // Selected items get a blue border and white text to stand out
         if is_selected {

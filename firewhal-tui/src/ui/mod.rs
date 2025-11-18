@@ -27,8 +27,17 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     // --- Render Content Pane based on selected screen ---
     match app.screen {
-        AppScreen::MainMenu => main_menu::render(f, app, content_area),
-        AppScreen::InterfaceSelection => interface_selection::render(f, app, content_area),
+        AppScreen::MainMenu => {
+            app.interface_list_state.select(None); // Clear selection when leaving
+            main_menu::render(f, app, content_area)
+        },
+        AppScreen::InterfaceSelection => {
+            // When entering the screen, if no item is selected, default to the first one.
+            if app.interface_list_state.selected().is_none() && !app.available_interfaces.is_empty() {
+                app.interface_list_state.select(Some(0));
+            }
+            interface_selection::render(f, app, content_area)
+        },
         AppScreen::RuleManagement => rule_management::render(f, app, content_area),
         AppScreen::AppManagement => app_management::render(f, app, content_area),
         AppScreen::PermissiveMode => permissive_mode::render(f, app, content_area),
@@ -55,7 +64,7 @@ fn render_navigation_pane(f: &mut Frame, app: &mut App, area: Rect) {
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if app.focus_on_navigation { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) });
+        .border_style(Style::default().fg(Color::Cyan));
 
     let inner_nav_area = nav_block.inner(area);
     f.render_widget(nav_block, area);
@@ -65,18 +74,33 @@ fn render_navigation_pane(f: &mut Frame, app: &mut App, area: Rect) {
         if i == app.nav_index {
             // Create a full-width "tab" for the selected item
             let pane_width = inner_nav_area.width as usize;
-            let text_with_padding = format!(" {} ", text);
-            let middle_line = format!("│{:<width$}│", text_with_padding, width = pane_width - 2);
             let bar_width = pane_width - 2;
             let top_border = format!("╭{}╮", "─".repeat(bar_width));
             let bottom_border = format!("╰{}╯", "─".repeat(bar_width));
 
-            let selected_style = Style::default().fg(Color::Rgb(255, 165, 0));
+            // Text is always orange
+            let text_style = Style::default().fg(Color::Rgb(255, 165, 0));
+            // Border color changes with focus
+            let border_style = if app.focus_on_navigation {
+                Style::default().fg(Color::Rgb(255, 165, 0)) // Orange when nav is focused
+            } else {
+                Style::default().fg(Color::DarkGray) // Gray when content is focused
+            };
+
+            // Create the middle line with separate styles for border and text
+            let text_with_padding = format!(" {} ", text);
+            let remaining_width = pane_width.saturating_sub(text_with_padding.len() + 2); // -2 for the │
+            let middle_line = Line::from(vec![
+                Span::styled("│", border_style),
+                Span::styled(text_with_padding, text_style),
+                Span::raw(" ".repeat(remaining_width)),
+                Span::styled("│", border_style),
+            ]);
 
             let lines = vec![
-                Line::from(top_border).style(selected_style),
-                Line::from(middle_line).style(selected_style),
-                Line::from(bottom_border).style(selected_style),
+                Line::from(top_border).style(border_style),
+                middle_line,
+                Line::from(bottom_border).style(border_style),
             ];
             ListItem::new(lines).style(Style::default())
         } else {
