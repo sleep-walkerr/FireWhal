@@ -70,24 +70,28 @@ impl InterfaceListState {
 
 // User input processing
 pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
+    // Create a sorted list of interfaces to ensure consistent ordering for navigation
+    let mut sorted_interfaces: Vec<_> = app.available_interfaces.iter().cloned().collect();
+    sorted_interfaces.sort();
+
     match key_code {
         KeyCode::Up => {
-            if !app.available_interfaces.is_empty() {
+            if !sorted_interfaces.is_empty() {
                 let current_selection = app.interface_list_state.selected().unwrap_or(0);
                 let new_selection = current_selection.saturating_sub(1); // wrap around
                 app.interface_list_state.select(Some(new_selection));
             }
         }
         KeyCode::Down => {
-            if !app.available_interfaces.is_empty() {
+            if !sorted_interfaces.is_empty() {
                 let current_selection = app.interface_list_state.selected().unwrap_or(0);
-                let new_selection = (current_selection + 1).min(app.available_interfaces.len() - 1);
+                let new_selection = (current_selection + 1).min(sorted_interfaces.len() - 1);
                 app.interface_list_state.select(Some(new_selection));
             }
         }
         KeyCode::Char(' ') => {
             if let Some(selected_index) = app.interface_list_state.selected() {
-                if let Some(selected_interface) = app.available_interfaces.get(selected_index) {
+                if let Some(selected_interface) = sorted_interfaces.get(selected_index) {
                     // If the interface is already toggled, untoggle it. Otherwise, toggle it.
                     if !app.toggled_interfaces.remove(selected_interface) {
                         app.toggled_interfaces.insert(selected_interface.clone());
@@ -117,17 +121,21 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_area = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
-    if app.available_interfaces.is_empty() {
+    // Create a sorted list of interfaces to ensure consistent ordering for rendering
+    let mut sorted_interfaces: Vec<_> = app.available_interfaces.iter().cloned().collect();
+    sorted_interfaces.sort();
+
+    if sorted_interfaces.is_empty() {
         return;
     }
 
-    let num_items = app.available_interfaces.len();
+    let num_items = sorted_interfaces.len();
     let constraints: Vec<Constraint> = std::iter::repeat(Constraint::Length(3)).take(num_items).collect();
     let rows_layout = Layout::vertical(constraints).split(inner_area);
 
     let selected_index = app.interface_list_state.selected();
 
-    for (i, iface_name) in app.available_interfaces.iter().enumerate() {
+    for (i, iface_name) in sorted_interfaces.iter().enumerate() {
         let row_area = rows_layout[i];
         // Create a centered area that is 50% of the row's width
         let centered_row_area = Layout::horizontal([
@@ -145,7 +153,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(Color::Green)
         } else {
             // Untoggled: White border
-            Style::default().fg(Color::White)
+            Style::default()
         };
 
         // All interface text is blue by default
@@ -182,7 +190,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         // Interface name paragraph (right-aligned)
         let iface_line = Line::from(vec![
             Span::styled(iface_name.clone(), iface_style),
-            Span::styled(" :", Style::default()),
+            Span::styled(" :", border_style),
         ]);
         let iface_paragraph = Paragraph::new(iface_line).right_aligned();
 
