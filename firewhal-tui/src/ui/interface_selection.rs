@@ -89,7 +89,7 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
             if let Some(selected_index) = app.interface_list_state.selected() {
                 if let Some(selected_interface) = app.available_interfaces.get(selected_index) {
                     // If the interface is already toggled, untoggle it. Otherwise, toggle it.
-                    if !app.toggled_interfaces.remove(selected_interface.as_str()) {
+                    if !app.toggled_interfaces.remove(selected_interface) {
                         app.toggled_interfaces.insert(selected_interface.clone());
                     }
                 }
@@ -110,34 +110,89 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
     }
 }
 
-pub fn render(f: &mut Frame, app: &App, area: Rect) {
-    // This function now only renders the content specific to the Interface Selection screen
-    // The main block and tabs are handled by the top-level UI layout.
+pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Select Interfaces (Space to toggle, Enter to apply) ");
+    let inner_area = outer_block.inner(area);
+    f.render_widget(outer_block, area);
 
-    // Create a list of `ListItem`s from your data
-    let items: Vec<ListItem> = app.available_interfaces
-        .iter()
-        .map(|iface_name| {
-            // Check if the current interface is in the toggled set
-            let is_toggled = app.toggled_interfaces.contains(iface_name);
-            
-            let prefix = if is_toggled { "[x] " } else { "[ ] " };
-            let style = if is_toggled {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+    if app.available_interfaces.is_empty() {
+        return;
+    }
 
-            ListItem::new(format!("{}{}", prefix, iface_name)).style(style)
-        })
-        .collect();
+    let num_items = app.available_interfaces.len();
+    let constraints: Vec<Constraint> = std::iter::repeat(Constraint::Length(3)).take(num_items).collect();
+    let rows_layout = Layout::vertical(constraints).split(inner_area);
 
-    let list_widget = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Select Interfaces (Space to toggle, Enter to apply)"))
-        .highlight_style(Style::default().bg(Color::DarkGray))
-        .highlight_symbol(">> ");
+    let selected_index = app.interface_list_state.selected();
 
-    // We pass a mutable reference to the ListState to the render function
-    let mut list_state = app.interface_list_state.clone();
-    f.render_stateful_widget(list_widget, area, &mut list_state.interface_list_state);
+    for (i, iface_name) in app.available_interfaces.iter().enumerate() {
+        let row_area = rows_layout[i];
+        // Create a centered area that is 50% of the row's width
+        let centered_row_area = Layout::horizontal([
+            Constraint::Percentage(38), // (100 - 25) / 2, rounded up
+            Constraint::Percentage(25),
+            Constraint::Percentage(37), // (100 - 25) / 2, rounded down
+        ]).split(row_area)[1];
+
+        let is_selected = selected_index == Some(i);
+        let is_toggled = app.toggled_interfaces.contains(iface_name);
+
+        // Determine styles based on toggled and selected state
+        let mut border_style = if is_toggled {
+            // Toggled: Green border
+            Style::default().fg(Color::Green)
+        } else {
+            // Untoggled: White border
+            Style::default().fg(Color::White)
+        };
+
+        // All interface text is blue by default
+        let mut iface_style = Style::default().fg(Color::Blue);
+
+        // Selected items get a blue border and white text to stand out
+        if is_selected {
+            border_style = Style::default().fg(Color::Blue); // Override border color
+            iface_style = Style::default(); // Override text color
+        }
+
+        let border_type = BorderType::Rounded; // All items are rounded
+
+        let item_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(border_type)
+            .border_style(border_style);
+
+        // Get the inner area of the block to create a new layout inside it
+        let inner_block_area = item_block.inner(centered_row_area);
+
+        // Split the inner area to align the component name and status separately
+        let inner_chunks = Layout::horizontal([
+            Constraint::Percentage(50), // Left side for interface name
+            Constraint::Percentage(50), // Right side for status
+        ]).split(inner_block_area);
+
+        let (status_text, status_style) = if is_toggled {
+            ("Active", Style::default().fg(Color::Green))
+        } else {
+            ("Inactive", Style::default().fg(Color::Red))
+        };
+
+        // Interface name paragraph (right-aligned)
+        let iface_line = Line::from(vec![
+            Span::styled(iface_name.clone(), iface_style),
+            Span::styled(" :", Style::default()),
+        ]);
+        let iface_paragraph = Paragraph::new(iface_line).right_aligned();
+
+
+        // Status paragraph (left-aligned)
+        let status_paragraph = Paragraph::new(Span::styled(format!(" {}", status_text), status_style))
+            .left_aligned();
+
+        f.render_widget(item_block, centered_row_area);
+        f.render_widget(iface_paragraph, inner_chunks[0]);
+        f.render_widget(status_paragraph, inner_chunks[1]);
+    }
 }
