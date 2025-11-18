@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use ratatui::{prelude::*, widgets::*};
+use color_eyre::owo_colors::OwoColorize;
+use ratatui::{prelude::*, widgets::*, widgets::block::Title};
 use crossterm::event::KeyCode;
 use tokio::sync::mpsc;
 use firewhal_core::{FireWhalMessage, UpdateInterfaces};
@@ -123,9 +124,15 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
 }
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
+    // Create a Title with its own style, independent of the border
+    let title = Title::from(" Select Interfaces (Space to toggle, Enter to apply) ")
+        .content.style(Style::default().fg(Color::Reset));
+
     let outer_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Select Interfaces (Space to toggle, Enter to apply) ");
+        .title(title) // Pass the explicitly styled Title
+        // Style the border to be blue
+        .border_style(Style::default().fg(Color::Blue));
     let inner_area = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
@@ -165,8 +172,8 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             // Toggled: Green border
             Style::default().fg(Color::Green)
         } else {
-            // Untoggled: White border
-            Style::default().fg(Color::White)
+            // Untoggled: Gray border
+            Style::default().fg(Color::DarkGray)
         };
 
         // All interface text is blue by default
