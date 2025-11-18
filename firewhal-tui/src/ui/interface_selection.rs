@@ -157,7 +157,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         };
 
         // All interface text is blue by default
-        let mut iface_style = Style::default().fg(Color::Blue);
+        let mut iface_style = Style::default();
 
         // Selected items get a blue border and white text to stand out
         if is_selected {
@@ -190,7 +190,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         // Interface name paragraph (right-aligned)
         let iface_line = Line::from(vec![
             Span::styled(iface_name.clone(), iface_style),
-            Span::styled(" :", border_style),
+            Span::styled(" :", Style::default()),
         ]);
         let iface_paragraph = Paragraph::new(iface_line).right_aligned();
 
