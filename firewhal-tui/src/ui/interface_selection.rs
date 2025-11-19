@@ -125,8 +125,13 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     // Create a Title with its own style, independent of the border
-    let title = Title::from(" Select Interfaces (Space to toggle, Enter to apply) ")
-        .content.style(Style::default().fg(Color::Reset));
+    let title = Title::from(Line::from(vec![
+        Span::raw(" Select Interfaces ("),
+        Span::styled("Space", Style::default().fg(Color::Cyan)),
+        Span::raw(" to toggle, "),
+        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::raw(" to apply) "),
+    ]));  // Set the default style for unstyled parts
 
     let outer_block = Block::default()
         .borders(Borders::ALL)
