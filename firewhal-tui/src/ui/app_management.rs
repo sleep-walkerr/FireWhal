@@ -37,10 +37,10 @@ pub struct EditState {
 /// The fields in our app editing form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FormField {
-    Name, Path, Save,
+    Name, Path, Hash, Save,
 }
 
-const FORM_FIELDS: [FormField; 3] = [FormField::Name, FormField::Path, FormField::Save];
+const FORM_FIELDS: [FormField; 4] = [FormField::Name, FormField::Path, FormField::Hash, FormField::Save];
 
 /// Holds all state related to the app management screen.
 #[derive(Debug, Clone)]
@@ -238,6 +238,7 @@ fn apply_input_buffer(state: &mut EditState) {
     match state.focused_field {
         FormField::Name => state.name = state.input_buffer.clone(),
         FormField::Path => state.identity.path = PathBuf::from(&state.input_buffer),
+        FormField::Hash => state.identity.hash = state.input_buffer.clone(),
         _ => {}
     }
 }
@@ -246,6 +247,7 @@ fn field_to_string(name: &str, identity: &AppIdentity, field: FormField) -> Stri
     match field {
         FormField::Name => name.to_string(),
         FormField::Path => identity.path.to_string_lossy().into_owned(),
+        FormField::Hash => identity.hash.clone(),
         _ => String::new(),
     }
 }
@@ -319,6 +321,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             let form_chunks = Layout::vertical([
                 Constraint::Length(3), // Name
                 Constraint::Length(3), // Path
+                Constraint::Length(3), // Hash
                 Constraint::Min(1),    // Spacer
                 Constraint::Length(3), // Save Button
             ]).split(form_inner_area);
@@ -329,6 +332,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             let path_val = if state.focused_field == FormField::Path { &state.input_buffer } else { state.identity.path.to_str().unwrap_or("") };
             render_form_field(f, form_chunks[1], "Path", path_val, state.focused_field == FormField::Path);
 
+            let hash_val = if state.focused_field == FormField::Hash { &state.input_buffer } else { &state.identity.hash };
+            render_form_field(f, form_chunks[2], "Hash", hash_val, state.focused_field == FormField::Hash);
+
             let save_text = "Save App";
             let save_style = if state.focused_field == FormField::Save {
                 Style::default().bg(Color::Rgb(255, 165, 0)).fg(Color::Black)
@@ -336,7 +342,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 Style::default().fg(Color::Rgb(255, 165, 0))
             };
             let save_button = Paragraph::new(save_text).style(save_style).alignment(Alignment::Center).block(Block::default().borders(Borders::ALL));
-            f.render_widget(save_button, form_chunks[3]);
+            f.render_widget(save_button, form_chunks[4]);
         }
         AppManagementMode::ConfirmingDelete { selected_yes } => {
             let popup_area = centered_rect(50, 25, area);
