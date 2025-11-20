@@ -33,13 +33,16 @@ else
     echo "-> User '$current_user' is already a member of the 'firewhal-admin' group."
 fi
 
+# Add nobody to firewhal-admin group
+sudo usermod -aG firewhal-admin nobody 
+
 echo "Killing previous instances of FireWhal"
 sudo pkill -f firewhal-daemon
 
-# echo "Installing Rule, App ID, and Interface State files."
-# sudo cp app_identity.toml /opt/firewhal/bin
-# sudo cp firewall_rules.toml /opt/firewhal/bin
-# sudo cp interface_state.toml /opt/firewhal/bin
+echo "Installing Rule, App ID, and Interface State files."
+sudo cp app_identity.toml /opt/firewhal/bin
+sudo cp firewall_rules.toml /opt/firewhal/bin
+sudo cp interface_state.toml /opt/firewhal/bin
 
 echo "Building binaries"
 # Build all binaries in the workspace in release mode

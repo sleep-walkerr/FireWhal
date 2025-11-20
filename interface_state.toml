@@ -1,4 +1,1 @@
-enforced_interfaces = [
-    "eth0",
-    "wlp5s0"
-]
+enforced_interfaces = []

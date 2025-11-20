@@ -62,9 +62,21 @@ fn save_rules(path: &path::Path, config: &FireWhalConfig) -> Result<(), Box<dyn 
 
 // Loads and deserializes the defined applications that will be used in filtering
 fn load_app_ids(path: &path::Path) -> Result<ApplicationAllowlistConfig, Box<dyn std::error::Error>> {
-    let toml_content = fs::read_to_string(path)?;
-    let config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
-    Ok(config)
+    if !path.exists() {
+        eprintln!("[Supervisor] App identity file not found at '{}'. Creating a new, empty one.", path.display());
+        // Create a default, empty config
+        let empty_config = ApplicationAllowlistConfig {
+            apps: HashMap::new(),
+        };
+        // Save it to create the file with the correct empty structure.
+        save_app_ids(path, &empty_config)?;
+        // Return the empty config
+        Ok(empty_config)
+    } else {
+        let toml_content = fs::read_to_string(path)?;
+        let config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
+        Ok(config)
+    }
 }
 
 // Same as load_app_ids but this time adds new applications sent from permissive mode

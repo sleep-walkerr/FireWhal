@@ -245,6 +245,7 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
     else if let Some(action) = unsafe { RULES.get(&keys_to_check[1]) } { matched_action = Some(action); }
     else if let Some(action) = unsafe { RULES.get(&keys_to_check[2]) } { matched_action = Some(action); }
 
+
     // --- 4. Process the matched rule ---
     if let Some(action) = matched_action {
         return match action.action {
@@ -372,9 +373,10 @@ fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
                     // info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed portless tuple found: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
                     return Ok(TC_ACT_OK);
                 } else {
-                    // info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+                    return Ok(TC_ACT_SHOT) // TEMPORARY: Until we get incoming rules sorted out
                     // If no stateful match, fall back to stateless ingress rule matching.
-                    return ingress_rule_matching(&ctx, tuple).map_err(|_| 0);
+                    //return ingress_rule_matching(&ctx, tuple).map_err(|_| 0);
                 }
             } else {
                 info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
