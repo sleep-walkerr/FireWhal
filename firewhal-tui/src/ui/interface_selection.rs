@@ -71,6 +71,8 @@ impl InterfaceListState {
 
 // User input processing
 pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
+
+
     // Create a sorted list of interfaces to ensure consistent ordering for navigation
     let mut sorted_interfaces: Vec<_> = app.available_interfaces.iter().cloned().collect();
     sorted_interfaces.sort();
@@ -127,9 +129,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     // Create a Title with its own style, independent of the border
     let title = Title::from(Line::from(vec![
         Span::raw(" Select Interfaces ("),
-        Span::styled("Space", Style::default().fg(Color::Cyan)),
+        Span::styled("Space", Style::default().fg(Color::Rgb(255, 165, 0))),
         Span::raw(" to toggle, "),
-        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::styled("Enter", Style::default().fg(Color::Rgb(255, 165, 0))),
         Span::raw(" to apply) "),
     ]));  // Set the default style for unstyled parts
 
@@ -186,7 +188,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
         // Selected items get a blue border and white text to stand out
         if is_selected {
-            border_style = Style::default().fg(Color::Blue); // Override border color
+            border_style = Style::default().fg(Color::Rgb(255, 165, 0)); // Override border color
             iface_style = Style::default(); // Override text color
         }
 

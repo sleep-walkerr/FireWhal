@@ -56,6 +56,8 @@ impl Default for RuleListState {
 }
 
 pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
+
+
     match app.rule_list_state.mode {
         RuleManagementMode::Viewing => handle_viewing_keys(key_code, app),
         RuleManagementMode::Editing(_) => handle_editing_keys(key_code, app),
@@ -400,7 +402,21 @@ fn render_form_field(f: &mut Frame, area: Rect, title: &str, value: &str, is_foc
 }
 
 fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
-    let title = if app.rules_modified { "Rule Management* (a: add, e: edit, d: delete, p: apply)" } else { "Rule Management (a: add, e: edit, d: delete)" };
+    let modified_indicator = if app.rules_modified { "*" } else { "" };
+    let title = Line::from(vec![
+        Span::styled("Rule ", Style::default().fg(Color::Blue)),
+        Span::styled("Management", Style::default().fg(Color::Blue)),
+        Span::styled(modified_indicator, Style::default().fg(Color::Yellow)),
+        Span::raw(" ("),
+        Span::styled("a", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": add, "),
+        Span::styled("e", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": edit, "),
+        Span::styled("d", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": delete"),
+        if app.rules_modified { Span::raw(", p: apply") } else { Span::raw("") },
+        Span::raw(")"),
+    ]);
 
     let header_cells = ["Action", "Protocol", "Src IP", "Src Port", "Dest IP", "Dest Port", "Description"]
         .iter()
@@ -432,7 +448,11 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
     ];
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                .title(title))
         .row_highlight_style(Style::default().bg(Color::DarkGray));
 
     f.render_stateful_widget(table, area, &mut app.rule_list_state.table_state);
