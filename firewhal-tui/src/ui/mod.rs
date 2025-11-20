@@ -38,7 +38,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
             }
             interface_selection::render(f, app, content_area)
         },
-        AppScreen::RuleManagement => rule_management::render(f, app, content_area),
+        AppScreen::RuleManagement => {
+            if app.rule_list_state.list_state.selected().is_none() && !app.rules.is_empty() {
+                app.rule_list_state.list_state.select(Some(0));
+            }
+            rule_management::render(f, app, content_area)
+        },
         AppScreen::AppManagement => app_management::render(f, app, content_area),
         AppScreen::PermissiveMode => permissive_mode::render(f, app, content_area),
         AppScreen::Debug => {

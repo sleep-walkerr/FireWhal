@@ -1,4 +1,4 @@
-use ratatui::{prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::*, widgets::block::Title};
 use crossterm::event::{KeyCode, KeyEvent};
 use firewhal_core::{FireWhalConfig, FireWhalMessage, Rule, Action, Protocol};
 use crate::ui::app::App;
@@ -42,14 +42,14 @@ const FORM_FIELDS: [FormField; 8] = [FormField::Action, FormField::Protocol, For
 /// Holds all state related to the rule management screen.
 #[derive(Debug, Clone)]
 pub struct RuleListState {
-    pub table_state: TableState,
+    pub list_state: ListState,
     pub mode: RuleManagementMode,
 }
 
 impl Default for RuleListState {
     fn default() -> Self {
         Self {
-            table_state: TableState::default(),
+            list_state: ListState::default(),
             mode: RuleManagementMode::Viewing,
         }
     }
@@ -69,16 +69,16 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
     match key_code {
         KeyCode::Down => {
             if !app.rules.is_empty() {
-                let i = app.rule_list_state.table_state.selected().unwrap_or(0);
+                let i = app.rule_list_state.list_state.selected().unwrap_or(0);
                 let next = if i >= app.rules.len() - 1 { 0 } else { i + 1 };
-                app.rule_list_state.table_state.select(Some(next));
+                app.rule_list_state.list_state.select(Some(next));
             }
         }
         KeyCode::Up => {
             if !app.rules.is_empty() {
-                let i = app.rule_list_state.table_state.selected().unwrap_or(0);
+                let i = app.rule_list_state.list_state.selected().unwrap_or(0);
                 let prev = if i == 0 { app.rules.len() - 1 } else { i - 1 };
-                app.rule_list_state.table_state.select(Some(prev));
+                app.rule_list_state.list_state.select(Some(prev));
             }
         }
         KeyCode::Char('a') => {
@@ -102,7 +102,7 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
         }
         KeyCode::Char('e') => {
             // Edit selected rule
-            if let Some(selected_index) = app.rule_list_state.table_state.selected() {
+            if let Some(selected_index) = app.rule_list_state.list_state.selected() {
                 if let Some(rule_to_edit) = app.rules.get(selected_index).cloned() {
                     let focused_field = FormField::Action;
                     let input_buffer = field_to_string(&rule_to_edit, focused_field);
@@ -117,7 +117,7 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
         }
         KeyCode::Char('d') => {
             // Delete selected rule
-            if app.rule_list_state.table_state.selected().is_some() {
+            if app.rule_list_state.list_state.selected().is_some() {
                 app.rule_list_state.mode = RuleManagementMode::ConfirmingDelete {
                     selected_yes: false, // Default to "No"
                 };
@@ -263,13 +263,13 @@ fn handle_confirm_delete_keys(key_code: KeyCode, app: &mut App) {
             }
             KeyCode::Enter => {
                 if *selected_yes {
-                    if let Some(selected_index) = app.rule_list_state.table_state.selected() {
+                    if let Some(selected_index) = app.rule_list_state.list_state.selected() {
                         if selected_index < app.rules.len() {
                             app.rules.remove(selected_index);
                             app.rules_modified = true;
                         }
                     }
-                    app.rule_list_state.table_state.select(None); // Deselect
+                    app.rule_list_state.list_state.select(None); // Deselect
                 }
                 app.rule_list_state.mode = RuleManagementMode::Viewing;
             }
@@ -402,10 +402,21 @@ fn render_form_field(f: &mut Frame, area: Rect, title: &str, value: &str, is_foc
 }
 
 fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
+    // Define column widths
+    let widths = [
+        Constraint::Percentage(8),  // Action
+        Constraint::Percentage(8),  // Protocol
+        Constraint::Percentage(15), // Src IP
+        Constraint::Percentage(8),  // Src Port
+        Constraint::Percentage(15), // Dest IP
+        Constraint::Percentage(8),  // Dest Port
+        Constraint::Percentage(38), // Description
+    ];
+    let layout = Layout::horizontal(widths);
+
     let modified_indicator = if app.rules_modified { "*" } else { "" };
-    let title = Line::from(vec![
-        Span::styled("Rule ", Style::default().fg(Color::Blue)),
-        Span::styled("Management", Style::default().fg(Color::Blue)),
+    let title_spans = Line::from(vec![
+        Span::raw("Rule Management"),
         Span::styled(modified_indicator, Style::default().fg(Color::Yellow)),
         Span::raw(" ("),
         Span::styled("a", Style::default().fg(Color::Rgb(255, 165, 0))),
@@ -414,46 +425,68 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
         Span::raw(": edit, "),
         Span::styled("d", Style::default().fg(Color::Rgb(255, 165, 0))),
         Span::raw(": delete"),
-        if app.rules_modified { Span::raw(", p: apply") } else { Span::raw("") },
+        if app.rules_modified { Span::styled(", p: apply", Style::default().fg(Color::Rgb(255, 165, 0))) } else { Span::raw("") },
         Span::raw(")"),
     ]);
+    let title = Title::from(title_spans).content.style(Style::default().fg(Color::Blue));
 
-    let header_cells = ["Action", "Protocol", "Src IP", "Src Port", "Dest IP", "Dest Port", "Description"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Rgb(255, 165, 0)).bold()));
-    let header = Row::new(header_cells).height(1).bottom_margin(1);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(title);
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
 
+    let list_layout = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner_area);
+    let header_area = list_layout[0];
+    let list_area = list_layout[1];
 
-    let rows = app.rules.iter().map(|rule| {
-        let cells = vec![
-            Cell::from(format!("{:?}", rule.action)),
-            Cell::from(rule.protocol.map_or("any".to_string(), |p| format!("{:?}", p))),
-            Cell::from(rule.source_ip.map_or("any".to_string(), |ip| ip.to_string())),
-            Cell::from(rule.source_port.map_or("any".to_string(), |p| p.to_string())),
-            Cell::from(rule.dest_ip.map_or("any".to_string(), |ip| ip.to_string())),
-            Cell::from(rule.dest_port.map_or("any".to_string(), |p| p.to_string())),
-            Cell::from(rule.description.clone()),
+    // Render Header
+    let header_spans = ["Action", "Protocol", "Src IP", "Src Port", "Dest IP", "Dest Port", "Description"];
+    let header_cols = layout.split(header_area);
+    for (i, header) in header_spans.iter().enumerate() {
+        f.render_widget(Paragraph::new(*header).style(Style::default().fg(Color::Rgb(255, 165, 0)).bold()), header_cols[i]);
+    }
+
+    // Render List Items
+    let list_item_cols = layout.split(Rect::new(0, 0, inner_area.width, 1)); // Create a template rect to get widths
+    let items: Vec<ListItem> = app.rules.iter().map(|rule| {
+        let col_widths: Vec<usize> = list_item_cols.iter().map(|r| r.width as usize).collect();
+
+        let action = format!("{:<width$}", format!("{:?}", rule.action), width = col_widths[0]);
+        let protocol = format!("{:<width$}", rule.protocol.map_or("any".to_string(), |p| format!("{:?}", p)), width = col_widths[1]);
+        let src_ip = format!("{:<width$}", rule.source_ip.map_or("any".to_string(), |ip| ip.to_string()), width = col_widths[2]);
+        let src_port = format!("{:<width$}", rule.source_port.map_or("any".to_string(), |p| p.to_string()), width = col_widths[3]);
+        let dest_ip = format!("{:<width$}", rule.dest_ip.map_or("any".to_string(), |ip| ip.to_string()), width = col_widths[4]);
+        let dest_port = format!("{:<width$}", rule.dest_port.map_or("any".to_string(), |p| p.to_string()), width = col_widths[5]);
+        let desc = format!("{:<width$}", rule.description.clone(), width = col_widths[6]);
+
+        let cells = vec![action, protocol, src_ip, src_port, dest_ip, dest_port, desc];
+        let combined_string = cells.join("");
+        // The content MUST be truncated to the inner width minus the two border characters.
+        let content_width = inner_area.width.saturating_sub(2) as usize;
+        let truncated_string = combined_string.chars().take(content_width).collect::<String>();
+
+        let item_width = inner_area.width as usize;
+        let bar_width = item_width.saturating_sub(2);
+        let top_border = format!("╭{}╮", "─".repeat(bar_width));
+        let bottom_border = format!("╰{}╯", "─".repeat(bar_width));
+
+        let mut content_spans = vec![Span::raw("│")];
+        content_spans.push(Span::raw(format!("{:<width$}", truncated_string, width = content_width)));
+        content_spans.push(Span::raw("│"));
+        let content_line = Line::from(content_spans);
+
+        let lines = vec![
+            Line::from(top_border),
+            content_line,
+            Line::from(bottom_border),
         ];
-        Row::new(cells).height(1)
-    });
+        ListItem::new(lines)
+    }).collect();
 
-    let widths = [
-            Constraint::Percentage(8),
-            Constraint::Percentage(8),
-            Constraint::Percentage(15),
-            Constraint::Percentage(8),
-            Constraint::Percentage(15),
-            Constraint::Percentage(8),
-            Constraint::Percentage(38),
-    ];
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
-                .title(title))
-        .row_highlight_style(Style::default().bg(Color::DarkGray));
+    let list = List::new(items)
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
-    f.render_stateful_widget(table, area, &mut app.rule_list_state.table_state);
+    f.render_stateful_widget(list, list_area, &mut app.rule_list_state.list_state);
 }
