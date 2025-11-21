@@ -240,7 +240,7 @@ async fn main() -> Result<(), io::Error> {
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('q') => break, // Only quit from navigation
+                    KeyCode::Char('q') if app_guard.focus_on_navigation =>  break, // Only quit from navigation
                     KeyCode::Tab => {
                         app_guard.next_screen(); // This just toggles focus now.
                     },
