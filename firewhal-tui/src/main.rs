@@ -158,6 +158,11 @@ async fn main() -> Result<(), io::Error> {
                     // For now, we only show outgoing rules. This can be expanded later.
                     app_guard.rules.extend(rules_message.outgoing_rules);
                     app_guard.rules.extend(rules_message.incoming_rules);
+
+                    // Select the first item if nothing is selected
+                    if app_guard.rule_list_state.table_state.selected().is_none() {
+                        app_guard.rule_list_state.table_state.select(Some(0));
+                    }
                 }
                 FireWhalMessage::AppsResponse(app_id_message) => {
                     app_guard.debug_print.add_message(format!("[TUI]: AppIdsResponse Received."));
@@ -185,6 +190,11 @@ async fn main() -> Result<(), io::Error> {
                             // Use try_send as we are in an async block but don't want to block it.
                             let _ = tx.try_send(hashes_request_msg);
                         }
+                    }
+
+                    // Select the first item if nothing is selected
+                    if app_guard.app_list_state.table_state.selected().is_none() {
+                        app_guard.app_list_state.table_state.select(Some(0));
                     }
                 }
                 FireWhalMessage::HashesResponse(message) => {
@@ -230,7 +240,7 @@ async fn main() -> Result<(), io::Error> {
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('q') if app_guard.focus_on_navigation => break, // Only quit from navigation
+                    KeyCode::Char('q') => break, // Only quit from navigation
                     KeyCode::Tab => {
                         app_guard.next_screen(); // This just toggles focus now.
                     },

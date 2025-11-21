@@ -382,16 +382,30 @@ fn render_form_field(f: &mut Frame, area: Rect, title: &str, value: &str, is_foc
 }
 
 fn render_apps_table(f: &mut Frame, app: &mut App, area: Rect) {
-    let title = if app.apps_modified {
-        "App Management* (a: add, e: edit, d: delete, h: re-hash, Ctrl+h: re-hash all, p: apply)"
-    } else {
-        "App Management (a: add, e: edit, d: delete, h: re-hash, Ctrl+h: re-hash all)"
-    };
+    let modified_indicator = if app.apps_modified { "*" } else { "" };
+    let title = Line::from(vec![
+        Span::styled("App ", Style::default().fg(Color::LightCyan)),
+        Span::styled("Management", Style::default().fg(Color::LightCyan)),
+        Span::styled(modified_indicator, Style::default().fg(Color::Yellow)),
+        Span::raw(" ("),
+        Span::styled("a", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": add, "),
+        Span::styled("e", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": edit, "),
+        Span::styled("d", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": delete, "),
+        Span::styled("h", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": re-hash, "),
+        Span::styled("Ctrl+h", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": re-hash all"),
+        if app.apps_modified { Span::raw(", p: apply") } else { Span::raw("") },
+        Span::raw(")"),
+    ]);
 
-    let header = Row::new(["Name", "Path", "Hash"])
-        .style(Style::default().fg(Color::Rgb(255, 165, 0)).bold())
-        .height(1)
-        .bottom_margin(1);
+    let header_cells = ["Name", "Path", "Hash"]
+        .iter()
+        .map(|h| Cell::from(*h).style(Style::default().fg(Color::LightCyan).bold()));
+    let header = Row::new(header_cells).height(1);
 
     let sorted_apps = get_sorted_apps(app);
     let rows = sorted_apps.iter().map(|(app_name, identity)| {
@@ -409,11 +423,46 @@ fn render_apps_table(f: &mut Frame, app: &mut App, area: Rect) {
         ]).height(1)
     });
 
-    let widths = [Constraint::Percentage(20), Constraint::Percentage(50), Constraint::Percentage(30)];
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .row_highlight_style(Style::default().bg(Color::DarkGray));
+    let main_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(title);
+    let inner_area = main_block.inner(area);
+    f.render_widget(main_block, area);
 
-    f.render_stateful_widget(table, area, &mut app.app_list_state.table_state);
+    let horizontal_chunks = Layout::horizontal([
+        Constraint::Length(1), // Left spacing
+        Constraint::Min(0),    // Main content
+        Constraint::Length(1), // Right spacing
+    ]).split(inner_area);
+    let content_area = horizontal_chunks[1];
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // Top spacing
+        Constraint::Length(1), // Separator line
+        Constraint::Length(1), // Header text
+        Constraint::Length(1), // Separator line
+        Constraint::Min(0),    // Table
+        Constraint::Length(1), // Bottom spacing
+    ]).split(content_area);
+
+    let top_separator = Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Blue));
+    let bottom_separator = Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Blue));
+
+    let widths = [Constraint::Percentage(20), Constraint::Percentage(50), Constraint::Percentage(30)];
+    // The row is only visually highlighted when the content pane has focus.
+    let highlight_style = if !app.focus_on_navigation {
+        Style::default().bg(Color::Rgb(255, 165, 0)).fg(Color::Black).bold()
+    } else {
+        Style::default() // A muted style for when nav is focused
+    };
+    let table = Table::new(rows, widths)
+        .row_highlight_style(highlight_style);
+
+    let header_table = Table::new(Vec::<Row>::new(), widths.clone()).header(header);
+
+    f.render_widget(top_separator, layout[1]);
+    f.render_widget(header_table, layout[2]);
+    f.render_widget(bottom_separator, layout[3]);
+    f.render_stateful_widget(table, layout[4], &mut app.app_list_state.table_state);
 }

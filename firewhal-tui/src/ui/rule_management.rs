@@ -404,8 +404,8 @@ fn render_form_field(f: &mut Frame, area: Rect, title: &str, value: &str, is_foc
 fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
     let modified_indicator = if app.rules_modified { "*" } else { "" };
     let title = Line::from(vec![
-        Span::styled("Rule ", Style::default().fg(Color::Blue)),
-        Span::styled("Management", Style::default().fg(Color::Blue)),
+        Span::styled("Rule ", Style::default().fg(Color::LightCyan)),
+        Span::styled("Management", Style::default().fg(Color::LightCyan)),
         Span::styled(modified_indicator, Style::default().fg(Color::Yellow)),
         Span::raw(" ("),
         Span::styled("a", Style::default().fg(Color::Rgb(255, 165, 0))),
@@ -418,15 +418,18 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
         Span::raw(")"),
     ]);
 
-    let header_cells = ["Action", "Protocol", "Src IP", "Src Port", "Dest IP", "Dest Port", "Description"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Rgb(255, 165, 0)).bold()));
-    let header = Row::new(header_cells).height(1).bottom_margin(1);
 
 
-    let rows = app.rules.iter().map(|rule| {
+    let rows: Vec<Row> = app.rules.iter().map(|rule| {
+        let action_cell = {
+            let color = match rule.action {
+                Action::Allow => Color::Green,
+                Action::Deny => Color::Red,
+            };
+            Cell::from(format!("{:?}", rule.action)).style(Style::default().fg(color))
+        };
         let cells = vec![
-            Cell::from(format!("{:?}", rule.action)),
+            action_cell,
             Cell::from(rule.protocol.map_or("any".to_string(), |p| format!("{:?}", p))),
             Cell::from(rule.source_ip.map_or("any".to_string(), |ip| ip.to_string())),
             Cell::from(rule.source_port.map_or("any".to_string(), |p| p.to_string())),
@@ -435,7 +438,38 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
             Cell::from(rule.description.clone()),
         ];
         Row::new(cells).height(1)
-    });
+    }).collect();
+
+    let main_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(title);
+    let inner_area = main_block.inner(area);
+    f.render_widget(main_block, area);
+
+    let horizontal_chunks = Layout::horizontal([
+        Constraint::Length(1), // Left spacing
+        Constraint::Min(0),    // Main content
+        Constraint::Length(1), // Right spacing
+    ]).split(inner_area);
+    let content_area = horizontal_chunks[1];
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // Top spacing
+        Constraint::Length(1), // Separator line
+        Constraint::Length(1), // Header text
+        Constraint::Length(1), // Separator line
+        Constraint::Min(0),    // Table
+        Constraint::Length(1), // Bottom spacing
+    ]).split(content_area);
+
+    let header_cells = ["Action", "Protocol", "Src IP", "Src Port", "Dest IP", "Dest Port", "Description"]
+        .iter()
+        .map(|h| Cell::from(*h).style(Style::default().fg(Color::LightCyan).bold()));
+    let header = Row::new(header_cells).height(1);
+
+    let top_separator = Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Blue));
+    let bottom_separator = Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Blue));
 
     let widths = [
             Constraint::Percentage(8),
@@ -446,14 +480,20 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Percentage(8),
             Constraint::Percentage(38),
     ];
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
-                .title(title))
-        .row_highlight_style(Style::default().bg(Color::DarkGray));
 
-    f.render_stateful_widget(table, area, &mut app.rule_list_state.table_state);
+    // The row is only visually highlighted when the content pane has focus.
+    let highlight_style = if !app.focus_on_navigation {
+        Style::default().bg(Color::Rgb(255, 165, 0)).fg(Color::Black).bold()
+    } else {
+        Style::default() // A muted style for when nav is focused
+    };
+    let table = Table::new(rows, widths)
+        .row_highlight_style(highlight_style);
+
+    let header_table = Table::new(Vec::<Row>::new(), widths.clone()).header(header);
+
+    f.render_widget(top_separator, layout[1]);
+    f.render_widget(header_table, layout[2]);
+    f.render_widget(bottom_separator, layout[3]);
+    f.render_stateful_widget(table, layout[4], &mut app.rule_list_state.table_state);
 }
