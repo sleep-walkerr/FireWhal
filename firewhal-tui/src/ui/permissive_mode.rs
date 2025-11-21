@@ -4,7 +4,7 @@ use ratatui::{prelude::*, widgets::*};
 use crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 use firewhal_core::{FireWhalMessage, UpdateInterfaces};
-use crate::ui::app::App;
+use crate::ui::{app::App, permissive_mode};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ActivePanel {
@@ -108,6 +108,10 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
             }
             KeyCode::Right | KeyCode::Tab => {
                 state.active_panel = ActivePanel::Processes;
+                // When switching to processes, if nothing is selected, select the first one.
+                if state.process_list_state.selected().is_none() {
+                    state.process_list_state.select(Some(0));
+                }
             }
             _ => {}
         },
@@ -181,14 +185,36 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     // --- Styles ---
-    let highlight_style = Style::default().bg(Color::DarkGray);
-    let active_panel_style = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title_style(Style::default().add_modifier(Modifier::BOLD));
-    let inactive_panel_style = Block::default()
+    let highlight_style = if !app.focus_on_navigation {
+        Style::default().bg(Color::Rgb(255, 165, 0)).fg(Color::Black).bold()
+    } else {
+        Style::default() // A muted style for when nav is focused
+    };
+    let inactive_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray));
+
+    // --- Active Panel Titles ---
+    let lineages_title_active = Line::from(vec![
+        Span::styled("Lineages", Style::default().fg(Color::LightCyan)),
+        Span::raw(" ("),
+        Span::styled("←→", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(" to switch)"),
+    ]);
+
+    let processes_title_active = Line::from(vec![
+        Span::styled("Processes", Style::default().fg(Color::LightCyan)),
+        Span::raw(" ("),
+        Span::styled("Space", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(" to toggle, "),
+        Span::styled("Enter", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(" to approve)"),
+    ]);
+
+    // --- Inactive Panel Titles ---
+    let lineages_title_inactive = Line::from(vec![Span::styled("Lineages", Style::default().fg(Color::DarkGray))]);
+    let processes_title_inactive = Line::from(vec![Span::styled("Processes", Style::default().fg(Color::DarkGray))]);
+
 
     // --- Panel 1: Lineages ---
     let lineage_items: Vec<ListItem> = app
@@ -211,16 +237,25 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let lineages_block = if app.permissive_mode_list_state.active_panel == ActivePanel::Lineages {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue))
+            .title(lineages_title_active)
+    } else {
+        inactive_block.clone().title(lineages_title_inactive)
+    };
+
     let lineage_list = List::new(lineage_items)
-        .block(
+        .block(lineages_block)
+        .highlight_style(
             if app.permissive_mode_list_state.active_panel == ActivePanel::Lineages {
-                active_panel_style.clone().title("Lineages (←→ to switch)")
+                highlight_style
             } else {
-                inactive_panel_style.clone().title("Lineages")
-            },
-        )
-        .highlight_style(highlight_style)
-        .highlight_symbol(">> ");
+                Style::default()
+            }
+        );
+        // .highlight_symbol(">> ")
 
     let mut lineage_list_state = app.permissive_mode_list_state.lineage_list_state.clone();
     f.render_stateful_widget(lineage_list, chunks[0], &mut lineage_list_state);
@@ -251,14 +286,25 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         vec![ListItem::new("No lineages detected yet.")]
     };
 
+    let processes_block = if app.permissive_mode_list_state.active_panel == ActivePanel::Processes {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue))
+            .title(processes_title_active)
+    } else {
+        inactive_block.title(processes_title_inactive)
+    };
+
     let process_list = List::new(process_items)
-        .block(if app.permissive_mode_list_state.active_panel == ActivePanel::Processes {
-            active_panel_style.title("Processes (Space to toggle, Enter to approve)")
-        } else {
-            inactive_panel_style.title("Processes")
-        })
-        .highlight_style(highlight_style)
-        .highlight_symbol(">> ");
+        .block(processes_block)
+        .highlight_style(
+            if app.permissive_mode_list_state.active_panel == ActivePanel::Processes {
+                highlight_style
+            } else {
+                Style::default()
+            }
+        );
+        // .highlight_symbol(">> ")
 
     let mut process_list_state = app.permissive_mode_list_state.process_list_state.clone();
     f.render_stateful_widget(process_list, chunks[1], &mut process_list_state);

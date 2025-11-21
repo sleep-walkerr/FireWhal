@@ -147,7 +147,10 @@ async fn main() -> Result<(), io::Error> {
                             app_guard.debug_print.add_message(format!("[TUI]: Permissive Mode Tuple Received: [{}]", lineage_tuple.0));
                         }
                         app_guard.process_lineage_tuple_list.add_tuple(tuple_message.lineage_tuple.iter().cloned().collect());
-                        // app_guard.debug_print.add_message("[TUI]: Permissive Mode Tuple Received".to_string());
+                        // Select the first item if nothing is selected
+                        if app_guard.permissive_mode_list_state.lineage_list_state.selected().is_none() {
+                            app_guard.permissive_mode_list_state.lineage_list_state.select(Some(0));
+                        }
                     }
                     
                 }
