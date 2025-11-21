@@ -293,14 +293,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     router.send(payload, 0);
                 }
             }
-            FireWhalMessage::HashesRequest(_) => {
+            FireWhalMessage::HashRequest(_) => {
                 if let Some(daemon_identity) = clients.get("Daemon") {
                     println!("[ROUTER] Forwarding HashesRequest to Daemon.");
                     router.send(daemon_identity, zmq::SNDMORE)?;
                     router.send(payload, 0);
                 }
             }
-            FireWhalMessage::HashesResponse(_) => {
+            FireWhalMessage::HashResponse(_) => {
                 if let Some(tui_identity) = clients.get("TUI") {
                     println!("[ROUTER] Forwarding HashesResponse to TUI.");
                     router.send(tui_identity, zmq::SNDMORE)?;

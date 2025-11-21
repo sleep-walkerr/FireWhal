@@ -37,7 +37,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashesResponse, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashesResponse, zmq_client_connection};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashResponse, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, zmq_client_connection};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -300,26 +300,26 @@ fn main() {
 }
 
 // Takes an app_id_config and then uses the hasher to rehash each application and then update the config with the updated hashes
-async fn correct_hashes_in_app_id_config(
-    mut apps_to_hash: HashMap<String, AppIdentity>,
-) -> Result<HashMap<String, AppIdentity>, anyhow::Error> {
+async fn correct_hash_for_app_id(
+    mut app_to_hash: (String, AppIdentity),
+) -> Result<(String, AppIdentity), anyhow::Error> {
     // Reverting to a sequential loop. This is slower than concurrent versions
     // but has proven to be the most stable, as it avoids spawning many
     // processes at once, which was causing resource exhaustion and crashes.
-    for identity in apps_to_hash.values_mut() {
-        // Check if file at path actually exists.
-        if identity.path.is_file() { 
-            println!("[Supervisor] Updating hash for '{}'.", identity.path.display());
-            identity.hash = calculate_file_hash(identity.path.clone()).await?;
-        } else {
-            // Change path text to say INVALID PATH
-            identity.path = PathBuf::from("INVALID PATH");
-            identity.hash = "UNKNOWN".to_string();
-        }
+
+    // Check if file at path actually exists.
+    if app_to_hash.1.path.exists() && app_to_hash.1.path.is_file() { 
+        println!("[Supervisor] Updating hash for '{}'.", app_to_hash.1.path.display());
+        app_to_hash.1.hash = calculate_file_hash(app_to_hash.1.path.clone()).await?;
+    } else {
+        // Change path text to say INVALID PATH
+        app_to_hash.1.path = PathBuf::from("INVALID PATH");
+        app_to_hash.1.hash = "UNKNOWN".to_string();
     }
 
+
     // Return the modified map by value.
-    Ok(apps_to_hash)
+    Ok(app_to_hash)
 }
 
 /// The main async logic for the supervisor daemon.
@@ -610,14 +610,14 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                             }
                         }
                     }
-                    FireWhalMessage::HashesRequest(message) => {
+                    FireWhalMessage::HashRequest(message) => {
                         println!("[Supervisor] Received HashesRequest command from TUI");
                         // Collect update all hashes in app list and then send back
-                        let updated_hashes = correct_hashes_in_app_id_config(message.apps_to_get_hashes_for).await?;
-                        let msg = FireWhalMessage::HashesResponse(
-                            DaemonHashesResponse {
+                        let updated_hash = correct_hash_for_app_id(message.app_to_get_hash_for).await?;
+                        let msg = FireWhalMessage::HashResponse(
+                            DaemonHashResponse {
                                 component: "Daemon".to_string(),
-                                apps_with_updated_hashes: updated_hashes,
+                                app_with_updated_hash: updated_hash,
                             }
                         );
                         if let Err(e) = to_zmq_tx.send(msg).await {
@@ -628,11 +628,11 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     }
                     FireWhalMessage::HashUpdateRequest(message) => {
                         println!("[Supervisor] Received HashUpdateRequest command from TUI");
-                        let updated_hashes = correct_hashes_in_app_id_config(message.apps_to_update_hash_for).await?;
+                        let updated_hash = correct_hash_for_app_id(message.app_to_update_hash_for).await?;
                         let msg = FireWhalMessage::HashUpdateResponse(
-                            UpdatedHashesResponse {
+                            UpdatedHashResponse {
                                 component: "Daemon".to_string(),
-                                updated_apps: updated_hashes,
+                                updated_app: updated_hash,
                             }
                         );
                         if let Err(e) = to_zmq_tx.send(msg).await {

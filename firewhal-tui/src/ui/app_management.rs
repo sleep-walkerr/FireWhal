@@ -1,6 +1,6 @@
 use ratatui::{prelude::*, widgets::*};
 use crossterm::event::{KeyCode, KeyModifiers};
-use firewhal_core::{FireWhalMessage, ApplicationAllowlistConfig, AppIdentity, RequestToUpdateHashes};
+use firewhal_core::{FireWhalMessage, ApplicationAllowlistConfig, AppIdentity, RequestToUpdateHash};
 use crate::ui::app::{App, HashState};
 use crate::ui::centered_rect;
 use std::path::PathBuf;
@@ -141,9 +141,9 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
                     let mut app_to_rehash = std::collections::HashMap::new();
                     app_to_rehash.insert(name.clone(), identity.clone());
 
-                    let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHashes {
+                    let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHash {
                         component: "TUI".to_string(),
-                        apps_to_update_hash_for: app_to_rehash
+                        app_to_update_hash_for: (name.clone(), identity.clone())
                     });
 
                     if let Some(tx) = &app.to_zmq_tx {
@@ -164,20 +164,23 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
 pub fn handle_key_event_with_modifiers(key_code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
     if modifiers == KeyModifiers::CONTROL && key_code == KeyCode::Char('h') {
         // Re-hash all applications
-        let all_apps_to_rehash = app.apps.clone();
-        let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHashes {
-            component: "TUI".to_string(),
-            apps_to_update_hash_for: all_apps_to_rehash,
-        });
+        for (name, identity) in &app.apps {
 
-        if let Some(tx) = &app.to_zmq_tx {
-            if let Err(e) = tx.try_send(msg) {
-                app.debug_print.add_message(format!("[TUI] Failed to send bulk HashUpdateRequest: {}", e));
-            } else {
-                app.debug_print.add_message("[TUI] Sent HashUpdateRequest for all apps".to_string());
-                app.apps_modified = true; // Mark as modified
+            let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHash {
+                component: "TUI".to_string(),
+                app_to_update_hash_for: (name.clone(), identity.clone()),
+            });
+
+            if let Some(tx) = &app.to_zmq_tx {
+                if let Err(e) = tx.try_send(msg) {
+                    app.debug_print.add_message(format!("[TUI] Failed to send bulk HashUpdateRequest: {}", e));
+                } else {
+                    app.debug_print.add_message("[TUI] Sent HashUpdateRequest for all apps".to_string());
+                    app.apps_modified = true; // Mark as modified
+                }
             }
         }
+ 
     } else {
         // If no modifiers, or not the one we're looking for, pass to the normal handler
         handle_key_event(key_code, app);

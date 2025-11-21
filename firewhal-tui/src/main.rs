@@ -25,6 +25,8 @@ use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate, Status
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::Mutex;
 
+use crate::ui::app;
+
 
 // Upon entering the interface selection menu, have the TUI send a message requesting the interface list
 // The userspace loader receives the message, scans for interfaces, and then sends a request response
@@ -169,6 +171,7 @@ async fn main() -> Result<(), io::Error> {
                 }
                 FireWhalMessage::AppsResponse(app_id_message) => {
                     app_guard.debug_print.add_message(format!("[TUI]: AppIdsResponse Received."));
+
                     // Clear existing apps and add new ones
                     app_guard.apps.clear();
                     // Also clear the hash states
@@ -176,7 +179,6 @@ async fn main() -> Result<(), io::Error> {
 
                     app_guard.apps.extend(app_id_message.apps.into_iter());
 
-                    // --- THE FIX: Send HashesRequest *after* receiving the app list ---
                     let apps_to_hash: std::collections::HashMap<String, firewhal_core::AppIdentity> = app_guard.apps.clone();
                     if !apps_to_hash.is_empty() {
                         // Set all hashes to unchecked initially
@@ -184,14 +186,18 @@ async fn main() -> Result<(), io::Error> {
                             app_guard.hash_states.insert(name.clone(), HashState::Unchecked);
                         }
 
-                        let hashes_request_msg = FireWhalMessage::HashesRequest(firewhal_core::TUIHashesRequest {
-                            component: "TUI".to_string(),
-                            apps_to_get_hashes_for: apps_to_hash,
-                        });
+                        // Send each hash request individually
+                        for (app_name, app_identity) in apps_to_hash {
+                            let hashes_request_msg = FireWhalMessage::HashRequest(firewhal_core::TUIHashRequest {
+                                component: "TUI".to_string(),
+                                app_to_get_hash_for: (app_name, app_identity),
+                            });
 
-                        if let Some(tx) = &app_guard.to_zmq_tx {
-                            // Use try_send as we are in an async block but don't want to block it.
-                            let _ = tx.try_send(hashes_request_msg);
+                            if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                if let Err(e) = zmq_sender.try_send(hashes_request_msg) {
+                                    _ = &app_guard.debug_print.add_message(format!("Failed to send HashRequest message: {}", e));
+                                }
+                            } else { _ = &app_guard.debug_print.add_message("found no zmq sender".to_string()); }
                         }
                     }
 
@@ -200,32 +206,27 @@ async fn main() -> Result<(), io::Error> {
                         app_guard.app_list_state.table_state.select(Some(0));
                     }
                 }
-                FireWhalMessage::HashesResponse(message) => {
-                    app_guard.debug_print.add_message(format!("[TUI]: HashesResponse Received."));
-                    // Iterate through the original apps list to compare hashes
-                    for (app_name, local_identity) in &app_guard.apps.clone() {
-                        if let Some(app_identity) = message.apps_with_updated_hashes.get(app_name) {
-                            let new_state = if local_identity.hash == app_identity.hash {
-                                HashState::Valid
-                            } else {
-                                HashState::Invalid
-                            };
-                            app_guard.hash_states.insert(app_name.clone(), new_state);
-                        }
+                FireWhalMessage::HashResponse(message) => { //*** */
+                    let (app_name, daemon_identity) = message.app_with_updated_hash;
+                    app_guard.debug_print.add_message(format!("[TUI]: HashResponse received for '{}'.", app_name));
 
+                    if let Some(local_identity) = app_guard.apps.get(&app_name) {
+                        let new_state = if local_identity.hash == daemon_identity.hash {
+                            HashState::Valid
+                        } else {
+                            HashState::Invalid
+                        };
+                        app_guard.hash_states.insert(app_name, new_state);
                     }
                 }
-                FireWhalMessage::HashUpdateResponse(message) => {
-                    app_guard.debug_print.add_message(format!("[TUI]: HashUpdateResponse Received."));
-                    // Iterate through the original apps list to compare hashes
-                    for (app_name, local_identity) in &app_guard.apps.clone() {
-                        if let Some(app_identity) = message.updated_apps.get(app_name) {
-                            let valid_state = HashState::Valid; // All applications are valid at this point
-                            app_guard.hash_states.insert(app_name.clone(), valid_state);
-                            app_guard.apps.insert(app_name.clone(), app_identity.clone());
-                        }
+                FireWhalMessage::HashUpdateResponse(message) => { //*** */
+                    let (app_name, updated_identity) = message.updated_app;
+                    app_guard.debug_print.add_message(format!("[TUI]: HashUpdateResponse received for '{}'.", app_name));
 
-                    }
+                    // Update the local app data with the new, correct hash from the daemon.
+                    app_guard.apps.insert(app_name.clone(), updated_identity);
+                    // Since the hash is now up-to-date, we can mark it as Valid.
+                    app_guard.hash_states.insert(app_name, HashState::Valid);
                 }
                 _ => {}
             }
