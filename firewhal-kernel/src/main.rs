@@ -872,12 +872,12 @@ async fn main() -> Result<(), anyhow::Error> {
                                         }
                                     }
 
-                                    if decision == Action::Allow {
-                                        let mut trusted_connections = trusted_connections_for_task.lock().await;
-                                        let mut pending_connections = pending_connections_for_task.lock().await;
-                                        let _ = trusted_connections.insert(&connection_key, pid, 0);
-                                        let _ = pending_connections.remove(&connection_key);
-                                    }
+                                    // if decision == Action::Allow {
+                                    //     let mut trusted_connections = trusted_connections_for_task.lock().await;
+                                    //     let mut pending_connections = pending_connections_for_task.lock().await;
+                                    //     let _ = trusted_connections.insert(&connection_key, pid, 0);
+                                    //     let _ = pending_connections.remove(&connection_key);
+                                    // }
                                 }
                                 EventType::BlockEvent => {
                                     let payload = unsafe { kernel_event.payload.block_event };
