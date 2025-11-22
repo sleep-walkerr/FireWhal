@@ -237,6 +237,10 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
         RuleKey { protocol: tuple.protocol as u32, source_ip: tuple.saddr, source_port: 0, dest_ip: 0, dest_port: 0 },
         // Wildcard Protocol: Source IP only
         RuleKey { protocol: 0, source_ip: tuple.saddr, source_port: 0, dest_ip: 0, dest_port: 0 },
+        // Wildcard All: Source Port Only
+        RuleKey { protocol: 0, source_ip: 0, source_port: tuple.sport, dest_ip: 0, dest_port: 0 },
+        // Wildcard All: Destination Port Only
+        RuleKey { protocol: 0, source_ip: 0, source_port: 0, dest_ip: 0, dest_port: tuple.dport },
     ];
 
     // --- 3. Check for a matching rule ---
@@ -245,6 +249,8 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
     if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[0]) } { matched_action = Some(action); }
     else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[1]) } { matched_action = Some(action); }
     else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[2]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[3]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[4]) } { matched_action = Some(action); }
 
 
     // --- 4. Process the matched rule ---

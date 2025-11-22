@@ -343,7 +343,7 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfi
             }
         }
 
-        info!("[Kernel] [Rule] Pruning stale incoming rules...");
+        info!("[Kernel] [Rule] Pruning stale incoming rules..."); 
         let mut stale_incoming_keys = Vec::new();
         for previous_rule_result in incoming_rulelist.iter() {
             if let Ok((key, _)) = previous_rule_result {
