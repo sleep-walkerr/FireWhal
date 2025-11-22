@@ -242,9 +242,9 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
     // --- 3. Check for a matching rule ---
     let mut matched_action: Option<&RuleAction> = None;
 
-    if let Some(action) = unsafe { RULES.get(&keys_to_check[0]) } { matched_action = Some(action); }
-    else if let Some(action) = unsafe { RULES.get(&keys_to_check[1]) } { matched_action = Some(action); }
-    else if let Some(action) = unsafe { RULES.get(&keys_to_check[2]) } { matched_action = Some(action); }
+    if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[0]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[1]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[2]) } { matched_action = Some(action); }
 
 
     // --- 4. Process the matched rule ---
@@ -269,19 +269,13 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
 }
 
 #[map]
-static mut BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
-
-#[map]
-static mut PORT_BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
-
-#[map]
-static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0);
-
-#[map]
 static mut EVENTS: PerfEventArray<KernelEvent> = PerfEventArray::new(0); // Change to accept KernelEvents instead
 
 #[map]
 static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
+
+#[map]
+static mut INCOMING_RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
 
 #[map] // Connection Tracking Map for Stateful
 static mut CONNECTION_MAP: LruHashMap<ConnectionTuple, ConnectionInfo> =
@@ -375,9 +369,8 @@ fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
                     return Ok(TC_ACT_OK);
                 } else {
                     info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
-                    return Ok(TC_ACT_SHOT) // TEMPORARY: Until we get incoming rules sorted out
                     // If no stateful match, fall back to stateless ingress rule matching.
-                    //return ingress_rule_matching(&ctx, tuple).map_err(|_| 0);
+                    return ingress_rule_matching(&ctx, tuple).map_err(|_| 0);
                 }
             } else {
                 info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
