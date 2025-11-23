@@ -19,3 +19,7 @@ hash = "fd9a267f3514f738c2d33a9749c15f5a2d9ebad1a3aedac420de3deab7b6fb05"
 [apps.steam]
 path = "/home/torch/.local/share/Steam/ubuntu12_32/steam"
 hash = "4c528a9c09312672950bb0b5e0cb17ba8fa52043a20dc9af65134e878fa143b1"
+
+[apps.firewhal-daemon]
+path = "/usr/local/sbin/firewhal-daemon"
+hash = "3e3d14e8aea2fa9accfaf7bda9e2601ae1e3617c889c29a6c395e974437a540b"

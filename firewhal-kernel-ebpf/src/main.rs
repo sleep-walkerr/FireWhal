@@ -8,11 +8,7 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 use core::{hash::Hash, mem, net::{IpAddr,Ipv4Addr}};
 
 use aya_ebpf::{
-    bindings::{sockaddr, xdp_action, TC_ACT_OK, TC_ACT_SHOT},
-    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_current_comm},
-    macros::{cgroup_sock_addr, classifier, map, xdp},
-    maps::{HashMap, LpmTrie, PerfEventArray, RingBuf, LruHashMap, Array}, 
-    programs::{tc, SockAddrContext, TcContext, XdpContext}, EbpfContext, 
+    EbpfContext, bindings::{TC_ACT_OK, TC_ACT_SHOT, sockaddr, xdp_action}, helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_socket_cookie}, macros::{cgroup_sock_addr, classifier, map, xdp}, maps::{Array, HashMap, LpmTrie, LruHashMap, PerfEventArray, RingBuf}, programs::{SockAddrContext, TcContext, XdpContext, tc} 
 };
 use aya_log_ebpf::{info, error, warn};
 
@@ -446,6 +442,8 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 #[cgroup_sock_addr(bind4)]
 pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
+        let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
+        info!(&ctx, "[Kernel] [bind4] Cookie: {}", cookie);
         app_tracking("bind4", &ctx);
         Ok(1) // Allow the connection for now, blocking delegated to tc egress program
     }();
@@ -565,6 +563,27 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         
     // 2. Check if the connection is new and pending verification
     } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&pending_connection_key) } {
+        info.pid = *tgid_match;
+        info!(&ctx, "[Kernel] [egress_tc] Pending Connection for {}, checking.", *tgid_match);
+        
+        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
+            if pid_info.action == Action::Allow {
+                info!(&ctx, "[Kernel] [egress_tc] Pending Connection Allowed {}", *tgid_match);
+                // Move from PENDING to TRUSTED
+                unsafe {
+                    TRUSTED_CONNECTIONS_MAP.insert(&incoming_connection_key, tgid_match, 0).map_err(|_| ())?;
+                    PENDING_CONNECTIONS_MAP.remove(&pending_connection_key).map_err(|_| ())?;
+                }
+                // Fall through to the final Ok(1) to allow the packet
+            } else { 
+                info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked (PID Denied) {}", *tgid_match);
+                return Ok(TC_ACT_SHOT); // Block the connection
+             }
+        } else {
+            info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked (PID Not Found).");
+            return Ok(TC_ACT_SHOT);
+        }
+    } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&portless_pending_connection_key) } {
         info.pid = *tgid_match;
         info!(&ctx, "[Kernel] [egress_tc] Pending Connection for {}, checking.", *tgid_match);
         
