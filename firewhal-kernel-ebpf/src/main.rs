@@ -8,7 +8,7 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 use core::{hash::Hash, mem, net::{IpAddr,Ipv4Addr}};
 
 use aya_ebpf::{
-    EbpfContext, bindings::{TC_ACT_OK, TC_ACT_SHOT, sockaddr, xdp_action}, helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_socket_cookie}, macros::{cgroup_sock_addr, classifier, map, xdp}, maps::{Array, HashMap, LpmTrie, LruHashMap, PerfEventArray, RingBuf}, programs::{SockAddrContext, TcContext, XdpContext, tc} 
+    EbpfContext, bindings::{TC_ACT_OK, TC_ACT_SHOT, sockaddr, xdp_action, bpf_sock_tuple, bpf_sock}, helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_socket_cookie, bpf_skc_lookup_tcp, bpf_sk_release}, macros::{cgroup_sock_addr, classifier, map, xdp}, maps::{Array, HashMap, LpmTrie, LruHashMap, PerfEventArray, RingBuf}, programs::{SockAddrContext, TcContext, XdpContext, tc} 
 };
 use aya_log_ebpf::{info, error, warn};
 
@@ -293,6 +293,9 @@ static mut PENDING_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_
 static mut TRUSTED_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_max_entries(4096, 0);
 
 #[map]
+static mut SOCKET_COOKIE_TRUST: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0);
+
+#[map]
 static mut PERMISSIVE_MODE_ENABLED: Array<u32> = Array::with_max_entries(1, 0);
 
 
@@ -444,6 +447,14 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
         let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
         info!(&ctx, "[Kernel] [bind4] Cookie: {}", cookie);
+        // Need new tracking method for bind
+        
+        
+        let insertion_result = unsafe {SOCKET_COOKIE_TRUST.insert(&cookie, &ctx.tgid(), 0) };
+        if insertion_result.is_err() {
+                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT)
+                }
         app_tracking("bind4", &ctx);
         Ok(1) // Allow the connection for now, blocking delegated to tc egress program
     }();
@@ -533,6 +544,21 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
 
      // Print for Debug
      info!(&ctx, "[Kernel] [egress_tc] ConnectionKey: {} {} {} {} {}", debug_saddr, debug_daddr, debug_sport, debug_dport, incoming_connection_key.protocol as u8);
+
+    // REMOVE THIS LATER: socket cookie testing
+    //
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr() as *mut _) };
+    if cookie == 0 {
+        // Packet is not associated with a socket.
+        info!(&ctx, "[Kernel] [egress_tc] Packet has no socket cookie.");
+    } else if unsafe { SOCKET_COOKIE_TRUST.get(&cookie).is_some() } {
+        info!(&ctx, "[Kernel] [egress_tc] Trusted Cookie Found: {}", cookie);
+        return Ok(TC_ACT_OK)
+    } else {
+        info!(&ctx, "[Kernel] [egress_tc] No Trusted Cookie Found: {}", cookie);
+    }
+
+    return Ok(TC_ACT_OK);
 
      // THIS NEEDS TO GO IN A FUNCTION
      // Lookup in TRUSTED_CONNECTIONS_MAP
