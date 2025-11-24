@@ -124,6 +124,7 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
 pub fn parse_tcp_header(ctx: &TcContext) -> Result<TcpHdr, ()> {
     
     let eth_hdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+    
     if eth_hdr.ether_type == EtherType::Ipv4.into() {
     } else if eth_hdr.ether_type == EtherType::Ipv6.into() {
         info!(ctx, "IPv6 {} Packet found. Breaking", u16::from_be(eth_hdr.ether_type));
@@ -132,11 +133,11 @@ pub fn parse_tcp_header(ctx: &TcContext) -> Result<TcpHdr, ()> {
         info!(ctx, "Unsupported Type {} found. Breaking", u16::from_be(eth_hdr.ether_type));
         return Err(())
     }
-
+    
     let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
     let l4_hdr_offset = EthHdr::LEN + Ipv4Hdr::LEN;
 
-    if ipv4_hdr.proto != IpProto::Tcp {
+    if ipv4_hdr.proto == IpProto::Tcp {
         let tcp_hdr: TcpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?; // Use dynamic offset
 
         // Get Ports this way: (u16::from_be_bytes(tcp_hdr.source), u16::from_be_bytes(tcp_hdr.dest))

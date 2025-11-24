@@ -55,7 +55,7 @@ static TRUSTED_LISTENING_PORTS: HashMap<u32, u32> = HashMap::with_max_entries(10
 static TRUSTED_COOKIES: HashMap<u64, u8> = HashMap::with_max_entries(10000, 0);
 
 #[map]
-static HANDSHAKE_ALLOWED: HashMap<ConnectionKey, u64> = HashMap::with_max_entries(4096, 0);
+static HANDSHAKE_ALLOWED: HashMap<ConnectionTuple, u64> = HashMap::with_max_entries(4096, 0);
 
 
 // The following maps were for the map-in-map implementation and are no longer needed.
@@ -308,6 +308,11 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
 
                     if let Ok(tcp_header) =  tcp_header_result{
                         info!(ctx, "[Kernel] [ingress_tc] TCP connection SYN Check: {}", tcp_header.syn());
+                        if tcp_header.syn() == 1 {
+                            // let ts = unsafe { bpf_ktime_get_ns() };
+                            info!(ctx, "[Kernel] [ingress_tc] Inserting Handshake Allow: {} {} {} {} {}", tuple.saddr, tuple.daddr, tuple.sport, tuple.dport, tuple.protocol);
+                            unsafe { HANDSHAKE_ALLOWED.insert(&tuple, &0, 0) };
+                        }
                     }
                 }
 
@@ -563,7 +568,7 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
      // Print for Debug
      info!(&ctx, "[Kernel] [egress_tc] ConnectionKey: {} {} {} {} {}", debug_saddr, debug_daddr, debug_sport, debug_dport, incoming_connection_key.protocol as u8);
 
-    // REMOVE THIS LATER: socket cookie testing
+    // THIS NEEDS TO BE MOVED: Server Functionality
     //
     let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr() as *mut _) };
     if cookie == 0 {
@@ -574,6 +579,32 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_OK)
     } else {
         info!(&ctx, "[Kernel] [egress_tc] No Trusted Cookie Found: {}", cookie);
+        if tuple.protocol == 6 {
+            let tcp_header_result = parse_tcp_header(&ctx);
+
+            if let Ok(tcp_header) =  tcp_header_result{
+                info!(&ctx, "HANDSHAKE CHECK");
+                if tcp_header.syn() != 0 && tcp_header.ack() != 0 {
+                    info!(&ctx, "HANDSHAKE CHECK TRUE");
+
+                    // Reverse tuple to match insertion
+                    let reversed_tuple = ConnectionTuple {
+                        saddr: tuple.daddr, // Swapped
+                        daddr: tuple.saddr, // Swapped
+                        sport: tuple.dport, // Swapped
+                        dport: tuple.sport, // Swapped
+                        protocol: tuple.protocol,
+                        ..tuple
+                    };
+                    info!(&ctx, "CHECKING KEY: {} {} {} {} {}", reversed_tuple.saddr, reversed_tuple.daddr, reversed_tuple.sport, reversed_tuple.dport, reversed_tuple.protocol);
+                    if unsafe { HANDSHAKE_ALLOWED.get(&reversed_tuple).is_some() } {
+                        info!(&ctx, "HANDSHAKE CHECK RETURN");
+                        return Ok(TC_ACT_OK); // Explicitly allow the SYN-ACK
+                    }
+                }
+            }
+
+        }
     }
 
 
@@ -699,6 +730,18 @@ fn try_firewhal_sock_ops(ctx: SockOpsContext) -> Result<u32, u32> {
                 // 4. Whitelist this specific connection for TC
                 let val: u8 = 1;
                 unsafe { TRUSTED_COOKIES.insert(&cookie, &val, 0) };
+
+                // 2. Cleanup the Handshake Map
+                let key = ConnectionTuple {
+                    saddr: ctx.remote_ip4(), 
+                    sport: ctx.remote_port() as u16, // Ensure byte order is correct here!
+                    daddr: ctx.local_ip4(),
+                    dport: ctx.local_port() as u16,
+                    protocol: 6,
+                    _pad: [0; 3],
+                };
+                
+                unsafe { HANDSHAKE_ALLOWED.remove(&key) };
             }
         }
         _ => {}
