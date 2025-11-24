@@ -1,8 +1,10 @@
 # apps = {}
 
-[apps.codium]
-path = "/opt/vscodium-bin/codium"
-hash = "de3df78022e8e63941de42da1acca55268eef022540eabfb8a3071760d1c0409"
+
+[apps.sshd]
+path = "/usr/bin/sshd"
+hash = "8d127c26993ea530f01110387aaf0c6bb445d3dbd540c461875952d7fd5ec333"
+
 
 [apps.NetworkManager]
 path = "/usr/bin/NetworkManager"
@@ -12,14 +14,11 @@ hash = "31233da1c91bb113f77c71b7a84f855d4d4e0385ff8c062521b249bed3259356"
 path = "/usr/lib/systemd/systemd-resolved"
 hash = "b7f853744bc0b5fa84f764dc61a6d0f214efdcfff08b4fc31a8138e81f5435b6"
 
-[apps.brave]
-path = "/opt/brave-bin/brave"
-hash = "fd9a267f3514f738c2d33a9749c15f5a2d9ebad1a3aedac420de3deab7b6fb05"
-
-[apps.steam]
-path = "/home/torch/.local/share/Steam/ubuntu12_32/steam"
-hash = "4c528a9c09312672950bb0b5e0cb17ba8fa52043a20dc9af65134e878fa143b1"
 
 [apps.firewhal-daemon]
 path = "/usr/local/sbin/firewhal-daemon"
 hash = "3e3d14e8aea2fa9accfaf7bda9e2601ae1e3617c889c29a6c395e974437a540b"
+
+[apps.brave]
+path = "/opt/brave-bin/brave"
+hash = "fd9a267f3514f738c2d33a9749c15f5a2d9ebad1a3aedac420de3deab7b6fb05"

@@ -1,7 +1,7 @@
 use aya::{
     Ebpf, include_bytes_aligned, maps::{Array as AyaArray, AsyncPerfEventArray, HashMap as AyaHashMap, MapData, perf::AsyncPerfEventArrayBuffer
     }, programs::{
-            CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, XdpFlags, tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}}, util::online_cpus
+            CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, XdpFlags, tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}, SockOps}, util::online_cpus
 };
 use anyhow::{bail, Context, Result};
 use aya_log::EbpfLogger;
@@ -145,13 +145,13 @@ async fn attach_tc_programs(
         if let Some((ingress_id, egress_id)) = active_tc.active_links.remove(&iface) {
             info!("[Kernel] Detaching TC programs from '{}'...", iface);
             {
-                let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into()?;
+                let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewhal_ingress_tc").unwrap().try_into()?;
                 if let Err(e) = prog_ingress.detach(ingress_id) {
                     warn!("[Kernel] Failed to detach TC ingress from '{}': {}", iface, e);
                 }
             }
             {
-                let prog_egress: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into()?;
+                let prog_egress: &mut SchedClassifier = bpf.program_mut("firewhal_egress_tc").unwrap().try_into()?;
                 if let Err(e) = prog_egress.detach(egress_id) {
                     warn!("[Kernel] Failed to detach TC egress from '{}': {}", iface, e);
                 }
@@ -161,11 +161,11 @@ async fn attach_tc_programs(
 
     // Load programs once before the loop, scoping the mutable borrows.
     {
-        let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into()?;
+        let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewhal_ingress_tc").unwrap().try_into()?;
         prog_ingress.load();
     }
     {
-        let prog_egress: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into()?;
+        let prog_egress: &mut SchedClassifier = bpf.program_mut("firewhal_egress_tc").unwrap().try_into()?;
         prog_egress.load();
     }
 
@@ -178,7 +178,7 @@ async fn attach_tc_programs(
         let mut egress_id: Option<SchedClassifierLinkId> = None;
         info!("[Kernel] Attaching TC programs to '{}'...", iface);
         {
-            let ingress_prog: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into().unwrap();
+            let ingress_prog: &mut SchedClassifier = bpf.program_mut("firewhal_ingress_tc").unwrap().try_into().unwrap();
             if let Ok(ingress_identifier) = ingress_prog.attach(&iface, TcAttachType::Ingress) {
                 ingress_id = Some(ingress_identifier);
             } else {
@@ -187,7 +187,7 @@ async fn attach_tc_programs(
         }
 
         {
-            let egress_prog: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into().unwrap();
+            let egress_prog: &mut SchedClassifier = bpf.program_mut("firewhal_egress_tc").unwrap().try_into().unwrap();
             if let Ok(egress_identifier) = egress_prog.attach(&iface, TcAttachType::Egress) {
                 egress_id = Some(egress_identifier);
             } else {
@@ -212,13 +212,6 @@ async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file:
     let mut bpf = bpf.lock().await;
     // CGROUP
     info!("[Kernel] Applying CGROUP programs...");
-    // INGRESS PROGRAMS
-    //
-    // let ingress_recvmsg4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_ingress_recvmsg4").unwrap().try_into().unwrap();
-    // ingress_recvmsg4_program.load();
-    // _ = ingress_recvmsg4_program.attach(&cgroup_file, CgroupAttachMode::Single);
-    // EGRESS PROGRAMS
-    //
     let egress_connect4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
     let _ = egress_connect4_program.load();
     _ = egress_connect4_program.attach(&cgroup_file, CgroupAttachMode::Single);
@@ -230,6 +223,10 @@ async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file:
     let firewhal_egress_bind4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_bind4").unwrap().try_into().unwrap();
     let _ = firewhal_egress_bind4_program.load();
     _ = firewhal_egress_bind4_program.attach(&cgroup_file, CgroupAttachMode::Single);
+
+    let firewhal_sock_ops: &mut SockOps = bpf.program_mut("firewhal_sock_ops").unwrap().try_into()?;
+    let _ = firewhal_sock_ops.load();
+    _ = firewhal_sock_ops.attach(&cgroup_file, CgroupAttachMode::default())?;
     
     info!("[Kernel] CGROUP programs applied.");
 

@@ -5,19 +5,67 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 #![no_std]
 #![no_main]
 
-use core::{hash::Hash, mem, net::{IpAddr,Ipv4Addr}};
+use core::{fmt::DebugTuple, hash::Hash, mem, net::{IpAddr,Ipv4Addr}};
 
 use aya_ebpf::{
-    EbpfContext, bindings::{TC_ACT_OK, TC_ACT_SHOT, sockaddr, xdp_action, bpf_sock_tuple, bpf_sock}, helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_socket_cookie, bpf_skc_lookup_tcp, bpf_sk_release}, macros::{cgroup_sock_addr, classifier, map, xdp}, maps::{Array, HashMap, LpmTrie, LruHashMap, PerfEventArray, RingBuf}, programs::{SockAddrContext, TcContext, XdpContext, tc} 
+    EbpfContext, bindings::{TC_ACT_OK, TC_ACT_SHOT, sockaddr, xdp_action, bpf_sock_tuple, bpf_sock, BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB}, helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_socket_cookie, bpf_skc_lookup_tcp, bpf_sk_release}, macros::{cgroup_sock_addr, classifier, map, xdp, sock_ops}, maps::{Array, HashMap, LpmTrie, LruHashMap, PerfEventArray, RingBuf}, programs::{SockAddrContext, TcContext, SockOpsContext} 
 };
 use aya_log_ebpf::{info, error, warn};
 
-use firewhal_kernel_common::{Action, BlockEvent, BlockEventPayload, BlockReason, ConnectionAttemptPayload, ConnectionInfo, ConnectionKey, ConnectionTuple, EventType, KernelEvent, LpmIpKey, PidTrustInfo, RuleAction, RuleKey, parse_packet_tuple};
+use firewhal_kernel_common::{Action, BlockEvent, BlockEventPayload, BlockReason, ConnectionAttemptPayload, ConnectionInfo, ConnectionKey, ConnectionTuple, EventType, KernelEvent, LpmIpKey, PidTrustInfo, RuleAction, RuleKey, parse_packet_tuple, parse_tcp_header};
 
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
 };
+
+#[map]
+static mut EVENTS: PerfEventArray<KernelEvent> = PerfEventArray::new(0); // Change to accept KernelEvents instead
+
+#[map]
+static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
+
+#[map]
+static mut INCOMING_RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
+
+#[map] // Connection Tracking Map for Stateful
+static mut CONNECTION_MAP: LruHashMap<ConnectionTuple, ConnectionInfo> =
+    LruHashMap::with_max_entries(4096, 0);
+
+#[map]
+static mut TRUSTED_PIDS: HashMap<u32, PidTrustInfo> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static mut PENDING_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static mut TRUSTED_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static mut SOCKET_COOKIE_TRUST: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static mut PERMISSIVE_MODE_ENABLED: Array<u32> = Array::with_max_entries(1, 0);
+
+#[map] 
+static TRUSTED_LISTENING_PORTS: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
+// Set by sock_ops, Read by TC
+#[map]
+static TRUSTED_COOKIES: HashMap<u64, u8> = HashMap::with_max_entries(10000, 0);
+
+#[map]
+static HANDSHAKE_ALLOWED: HashMap<ConnectionKey, u64> = HashMap::with_max_entries(4096, 0);
+
+
+// The following maps were for the map-in-map implementation and are no longer needed.
+//
+// #[map]
+// static mut PROTOCOL_RULES: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
+// #[map(pinned)]
+// static mut PORT_RULES_TEMPLATE: HashMap<u16, u32> = HashMap::with_max_entries(256, 0);
+// #[map(pinned)]
+// static mut IP_RULES_TEMPLATE: LpmTrie<LpmIpKey, RuleAction> = LpmTrie::with_max_entries(1024, 0);
 
 // Handler for syscall programs, inserts connection keys for already approved PIDs and sends events for those not in the map
 fn app_tracking(prog_name: &str, ctx: &SockAddrContext) {
@@ -254,7 +302,15 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
         return match action.action {
             Action::Allow => {
                 info!(ctx, "[Kernel] [ingress_tc] Rule {} ALLOWED incoming connection from {}:{}", action.rule_id, Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
-                // For ingress, we just allow. No need to add to CONNECTION_MAP.
+                // Check if TCP traffic
+                if tuple.protocol == 6 {
+                    let tcp_header_result = parse_tcp_header(ctx);
+
+                    if let Ok(tcp_header) =  tcp_header_result{
+                        info!(ctx, "[Kernel] [ingress_tc] TCP connection SYN Check: {}", tcp_header.syn());
+                    }
+                }
+
                 Ok(TC_ACT_OK)
             }
             Action::Deny => {
@@ -270,48 +326,10 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
     Ok(TC_ACT_SHOT)
 }
 
-#[map]
-static mut EVENTS: PerfEventArray<KernelEvent> = PerfEventArray::new(0); // Change to accept KernelEvents instead
-
-#[map]
-static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
-
-#[map]
-static mut INCOMING_RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
-
-#[map] // Connection Tracking Map for Stateful
-static mut CONNECTION_MAP: LruHashMap<ConnectionTuple, ConnectionInfo> =
-    LruHashMap::with_max_entries(4096, 0);
-
-#[map]
-static mut TRUSTED_PIDS: HashMap<u32, PidTrustInfo> = HashMap::with_max_entries(4096, 0);
-
-#[map]
-static mut PENDING_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_max_entries(4096, 0);
-
-#[map]
-static mut TRUSTED_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_max_entries(4096, 0);
-
-#[map]
-static mut SOCKET_COOKIE_TRUST: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0);
-
-#[map]
-static mut PERMISSIVE_MODE_ENABLED: Array<u32> = Array::with_max_entries(1, 0);
-
-
-// The following maps were for the map-in-map implementation and are no longer needed.
-//
-// #[map]
-// static mut PROTOCOL_RULES: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
-// #[map(pinned)]
-// static mut PORT_RULES_TEMPLATE: HashMap<u16, u32> = HashMap::with_max_entries(256, 0);
-// #[map(pinned)]
-// static mut IP_RULES_TEMPLATE: LpmTrie<LpmIpKey, RuleAction> = LpmTrie::with_max_entries(1024, 0);
-
 // INGRESS PROGRAMS
 #[classifier] // Checks incoming traffic, allowed traffic should include either explicit allows via rules, or connection map matches for the stateful firewall
-pub fn firewall_ingress_tc(ctx: TcContext) -> i32 {
-    match try_firewall_ingress_tc(ctx) {
+pub fn firewhal_ingress_tc(ctx: TcContext) -> i32 {
+    match try_firewhal_ingress_tc(ctx) {
         Ok(ret) => ret,
         Err(_) => {
             TC_ACT_OK // If parsing fails, allow. It means there is no handling for that type of traffic
@@ -319,7 +337,7 @@ pub fn firewall_ingress_tc(ctx: TcContext) -> i32 {
     }
 }
 
-fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
+fn try_firewhal_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
 
         let result = || -> Result<i32, i32> {
             if let Ok(tuple) = parse_packet_tuple(&ctx) {
@@ -445,12 +463,12 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 #[cgroup_sock_addr(bind4)]
 pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
-        let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
-        info!(&ctx, "[Kernel] [bind4] Cookie: {}", cookie);
-        // Need new tracking method for bind
+        let user_port = unsafe { (*ctx.sock_addr).user_port }; 
+        let destination_port = (u32::from_be(user_port) >> 16) as u16;
         
+        info!(&ctx, "[Kernel] [bind4] Destination Port: {}", destination_port);
         
-        let insertion_result = unsafe {SOCKET_COOKIE_TRUST.insert(&cookie, &ctx.tgid(), 0) };
+        let insertion_result = unsafe {TRUSTED_LISTENING_PORTS.insert(&u32::from(destination_port), &ctx.tgid(), 0) };
         if insertion_result.is_err() {
                     info!(&ctx, "[Egress] FAILED to insert tuple into map!");
                     return Ok(TC_ACT_SHOT)
@@ -469,14 +487,14 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
 }
 
 #[classifier] // Used for connection tracking when an outgoing connection is allowed
-pub fn firewall_egress_tc(ctx: TcContext) -> i32 { // Change return type to include tuple, and then insert it here
-    match try_firewall_egress_tc(ctx) {
+pub fn firewhal_egress_tc(ctx: TcContext) -> i32 { // Change return type to include tuple, and then insert it here
+    match try_firewhal_egress_tc(ctx) {
         Ok(ret) => ret,
         Err(_) => TC_ACT_OK, // If there is a parsing error, allow the traffic. It means we haven't implemented a way to handle it yet.
     }
 }
 
-fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
+fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let mut tuple = parse_packet_tuple(&ctx)?;
     // Create debug printing fields
     let debug_saddr = Ipv4Addr::from(u32::from_be(tuple.saddr));
@@ -551,15 +569,15 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     if cookie == 0 {
         // Packet is not associated with a socket.
         info!(&ctx, "[Kernel] [egress_tc] Packet has no socket cookie.");
-    } else if unsafe { SOCKET_COOKIE_TRUST.get(&cookie).is_some() } {
+    } else if unsafe { TRUSTED_COOKIES.get(&cookie).is_some() } {
         info!(&ctx, "[Kernel] [egress_tc] Trusted Cookie Found: {}", cookie);
         return Ok(TC_ACT_OK)
     } else {
         info!(&ctx, "[Kernel] [egress_tc] No Trusted Cookie Found: {}", cookie);
     }
 
-    return Ok(TC_ACT_OK);
 
+    // return Ok(TC_ACT_OK);
      // THIS NEEDS TO GO IN A FUNCTION
      // Lookup in TRUSTED_CONNECTIONS_MAP
      if let Some(tgid_match) = unsafe { TRUSTED_CONNECTIONS_MAP.get(&incoming_connection_key) } {
@@ -650,6 +668,42 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let rule_matching_result = rule_matching(&ctx, tuple, info)?;
 
     Ok(rule_matching_result) // Default: Block All 
+}
+
+
+// NEW PROGRAM TESTING
+#[sock_ops]
+pub fn firewhal_sock_ops(ctx: SockOpsContext) -> u32 {
+    match try_firewhal_sock_ops(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_firewhal_sock_ops(ctx: SockOpsContext) -> Result<u32, u32> {
+    match ctx.op() {
+        BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB => {
+            // 1. Get Local Port
+            // Note: local_port in sock_ops is usually host byte order, 
+            // but verify against your architecture.
+            let local_port = ctx.local_port(); 
+            info!(&ctx, "[Kernel] Checking Local Port: {}", local_port);
+            
+            // 2. Check if the port is trusted (set by your bind program)
+            if unsafe { TRUSTED_LISTENING_PORTS.get(&local_port).is_some() } {
+                
+                // 3. Get the cookie of THIS new child socket
+                let cookie = unsafe { bpf_get_socket_cookie(ctx.ops as *mut _) };
+                info!(&ctx, "[Kernel] Trusted Port Found, Inserting Cookie: {},{}", local_port, cookie);
+                
+                // 4. Whitelist this specific connection for TC
+                let val: u8 = 1;
+                unsafe { TRUSTED_COOKIES.insert(&cookie, &val, 0) };
+            }
+        }
+        _ => {}
+    }
+    Ok(0)
 }
 
 #[cfg(not(test))]
