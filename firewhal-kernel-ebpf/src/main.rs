@@ -48,6 +48,9 @@ static mut SOCKET_COOKIE_TRUST: HashMap<u64, u32> = HashMap::with_max_entries(40
 static mut PERMISSIVE_MODE_ENABLED: Array<u32> = Array::with_max_entries(1, 0);
 
 #[map] 
+static PENDING_LISTENING_PORTS: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
+#[map] 
 static TRUSTED_LISTENING_PORTS: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 
 // Set by sock_ops, Read by TC
@@ -473,7 +476,7 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
         
         info!(&ctx, "[Kernel] [bind4] Destination Port: {}", destination_port);
         
-        let insertion_result = unsafe {TRUSTED_LISTENING_PORTS.insert(&u32::from(destination_port), &ctx.tgid(), 0) };
+        let insertion_result = unsafe {PENDING_LISTENING_PORTS.insert(&u32::from(destination_port), &ctx.tgid(), 0) };
         if insertion_result.is_err() {
                     info!(&ctx, "[Egress] FAILED to insert tuple into map!");
                     return Ok(TC_ACT_SHOT)
@@ -584,6 +587,7 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
 
             if let Ok(tcp_header) =  tcp_header_result{
                 info!(&ctx, "HANDSHAKE CHECK");
+                // Check if packet is a SYN-ACK packet, this means its a local server responding to a SYN packet
                 if tcp_header.syn() != 0 && tcp_header.ack() != 0 {
                     info!(&ctx, "HANDSHAKE CHECK TRUE");
 
@@ -597,9 +601,28 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
                         ..tuple
                     };
                     info!(&ctx, "CHECKING KEY: {} {} {} {} {}", reversed_tuple.saddr, reversed_tuple.daddr, reversed_tuple.sport, reversed_tuple.dport, reversed_tuple.protocol);
+                    // Check for temporary allow entry made for allowed incoming traffic
                     if unsafe { HANDSHAKE_ALLOWED.get(&reversed_tuple).is_some() } {
-                        info!(&ctx, "HANDSHAKE CHECK RETURN");
-                        return Ok(TC_ACT_OK); // Explicitly allow the SYN-ACK
+                        // Check whether application is allowed or not
+                        // Get pid of the application associated with bind
+                        if let Some(tgid) = unsafe { PENDING_LISTENING_PORTS.get(&u32::from(reversed_tuple.dport)) } {
+                            // Check if that pid (tgid) is in the trusted map
+                            if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid) } {
+                                // Check if the action for that PID is allow
+                                if pid_info.action == Action::Allow {
+                                    // Delete entry from PENDING_LISTENING_PORTS
+                                    unsafe { PENDING_LISTENING_PORTS.remove(&u32::from(reversed_tuple.dport)) }.map_err(|_| ())?;
+                                    // Add entry to TRUSTED_LISTENING_PORTS
+                                    unsafe { TRUSTED_LISTENING_PORTS.insert(&u32::from(reversed_tuple.dport), &tgid, 0) }.map_err(|_| ())?;
+                                    return Ok(TC_ACT_OK); // Explicitly allow the SYN-ACK
+                                } else if pid_info.action == Action::Deny {
+                                    // Delete entry from PENDING_LISTENING_PORTS
+                                    unsafe { PENDING_LISTENING_PORTS.remove(&u32::from(reversed_tuple.dport)) }.map_err(|_| ())?;
+                                    return Ok(TC_ACT_SHOT); // Explicitly deny the SYN-ACK
+                                }
+                            }
+                        }
+                        
                     }
                 }
             }
@@ -608,34 +631,33 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     }
 
 
-    // return Ok(TC_ACT_OK);
-     // THIS NEEDS TO GO IN A FUNCTION
-     // Lookup in TRUSTED_CONNECTIONS_MAP
-     if let Some(tgid_match) = unsafe { TRUSTED_CONNECTIONS_MAP.get(&incoming_connection_key) } {
-        info.pid = *tgid_match;
+    // THIS NEEDS TO GO IN A FUNCTION
+    // Lookup in TRUSTED_CONNECTIONS_MAP
+    if let Some(tgid_match) = unsafe { TRUSTED_CONNECTIONS_MAP.get(&incoming_connection_key) } {
+    info.pid = *tgid_match;
 
-        // --- YOUR NEW LOGIC GOES HERE ---
-        // Check if the associated PID is *still* trusted
-        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
-            if pid_info.action == Action::Allow {
-                // PID is still trusted, refresh the connection's timestamp in the LRU map
-                unsafe { TRUSTED_CONNECTIONS_MAP.insert(&incoming_connection_key, tgid_match, 0) }.map_err(|_| ())?;
-                info!(&ctx, "[Kernel] [egress_tc] Trusted Connection for TGID {} refreshed.", *tgid_match);
-                // Fall through to the final Ok(1) to allow the packet
-            } else {
-                // PID is in the map, but is explicitly DENIED. Block the packet.
-                info!(&ctx, "[Kernel] [egress_tc] Connection for TGID {} is explicitly DENIED. Blocking.", *tgid_match);
-                return Ok(TC_ACT_SHOT);
-            }
+    // --- YOUR NEW LOGIC GOES HERE ---
+    // Check if the associated PID is *still* trusted
+    if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
+        if pid_info.action == Action::Allow {
+            // PID is still trusted, refresh the connection's timestamp in the LRU map
+            unsafe { TRUSTED_CONNECTIONS_MAP.insert(&incoming_connection_key, tgid_match, 0) }.map_err(|_| ())?;
+            info!(&ctx, "[Kernel] [egress_tc] Trusted Connection for TGID {} refreshed.", *tgid_match);
+            // Fall through to the final Ok(1) to allow the packet
         } else {
-            // RACE CONDITION HANDLED:
-            // The connection is known, but the PID (TGID) is no longer in the trusted map.
-            // This is a stale connection. Block it and remove it.
-            info!(&ctx, "[Kernel] [egress_tc] Stale connection for untrusted TGID {}. Blocking and removing.", *tgid_match);
-            unsafe { TRUSTED_CONNECTIONS_MAP.remove(&incoming_connection_key) }.map_err(|_| ())?;
+            // PID is in the map, but is explicitly DENIED. Block the packet.
+            info!(&ctx, "[Kernel] [egress_tc] Connection for TGID {} is explicitly DENIED. Blocking.", *tgid_match);
             return Ok(TC_ACT_SHOT);
         }
-        
+    } else {
+        // RACE CONDITION HANDLED:
+        // The connection is known, but the PID (TGID) is no longer in the trusted map.
+        // This is a stale connection. Block it and remove it.
+        info!(&ctx, "[Kernel] [egress_tc] Stale connection for untrusted TGID {}. Blocking and removing.", *tgid_match);
+        unsafe { TRUSTED_CONNECTIONS_MAP.remove(&incoming_connection_key) }.map_err(|_| ())?;
+        return Ok(TC_ACT_SHOT);
+    }
+    
     // 2. Check if the connection is new and pending verification
     } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&pending_connection_key) } {
         info.pid = *tgid_match;
