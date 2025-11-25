@@ -1,7 +1,11 @@
 [Unit]
 Description=Firewhal Supervisor Daemon
 # This ensures the network is fully up before the firewall starts.
-After=network.target
+Before=pre-network.target
+DefaultDependencies=no
+Wants=systemd-modules-load.service local-fs.target
+After=systemd-modules-load.service local-fs.target
+Wants=network-pre.target
 
 [Service]
 # 'forking' is the correct type for a traditional daemon that

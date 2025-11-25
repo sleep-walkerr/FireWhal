@@ -576,20 +576,20 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr() as *mut _) };
     if cookie == 0 {
         // Packet is not associated with a socket.
-        info!(&ctx, "[Kernel] [egress_tc] Packet has no socket cookie.");
+        // info!(&ctx, "[Kernel] [egress_tc] Packet has no socket cookie.");
     } else if unsafe { TRUSTED_COOKIES.get(&cookie).is_some() } {
-        info!(&ctx, "[Kernel] [egress_tc] Trusted Cookie Found: {}", cookie);
+        // info!(&ctx, "[Kernel] [egress_tc] Trusted Cookie Found: {}", cookie);
         return Ok(TC_ACT_OK)
     } else {
-        info!(&ctx, "[Kernel] [egress_tc] No Trusted Cookie Found: {}", cookie);
+        // info!(&ctx, "[Kernel] [egress_tc] No Trusted Cookie Found: {}", cookie);
         if tuple.protocol == 6 {
             let tcp_header_result = parse_tcp_header(&ctx);
 
             if let Ok(tcp_header) =  tcp_header_result{
-                info!(&ctx, "HANDSHAKE CHECK");
+                // info!(&ctx, "HANDSHAKE CHECK");
                 // Check if packet is a SYN-ACK packet, this means its a local server responding to a SYN packet
                 if tcp_header.syn() != 0 && tcp_header.ack() != 0 {
-                    info!(&ctx, "HANDSHAKE CHECK TRUE");
+                    // info!(&ctx, "HANDSHAKE CHECK TRUE");
 
                     // Reverse tuple to match insertion
                     let reversed_tuple = ConnectionTuple {
@@ -600,18 +600,18 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
                         protocol: tuple.protocol,
                         ..tuple
                     };
-                    info!(&ctx, "CHECKING KEY: {} {} {} {} {}", reversed_tuple.saddr, reversed_tuple.daddr, reversed_tuple.sport, reversed_tuple.dport, reversed_tuple.protocol);
+                    // info!(&ctx, "CHECKING KEY: {} {} {} {} {}", reversed_tuple.saddr, reversed_tuple.daddr, reversed_tuple.sport, reversed_tuple.dport, reversed_tuple.protocol);
                     // Check for temporary allow entry made for allowed incoming traffic
                     if unsafe { HANDSHAKE_ALLOWED.get(&reversed_tuple).is_some() } {
                         // Check whether application is allowed or not
                         // Get pid of the application associated with bind
-                        info!(&ctx, "KEY MATCH");
+                        // info!(&ctx, "KEY MATCH");
                         // Check for already trusted ports in trusted port map
                         if let Some(tgid) = unsafe { TRUSTED_LISTENING_PORTS.get(&u32::from(reversed_tuple.dport)) } {
-                            info!(&ctx, "PORT MATCH");
+                            // info!(&ctx, "PORT MATCH");
                             // Check if that pid (tgid) is in the trusted map
                             if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid) } {
-                                info!(&ctx, "PID MATCH");
+                                // info!(&ctx, "PID MATCH");
                                 // Check if the action for that PID is allow
                                 if pid_info.action == Action::Allow {
                                     return Ok(TC_ACT_OK); // Explicitly allow the SYN-ACK
@@ -622,10 +622,10 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
                                 }
                             }
                         } else if let Some(tgid) = unsafe { PENDING_LISTENING_PORTS.get(&u32::from(reversed_tuple.dport)) } {
-                            info!(&ctx, "PORT MATCH");
+                            // info!(&ctx, "PORT MATCH");
                             // Check if that pid (tgid) is in the trusted map
                             if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid) } {
-                                info!(&ctx, "PID MATCH");
+                                // info!(&ctx, "PID MATCH");
                                 // Check if the action for that PID is allow
                                 if pid_info.action == Action::Allow {
                                     // Delete entry from PENDING_LISTENING_PORTS
@@ -654,8 +654,7 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     if let Some(tgid_match) = unsafe { TRUSTED_CONNECTIONS_MAP.get(&incoming_connection_key) } {
     info.pid = *tgid_match;
 
-    // --- YOUR NEW LOGIC GOES HERE ---
-    // Check if the associated PID is *still* trusted
+    // Check if the associated PID is still trusted
     if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
         if pid_info.action == Action::Allow {
             // PID is still trusted, refresh the connection's timestamp in the LRU map
@@ -668,15 +667,14 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
             return Ok(TC_ACT_SHOT);
         }
     } else {
-        // RACE CONDITION HANDLED:
-        // The connection is known, but the PID (TGID) is no longer in the trusted map.
-        // This is a stale connection. Block it and remove it.
+        // The connection is known, but the PID (TGID) is no longer in the trusted map
+        // This is a stale connection. Block it and remove it
         info!(&ctx, "[Kernel] [egress_tc] Stale connection for untrusted TGID {}. Blocking and removing.", *tgid_match);
         unsafe { TRUSTED_CONNECTIONS_MAP.remove(&incoming_connection_key) }.map_err(|_| ())?;
         return Ok(TC_ACT_SHOT);
     }
     
-    // 2. Check if the connection is new and pending verification
+    // Check if the connection is new and pending verification
     } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&pending_connection_key) } {
         info.pid = *tgid_match;
         info!(&ctx, "[Kernel] [egress_tc] Pending Connection for {}, checking.", *tgid_match);
