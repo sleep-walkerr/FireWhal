@@ -160,13 +160,17 @@ async fn main() -> Result<(), io::Error> {
                     app_guard.debug_print.add_message(format!("[TUI]: RulesResponse Received."));
                     // Clear existing rules and add new ones
                     app_guard.rules.clear();
+                    app_guard.incoming_rules.clear();
                     // For now, we only show outgoing rules. This can be expanded later.
                     app_guard.rules.extend(rules_message.outgoing_rules);
-                    app_guard.rules.extend(rules_message.incoming_rules);
+                    app_guard.incoming_rules.extend(rules_message.incoming_rules);
 
                     // Select the first item if nothing is selected
-                    if app_guard.rule_list_state.table_state.selected().is_none() {
-                        app_guard.rule_list_state.table_state.select(Some(0));
+                    if app_guard.outgoing_rule_state.table_state.selected().is_none() {
+                        app_guard.outgoing_rule_state.table_state.select(Some(0));
+                    }
+                    if app_guard.incoming_rule_state.table_state.selected().is_none() {
+                        app_guard.incoming_rule_state.table_state.select(Some(0));
                     }
                 }
                 FireWhalMessage::AppsResponse(app_id_message) => {
@@ -269,7 +273,7 @@ async fn main() -> Result<(), io::Error> {
                         handle_screen_enter(&mut app_guard);
                     },
                     _ => { // Delegate to active screen's handler if content pane is focused
-                        if !app_guard.focus_on_navigation {
+                        if !app_guard.focus_on_navigation { // Content is focused
                             match app_guard.screen {
                                 AppScreen::InterfaceSelection => {
                                     ui::interface_selection::handle_key_event(key.code, &mut app_guard);
@@ -277,9 +281,9 @@ async fn main() -> Result<(), io::Error> {
                                 AppScreen::PermissiveMode => {
                                     ui::permissive_mode::handle_key_event(key.code, &mut app_guard);
                                 },
-                                AppScreen::RuleManagement => {
+                                AppScreen::OutgoingRules | AppScreen::IncomingRules => {
                                     ui::rule_management::handle_key_event(key.code, &mut app_guard);
-                                }
+                                },
                                 AppScreen::AppManagement => {
                                     ui::app_management::handle_key_event_with_modifiers(key.code, key.modifiers, &mut app_guard);
                                 }
@@ -289,6 +293,11 @@ async fn main() -> Result<(), io::Error> {
                                 AppScreen::Debug => {
                                     // Debug screen might have its own key events later, but for now, none.
                                 }
+                            }
+
+                            // Global keybinds for content panes
+                            if key.code == KeyCode::Char('p') && app_guard.rules_modified {
+                                app_guard.send_rules_to_daemon();
                             }
                         } // End of if !app_guard.focus_on_navigation
                     }
@@ -351,7 +360,7 @@ fn handle_screen_enter(app: &mut App) {
                 }
             } else { _ = &app.debug_print.add_message("Main Menu found no zmq sender".to_string()); }
         }
-        AppScreen::RuleManagement => {
+        AppScreen::OutgoingRules | AppScreen::IncomingRules => {
             // Send rule request to daemon
             if let Some(zmq_sender) = &app.to_zmq_tx {
                 if let Err(e) = zmq_sender.try_send(FireWhalMessage::RulesRequest(firewhal_core::TUIRulesRequest { component: "TUI".to_string() })) {

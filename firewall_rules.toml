@@ -1,18 +1,8 @@
 [[incoming_rules]]
 action = "Allow"
-#source_ip = None 
-#source_port = None 
-#dest_ip = None 
-source_port = 22 
-description = "testing" 
+dest_port = 22
+description = "SSHD"
 
-[[incoming_rules]]
-action = "Allow"
-#source_ip = None 
-#source_port = None 
-#dest_ip = None 
-dest_port = 22 
-description = "testing" 
 
 [[outgoing_rules]]
 action = "Allow"

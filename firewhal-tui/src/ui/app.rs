@@ -6,16 +6,17 @@ use crate::ui::{
     interface_selection::{InterfaceList, InterfaceListState, ToggledInterfaces},
     main_menu::MainMenuState,
     permissive_mode::{PermissiveListState, ProcessLineageTupleList, ToggledPaths},
-    rule_management::RuleListState,
+    rule_management::RuleTableState,
 };
-use firewhal_core::{AppIdentity, FireWhalMessage};
+use firewhal_core::{AppIdentity, FireWhalConfig, FireWhalMessage, Rule};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
     MainMenu,
     InterfaceSelection,
-    RuleManagement,
+    OutgoingRules,
+    IncomingRules,
     AppManagement,
     PermissiveMode,
     Debug,
@@ -33,7 +34,8 @@ impl AppScreen {
         match self {
             AppScreen::MainMenu => "Status",
             AppScreen::InterfaceSelection => "Active Interfaces",
-            AppScreen::RuleManagement => "Firewall Rules",
+            AppScreen::OutgoingRules => "Outgoing Rules",
+            AppScreen::IncomingRules => "Incoming Rules",
             AppScreen::AppManagement => "App Management",
             AppScreen::PermissiveMode => "Permissive Detection",
             AppScreen::Debug => "Debug",
@@ -55,9 +57,11 @@ pub struct App {
     pub process_lineage_tuple_list: ProcessLineageTupleList,
     pub permissive_mode_list_state: PermissiveListState,
     pub toggled_paths: ToggledPaths,
-    pub rule_list_state: RuleListState,
+    pub outgoing_rule_state: RuleTableState,
+    pub incoming_rule_state: RuleTableState,
     pub rules_modified: bool,
-    pub rules: Vec<firewhal_core::Rule>,
+    pub rules: Vec<Rule>, // Outgoing rules
+    pub incoming_rules: Vec<Rule>,
     pub app_list_state: AppListState,
     pub apps_modified: bool,
     pub apps: HashMap<String, AppIdentity>,
@@ -99,6 +103,22 @@ impl App {
             self.screen = self.nav_items[self.nav_index]; // Ensure screen is set when focusing content
         }
     }
+
+    /// Sends the complete, current list of rules to the daemon.
+    pub fn send_rules_to_daemon(&mut self) {
+        let config = FireWhalConfig {
+            outgoing_rules: self.rules.clone(),
+            incoming_rules: self.incoming_rules.clone(),
+        };
+        if let Some(tx) = &self.to_zmq_tx {
+            if let Err(e) = tx.try_send(FireWhalMessage::UpdateRules(config)) {
+                self.debug_print.add_message(format!("[TUI] Failed to send rules to daemon: {}", e));
+            } else {
+                self.debug_print.add_message("[TUI] Sent rules to daemon.".to_string());
+                self.rules_modified = false;
+            }
+        }
+    }
 }
 
 impl Default for App {
@@ -106,7 +126,8 @@ impl Default for App {
         let nav_items = vec![
             AppScreen::MainMenu,
             AppScreen::InterfaceSelection,
-            AppScreen::RuleManagement,
+            AppScreen::OutgoingRules,
+            AppScreen::IncomingRules,
             AppScreen::AppManagement,
             AppScreen::PermissiveMode,
             AppScreen::Debug,
@@ -127,9 +148,11 @@ impl Default for App {
             permissive_mode_list_state: PermissiveListState::default(),
             process_lineage_tuple_list: ProcessLineageTupleList::default(),
             toggled_paths: ToggledPaths::default(),
-            rule_list_state: RuleListState::default(),
+            outgoing_rule_state: RuleTableState::default(),
+            incoming_rule_state: RuleTableState::default(),
             rules_modified: false,
             rules: Vec::new(),
+            incoming_rules: Vec::new(),
             app_list_state: AppListState::default(),
             apps_modified: false,
             apps: HashMap::new(),

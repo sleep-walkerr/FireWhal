@@ -3,10 +3,11 @@ use crossterm::event::{KeyCode, KeyEvent};
 use firewhal_core::{FireWhalConfig, FireWhalMessage, Rule, Action, Protocol};
 use crate::ui::app::App;
 use crate::ui::centered_rect;
+use crate::AppScreen;
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
-/// Represents the current UI mode for the rule management screen.
+/// Represents the current UI mode for a rule table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleManagementMode {
     /// The user is just viewing the list of rules.
@@ -39,14 +40,14 @@ pub enum FormField {
 const FORM_FIELDS: [FormField; 8] = [FormField::Action, FormField::Protocol, FormField::SourceIp, FormField::SourcePort, FormField::DestIp, FormField::DestPort, FormField::Description, FormField::Save];
 
 
-/// Holds all state related to the rule management screen.
+/// Holds all state related to a rule table screen.
 #[derive(Debug, Clone)]
-pub struct RuleListState {
+pub struct RuleTableState {
     pub table_state: TableState,
     pub mode: RuleManagementMode,
 }
 
-impl Default for RuleListState {
+impl Default for RuleTableState {
     fn default() -> Self {
         Self {
             table_state: TableState::default(),
@@ -55,30 +56,47 @@ impl Default for RuleListState {
     }
 }
 
-pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
-
-
-    match app.rule_list_state.mode {
-        RuleManagementMode::Viewing => handle_viewing_keys(key_code, app),
-        RuleManagementMode::Editing(_) => handle_editing_keys(key_code, app),
-        RuleManagementMode::ConfirmingDelete { .. } => handle_confirm_delete_keys(key_code, app),
+/// The main key event handler for rule management screens.
+/// It dispatches to the generic handler with the correct state.
+pub fn handle_key_event(
+    key_code: KeyCode,
+    app: &mut App,
+) {
+    match app.screen {
+        AppScreen::OutgoingRules => handle_key_event_for_table(key_code, &mut app.outgoing_rule_state, &mut app.rules, &mut app.rules_modified),
+        AppScreen::IncomingRules => handle_key_event_for_table(key_code, &mut app.incoming_rule_state, &mut app.incoming_rules, &mut app.rules_modified),
+        _ => {} // Should not happen
     }
 }
 
-fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
+/// Handles key events for a generic rule table, given the specific state and rule list.
+fn handle_key_event_for_table(
+    key_code: KeyCode,
+    rule_table_state: &mut RuleTableState,
+    rules: &mut Vec<Rule>,
+    rules_modified: &mut bool,
+) {
+    match rule_table_state.mode {
+        RuleManagementMode::Viewing => handle_viewing_keys(key_code, rule_table_state, rules),
+        RuleManagementMode::Editing(_) => handle_editing_keys(key_code, rule_table_state, rules, rules_modified),
+        RuleManagementMode::ConfirmingDelete { .. } => handle_confirm_delete_keys(key_code, rule_table_state, rules, rules_modified),
+    }
+}
+
+fn handle_viewing_keys(key_code: KeyCode, state: &mut RuleTableState, rules: &mut Vec<Rule>) {
     match key_code {
         KeyCode::Down => {
-            if !app.rules.is_empty() {
-                let i = app.rule_list_state.table_state.selected().unwrap_or(0);
-                let next = if i >= app.rules.len() - 1 { 0 } else { i + 1 };
-                app.rule_list_state.table_state.select(Some(next));
+            if !rules.is_empty() {
+                let i = state.table_state.selected().unwrap_or(0);
+                let next = if i >= rules.len() - 1 { 0 } else { i + 1 };
+                state.table_state.select(Some(next));
             }
         }
         KeyCode::Up => {
-            if !app.rules.is_empty() {
-                let i = app.rule_list_state.table_state.selected().unwrap_or(0);
-                let prev = if i == 0 { app.rules.len() - 1 } else { i - 1 };
-                app.rule_list_state.table_state.select(Some(prev));
+            if !rules.is_empty() {
+                let i = state.table_state.selected().unwrap_or(0);
+                let prev = if i == 0 { rules.len() - 1 } else { i - 1 };
+                state.table_state.select(Some(prev));
             }
         }
         KeyCode::Char('a') => {
@@ -93,7 +111,7 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
                 app_id: None,
                 description: String::new(),
             };
-            app.rule_list_state.mode = RuleManagementMode::Editing(EditState {
+            state.mode = RuleManagementMode::Editing(EditState {
                 rule_index: None, // None signifies a new rule
                 rule: new_rule,
                 focused_field: FormField::Action,
@@ -102,11 +120,11 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
         }
         KeyCode::Char('e') => {
             // Edit selected rule
-            if let Some(selected_index) = app.rule_list_state.table_state.selected() {
-                if let Some(rule_to_edit) = app.rules.get(selected_index).cloned() {
+            if let Some(selected_index) = state.table_state.selected() {
+                if let Some(rule_to_edit) = rules.get(selected_index).cloned() {
                     let focused_field = FormField::Action;
                     let input_buffer = field_to_string(&rule_to_edit, focused_field);
-                    app.rule_list_state.mode = RuleManagementMode::Editing(EditState {
+                    state.mode = RuleManagementMode::Editing(EditState {
                         rule_index: Some(selected_index),
                         rule: rule_to_edit,
                         focused_field,
@@ -117,69 +135,67 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
         }
         KeyCode::Char('d') => {
             // Delete selected rule
-            if app.rule_list_state.table_state.selected().is_some() {
-                app.rule_list_state.mode = RuleManagementMode::ConfirmingDelete {
+            if state.table_state.selected().is_some() {
+                state.mode = RuleManagementMode::ConfirmingDelete {
                     selected_yes: false, // Default to "No"
                 };
-            }
-        }
-        KeyCode::Char('p') => {
-            // Apply changes
-            if app.rules_modified {
-                send_rules_to_daemon(app);
-                app.rules_modified = false;
             }
         }
         _ => {}
     }
 }
 
-fn handle_editing_keys(key_code: KeyCode, app: &mut App) {
-    if let RuleManagementMode::Editing(state) = &mut app.rule_list_state.mode {
+fn handle_editing_keys(
+    key_code: KeyCode,
+    rule_table_state: &mut RuleTableState,
+    rules: &mut Vec<Rule>,
+    rules_modified: &mut bool,
+) {
+    if let RuleManagementMode::Editing(edit_state) = &mut rule_table_state.mode {
         match key_code {
             KeyCode::Esc => { // This should work regardless of the focused field
-                app.rule_list_state.mode = RuleManagementMode::Viewing;
+                rule_table_state.mode = RuleManagementMode::Viewing;
             }
             // --- Form Navigation ---
             KeyCode::Down => { // This should work regardless of the focused field
-                apply_input_buffer(state); // Apply changes before switching
-                let current_index = FORM_FIELDS.iter().position(|&f| f == state.focused_field).unwrap_or(0);
+                apply_input_buffer(edit_state); // Apply changes before switching
+                let current_index = FORM_FIELDS.iter().position(|&f| f == edit_state.focused_field).unwrap_or(0);
                 let next_index = (current_index + 1) % FORM_FIELDS.len();
-                state.focused_field = FORM_FIELDS[next_index];
-                state.input_buffer = field_to_string(&state.rule, state.focused_field);
+                edit_state.focused_field = FORM_FIELDS[next_index];
+                edit_state.input_buffer = field_to_string(&edit_state.rule, edit_state.focused_field);
             }
             KeyCode::Up => { // This should work regardless of the focused field
-                apply_input_buffer(state); // Apply changes before switching
-                let current_index = FORM_FIELDS.iter().position(|&f| f == state.focused_field).unwrap_or(0);
+                apply_input_buffer(edit_state); // Apply changes before switching
+                let current_index = FORM_FIELDS.iter().position(|&f| f == edit_state.focused_field).unwrap_or(0);
                 let prev_index = (current_index + FORM_FIELDS.len() - 1) % FORM_FIELDS.len();
-                state.focused_field = FORM_FIELDS[prev_index];
-                state.input_buffer = field_to_string(&state.rule, state.focused_field);
+                edit_state.focused_field = FORM_FIELDS[prev_index];
+                edit_state.input_buffer = field_to_string(&edit_state.rule, edit_state.focused_field);
             }
             
             // --- Field-specific handling ---
-            KeyCode::Enter if state.focused_field == FormField::Save => { // Only when Save is focused
-                apply_input_buffer(state); // Apply any pending changes
-                let new_rule = state.rule.clone();
-                if let Some(index) = state.rule_index {
+            KeyCode::Enter if edit_state.focused_field == FormField::Save => { // Only when Save is focused
+                apply_input_buffer(edit_state); // Apply any pending changes
+                let new_rule = edit_state.rule.clone();
+                if let Some(index) = edit_state.rule_index {
                     // Editing existing rule
-                    app.rules[index] = new_rule;
+                    rules[index] = new_rule;
                 } else {
                     // Adding new rule
-                    app.rules.push(new_rule);
+                    rules.push(new_rule);
                 }
-                app.rule_list_state.mode = RuleManagementMode::Viewing;
-                app.rules_modified = true;
+                rule_table_state.mode = RuleManagementMode::Viewing;
+                *rules_modified = true;
             }
 
             // -- Toggle Fields --
-            KeyCode::Left | KeyCode::Right if state.focused_field == FormField::Action => { // Only when Action is focused
-                state.rule.action = match state.rule.action {
+            KeyCode::Left | KeyCode::Right if edit_state.focused_field == FormField::Action => { // Only when Action is focused
+                edit_state.rule.action = match edit_state.rule.action {
                     Action::Allow => Action::Deny,
                     Action::Deny => Action::Allow,
                 };
             }
-            KeyCode::Left | KeyCode::Right if state.focused_field == FormField::Protocol => { // Only when Protocol is focused
-                state.rule.protocol = match state.rule.protocol {
+            KeyCode::Left | KeyCode::Right if edit_state.focused_field == FormField::Protocol => { // Only when Protocol is focused
+                edit_state.rule.protocol = match edit_state.rule.protocol {
                     None => Some(Protocol::Tcp),
                     Some(Protocol::Tcp) => Some(Protocol::Udp),
                     Some(Protocol::Udp) => Some(Protocol::Icmp),
@@ -191,12 +207,12 @@ fn handle_editing_keys(key_code: KeyCode, app: &mut App) {
 
             // -- Text Input Fields --
             // These should only work on text input fields
-            _ => match state.focused_field {
+            _ => match edit_state.focused_field {
                 FormField::SourceIp | FormField::SourcePort | FormField::DestIp | FormField::DestPort | FormField::Description => {
                     if let KeyCode::Char(c) = key_code {
-                        state.input_buffer.push(c);
+                        edit_state.input_buffer.push(c);
                     } else if let KeyCode::Backspace = key_code {
-                        state.input_buffer.pop();
+                        edit_state.input_buffer.pop();
                     }
                 }
                 _ => {} // Do nothing for other fields
@@ -239,42 +255,38 @@ fn field_to_string(rule: &Rule, field: FormField) -> String {
     }
 }
 
-/// Sends the complete, current list of rules to the daemon.
-fn send_rules_to_daemon(app: &mut App) {
-    let config = FireWhalConfig {
-        // For now, we'll just put all rules in outgoing. This can be refined later.
-        outgoing_rules: app.rules.clone(),
-        incoming_rules: vec![],
-    };
-    if let Some(tx) = &app.to_zmq_tx {
-        if let Err(e) = tx.try_send(FireWhalMessage::UpdateRules(config)) {
-            app.debug_print.add_message(format!("[TUI] Failed to send rules to daemon: {}", e));
-        } else {
-            app.debug_print.add_message("[TUI] Sent rules to daemon.".to_string());
-        }
-    }
-}
-
-fn handle_confirm_delete_keys(key_code: KeyCode, app: &mut App) {
-    if let RuleManagementMode::ConfirmingDelete { selected_yes } = &mut app.rule_list_state.mode {
+fn handle_confirm_delete_keys(
+    key_code: KeyCode,
+    rule_table_state: &mut RuleTableState,
+    rules: &mut Vec<Rule>,
+    rules_modified: &mut bool,
+) {
+    if let RuleManagementMode::ConfirmingDelete { selected_yes } = &mut rule_table_state.mode {
         match key_code {
             KeyCode::Left | KeyCode::Right => {
                 *selected_yes = !*selected_yes;
             }
             KeyCode::Enter => {
                 if *selected_yes {
-                    if let Some(selected_index) = app.rule_list_state.table_state.selected() {
-                        if selected_index < app.rules.len() {
-                            app.rules.remove(selected_index);
-                            app.rules_modified = true;
+                    if let Some(selected_index) = rule_table_state.table_state.selected() {
+                        if selected_index < rules.len() {
+                            rules.remove(selected_index);
+                            *rules_modified = true;
                         }
                     }
-                    app.rule_list_state.table_state.select(None); // Deselect
+                    // Deselect after removal
+                    if rules.is_empty() {
+                        rule_table_state.table_state.select(None);
+                    } else if let Some(selected) = rule_table_state.table_state.selected() {
+                        if selected >= rules.len() {
+                             rule_table_state.table_state.select(Some(rules.len() - 1));
+                        }
+                    }
                 }
-                app.rule_list_state.mode = RuleManagementMode::Viewing;
+                rule_table_state.mode = RuleManagementMode::Viewing;
             }
             KeyCode::Esc => {
-                app.rule_list_state.mode = RuleManagementMode::Viewing;
+                rule_table_state.mode = RuleManagementMode::Viewing;
             }
             _ => {}
         }
@@ -282,12 +294,16 @@ fn handle_confirm_delete_keys(key_code: KeyCode, app: &mut App) {
 }
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
-    
-    // Base table
-    render_rules_table(f, app, area);
-
-    // Render modals on top if necessary
-    match &app.rule_list_state.mode {
+    // This function is now a dispatcher based on the current screen.
+    match app.screen {
+        AppScreen::OutgoingRules => render_rule_screen(f, "Outgoing Rules", &mut app.outgoing_rule_state, &app.rules, app.rules_modified, !app.focus_on_navigation, area),
+        AppScreen::IncomingRules => render_rule_screen(f, "Incoming Rules", &mut app.incoming_rule_state, &app.incoming_rules, app.rules_modified, !app.focus_on_navigation, area),
+        _ => {} // Should not happen if called correctly
+    }
+}
+pub fn render_rule_screen(f: &mut Frame, title: &str, state: &mut RuleTableState, rules: &[Rule], rules_modified: bool, is_focused: bool, area: Rect) {
+    render_rules_table(f, title, state, rules, rules_modified, is_focused, area);
+    match &state.mode {
         RuleManagementMode::Editing(state) => {
             let popup_area = centered_rect(80, 70, area);
             let form_block = Block::default()
@@ -401,11 +417,10 @@ fn render_form_field(f: &mut Frame, area: Rect, title: &str, value: &str, is_foc
     }
 }
 
-fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
-    let modified_indicator = if app.rules_modified { "*" } else { "" };
+fn render_rules_table(f: &mut Frame, title_str: &str, state: &mut RuleTableState, rules: &[Rule], rules_modified: bool, is_focused: bool, area: Rect) {
+    let modified_indicator = if rules_modified { "*" } else { "" };
     let title = Line::from(vec![
-        Span::styled("Rule ", Style::default().fg(Color::LightCyan)),
-        Span::styled("Management", Style::default().fg(Color::LightCyan)),
+        Span::styled(title_str, Style::default().fg(Color::LightCyan)),
         Span::styled(modified_indicator, Style::default().fg(Color::Yellow)),
         Span::raw(" ("),
         Span::styled("a", Style::default().fg(Color::Rgb(255, 165, 0))),
@@ -414,13 +429,13 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
         Span::raw(": edit, "),
         Span::styled("d", Style::default().fg(Color::Rgb(255, 165, 0))),
         Span::raw(": delete"),
-        if app.rules_modified { Span::raw(", p: apply") } else { Span::raw("") },
+        if rules_modified { Span::raw(", p: apply") } else { Span::raw("") },
         Span::raw(")"),
     ]);
 
 
 
-    let rows: Vec<Row> = app.rules.iter().map(|rule| {
+    let rows: Vec<Row> = rules.iter().map(|rule| {
         let action_cell = {
             let color = match rule.action {
                 Action::Allow => Color::Green,
@@ -482,7 +497,7 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
     ];
 
     // The row is only visually highlighted when the content pane has focus.
-    let highlight_style = if !app.focus_on_navigation {
+    let highlight_style = if is_focused {
         Style::default().bg(Color::Rgb(255, 165, 0)).fg(Color::Black).bold()
     } else {
         Style::default() // A muted style for when nav is focused
@@ -495,5 +510,5 @@ fn render_rules_table(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(top_separator, layout[1]);
     f.render_widget(header_table, layout[2]);
     f.render_widget(bottom_separator, layout[3]);
-    f.render_stateful_widget(table, layout[4], &mut app.rule_list_state.table_state);
+    f.render_stateful_widget(table, layout[4], &mut state.table_state);
 }
