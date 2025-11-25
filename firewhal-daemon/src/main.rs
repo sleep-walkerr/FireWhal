@@ -22,6 +22,7 @@ use serde::Deserialize;
 use toml;
 use pnet::{datalink};
 use anyhow::{bail, Context, Result};
+use sha3::{Digest, Sha3_256};
 
 // Standard library imports
 use std::collections::{HashMap, HashSet};
@@ -223,27 +224,25 @@ fn launch_process(
     }
 }
 
-/// Calculates a file's hash by spawning an external process as root.
-/// This is required to read files that may have restrictive permissions.
+// Calculates a files hash
+// Changed from external hashing application to solve for instability, requires daemon to be built in release mode
 async fn calculate_file_hash(path: PathBuf) -> Result<String, anyhow::Error> {
-    // 1. Build the command. Since the daemon runs as root, the child process
-    //    will inherit root privileges by default. No special setup is needed.
-    let mut command = tokio::process::Command::new("/opt/firewhal/bin/firewhal-hashing");
-    command.arg(path);
+    // No spawn, no fork, no crash.
+    let hash_result = task::spawn_blocking(move || {
+        let mut file = File::open(&path).context(format!("Failed to open file: {:?}", path))?;
+        let mut hasher = Sha3_256::new();
+        let mut buffer = [0; 1024 * 128]; 
 
-    // 2. Execute the command asynchronously and capture the output.
-    let output = command.output()
-        .await
-        .context("Failed to spawn 'firewhal-hashing' command")?;
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 { break; }
+            hasher.update(&buffer[..count]);
+        }
+        
+        Ok::<String, anyhow::Error>(hex::encode(hasher.finalize()))
+    }).await;
 
-    // 3. Check the result and return the hash or an error.
-    if output.status.success() {
-        let line = String::from_utf8_lossy(&output.stdout);
-        Ok(line.trim().to_string())
-    } else {
-        let error_message = String::from_utf8_lossy(&output.stderr);
-        bail!("firewhal-hashing failed with status {}: {}", output.status, error_message.trim());
-    }
+    hash_result.context("Hashing task panicked")?
 }
 
 
