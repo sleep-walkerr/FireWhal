@@ -605,9 +605,27 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
                     if unsafe { HANDSHAKE_ALLOWED.get(&reversed_tuple).is_some() } {
                         // Check whether application is allowed or not
                         // Get pid of the application associated with bind
-                        if let Some(tgid) = unsafe { PENDING_LISTENING_PORTS.get(&u32::from(reversed_tuple.dport)) } {
+                        info!(&ctx, "KEY MATCH");
+                        // Check for already trusted ports in trusted port map
+                        if let Some(tgid) = unsafe { TRUSTED_LISTENING_PORTS.get(&u32::from(reversed_tuple.dport)) } {
+                            info!(&ctx, "PORT MATCH");
                             // Check if that pid (tgid) is in the trusted map
                             if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid) } {
+                                info!(&ctx, "PID MATCH");
+                                // Check if the action for that PID is allow
+                                if pid_info.action == Action::Allow {
+                                    return Ok(TC_ACT_OK); // Explicitly allow the SYN-ACK
+                                } else if pid_info.action == Action::Deny {
+                                    // Delete entry from TRUSTED_LISTENING_PORTS
+                                    unsafe { TRUSTED_LISTENING_PORTS.remove(&u32::from(reversed_tuple.dport)) }.map_err(|_| ())?;
+                                    return Ok(TC_ACT_SHOT); // Explicitly deny the SYN-ACK
+                                }
+                            }
+                        } else if let Some(tgid) = unsafe { PENDING_LISTENING_PORTS.get(&u32::from(reversed_tuple.dport)) } {
+                            info!(&ctx, "PORT MATCH");
+                            // Check if that pid (tgid) is in the trusted map
+                            if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid) } {
+                                info!(&ctx, "PID MATCH");
                                 // Check if the action for that PID is allow
                                 if pid_info.action == Action::Allow {
                                     // Delete entry from PENDING_LISTENING_PORTS
