@@ -263,10 +263,10 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfi
             };
 
             if let Some(IpAddr::V4(source_ip)) = rule.source_ip {
-                new_key.source_ip = u32::from_be_bytes(source_ip.octets());
+                new_key.source_ip = u32::from_le_bytes(source_ip.octets());
             }
             if let Some(IpAddr::V4(destination_ip)) = rule.dest_ip {
-                new_key.dest_ip = u32::from_be_bytes(destination_ip.octets());
+                new_key.dest_ip = u32::from_le_bytes(destination_ip.octets());
             }
 
             new_rule_keys.insert(new_key);
