@@ -5,40 +5,28 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 #![no_std]
 #![no_main]
 
-use core::{hash::Hash, mem, net::{IpAddr,Ipv4Addr}};
+use core::{fmt::DebugTuple, hash::Hash, mem, net::{IpAddr,Ipv4Addr}};
 
 use aya_ebpf::{
-    bindings::{sockaddr, xdp_action, TC_ACT_OK, TC_ACT_SHOT},
-    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_current_comm},
-    macros::{cgroup_sock_addr, classifier, map, xdp},
-    maps::{HashMap, LpmTrie, PerfEventArray, RingBuf, LruHashMap, Array}, 
-    programs::{tc, SockAddrContext, TcContext, XdpContext}, EbpfContext, 
+    EbpfContext, bindings::{TC_ACT_OK, TC_ACT_SHOT, sockaddr, xdp_action, bpf_sock_tuple, bpf_sock, BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB}, helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_socket_cookie, bpf_skc_lookup_tcp, bpf_sk_release}, macros::{cgroup_sock_addr, classifier, map, xdp, sock_ops}, maps::{Array, HashMap, LpmTrie, LruHashMap, PerfEventArray, RingBuf}, programs::{SockAddrContext, TcContext, SockOpsContext} 
 };
 use aya_log_ebpf::{info, error, warn};
 
-use firewhal_kernel_common::{Action, BlockEvent, BlockEventPayload, BlockReason, ConnectionAttemptPayload, ConnectionInfo, ConnectionKey, ConnectionTuple, EventType, KernelEvent, LpmIpKey, PidTrustInfo, RuleAction, RuleKey, parse_packet_tuple};
+use firewhal_kernel_common::{Action, BlockEvent, BlockEventPayload, BlockReason, ConnectionAttemptPayload, ConnectionInfo, ConnectionKey, ConnectionTuple, EventType, KernelEvent, LpmIpKey, PidTrustInfo, RuleAction, RuleKey, parse_packet_tuple, parse_tcp_header};
 
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
 };
 
-
-
-#[map]
-static mut BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
-
-#[map]
-static mut PORT_BLOCKLIST: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
-
-#[map]
-static mut ICMP_BLOCK_ENABLED: HashMap<u8, u8> = HashMap::with_max_entries(1, 0);
-
 #[map]
 static mut EVENTS: PerfEventArray<KernelEvent> = PerfEventArray::new(0); // Change to accept KernelEvents instead
 
 #[map]
 static mut RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
+
+#[map]
+static mut INCOMING_RULES: HashMap<RuleKey, RuleAction> = HashMap::with_max_entries(1024, 0);
 
 #[map] // Connection Tracking Map for Stateful
 static mut CONNECTION_MAP: LruHashMap<ConnectionTuple, ConnectionInfo> =
@@ -54,7 +42,23 @@ static mut PENDING_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_
 static mut TRUSTED_CONNECTIONS_MAP: HashMap<ConnectionKey, u32> = HashMap::with_max_entries(4096, 0);
 
 #[map]
+static mut SOCKET_COOKIE_TRUST: HashMap<u64, u32> = HashMap::with_max_entries(4096, 0);
+
+#[map]
 static mut PERMISSIVE_MODE_ENABLED: Array<u32> = Array::with_max_entries(1, 0);
+
+#[map] 
+static PENDING_LISTENING_PORTS: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
+#[map] 
+static TRUSTED_LISTENING_PORTS: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
+// Set by sock_ops, Read by TC
+#[map]
+static TRUSTED_COOKIES: HashMap<u64, u8> = HashMap::with_max_entries(10000, 0);
+
+#[map]
+static HANDSHAKE_ALLOWED: HashMap<ConnectionTuple, u64> = HashMap::with_max_entries(4096, 0);
 
 
 // The following maps were for the map-in-map implementation and are no longer needed.
@@ -66,68 +70,274 @@ static mut PERMISSIVE_MODE_ENABLED: Array<u32> = Array::with_max_entries(1, 0);
 // #[map(pinned)]
 // static mut IP_RULES_TEMPLATE: LpmTrie<LpmIpKey, RuleAction> = LpmTrie::with_max_entries(1024, 0);
 
+// Handler for syscall programs, inserts connection keys for already approved PIDs and sends events for those not in the map
+fn app_tracking(prog_name: &str, ctx: &SockAddrContext) {
+    //Consider changing these back to safe "ctx.user_ipv" and the like if you can
+    let sockaddr_pointer = ctx.sock_addr;
+    let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
+    // let msg_src_ip4 = unsafe { (*sockaddr_pointer).msg_src_ip4 }; // This is the source IP address, just like the port, it always returns 0 here
+    let user_port = unsafe { (*sockaddr_pointer).user_port }; 
+    let protocol = unsafe { (*sockaddr_pointer).protocol };
+    let command_fetch = ctx.command();
+    let command: [u8; 16]; 
+    if command_fetch.is_ok() {
+        command = command_fetch.unwrap();
+    } else { 
+        command = [0; 16];
+        info!(ctx, "Command fetching failed");
+    }
+
+    //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
+    // They need to be converted to be used first
+    let source_port =  u32::from_be(user_port) as u16;
+    let destination_port = (u32::from_be(user_port) >> 16) as u16;
+
+
+    // Check if TGID already exists in map
+    if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
+        info!(ctx, "[Kernel] [{}] Trusted PID {} found for {}", prog_name, (ctx.tgid()) as u32, Ipv4Addr::from(u32::from_be(user_ip4)));
+        if pid_info.action == Action::Allow {
+            // Build connection key for payload
+            let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+            // Insert into again, in case of a trusted process connecting to a new ip address
+            if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } { // Switched this from trusted to pending to fit new model
+                warn!(ctx, "[Kernel] [{}] Failed to insert connection key: PID:{}, Key: [{}, src[{}:{}], dst[{}:{}]]", 
+                prog_name, 
+                ctx.tgid(), 
+                key_to_use.protocol as u8,
+                Ipv4Addr::from(u32::from_be(key_to_use.saddr)), 
+                key_to_use.sport, 
+                Ipv4Addr::from(u32::from_be(key_to_use.daddr)),  
+                key_to_use.dport,                
+                );
+            } else {
+                info!(ctx, "[Kernel] [{}] Successfully inserted connection key: PID:{}, Key: [{}, src[{}:{}], dst[{}:{}]]", 
+                prog_name, 
+                ctx.tgid(), 
+                key_to_use.protocol as u8,
+                Ipv4Addr::from(u32::from_be(key_to_use.saddr)), 
+                key_to_use.sport, 
+                Ipv4Addr::from(u32::from_be(key_to_use.daddr)),  
+                key_to_use.dport, 
+                );
+            }
+            return 
+        }
+    } else { // If it doesn't send event to check application
+        // Build connection key for payload
+        let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
+        let conn_attempt_payload = ConnectionAttemptPayload {
+            key: key_to_use
+        };
+        let connection_attempt_event = KernelEvent {
+            event_type: EventType::ConnectionAttempt, // Specific event type
+            pid: ctx.pid(),
+            tgid: ctx.tgid(),
+            comm: command,
+            payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
+        };
+        // Insert into pending connections map
+        if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
+            warn!(ctx, "[Kernel] [{}] Failed to insert connection key: PID:{}, Key: [{}, src[{}:{}], dst[{}:{}]]", 
+            prog_name, 
+            ctx.tgid(), 
+            key_to_use.protocol as u8,
+            Ipv4Addr::from(u32::from_be(key_to_use.saddr)), 
+            key_to_use.sport, 
+            Ipv4Addr::from(u32::from_be(key_to_use.daddr)),  
+            key_to_use.dport,                
+        );
+        } else {
+            info!(ctx, "[Kernel] [{}] Successfully inserted connection key: PID:{}, Key: [{}, src[{}:{}], dst[{}:{}]]", 
+            prog_name, 
+            ctx.tgid(), 
+            key_to_use.protocol as u8,
+            Ipv4Addr::from(u32::from_be(key_to_use.saddr)), 
+            key_to_use.sport, 
+            Ipv4Addr::from(u32::from_be(key_to_use.daddr)),  
+            key_to_use.dport, 
+            );
+        }
+        // Send event for processing
+        unsafe { EVENTS.output(ctx, &connection_attempt_event, 0) };
+    }
+}
+
+#[inline(always)]
+fn rule_matching(ctx: &TcContext, tuple: ConnectionTuple, info: ConnectionInfo) -> Result<i32, ()> {
+    // --- 1. Prepare Block Event (in case we need it) ---
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let tgid = (pid_tgid >> 32) as u32;
+
+    let block_event_payload = BlockEventPayload {
+        key: ConnectionKey {
+            sport: tuple.sport,
+            dport: tuple.dport,
+            protocol: tuple.protocol,
+            saddr: tuple.saddr,
+            daddr: tuple.daddr,
+            _padding: [0; 3],
+        },
+        // Set a more accurate block reason based on protocol
+        reason: match tuple.protocol as u32 {
+            6 => BlockReason::IpBlockedEgressTcp,
+            17 => BlockReason::IpBlockedEgressUdp,
+            _ => BlockReason::IpBlockedEgressTcp, // Default
+        },
+    };
+    let block_event = KernelEvent {
+        event_type: EventType::BlockEvent,
+        pid: pid_tgid as u32,
+        tgid: tgid,
+        comm: [0; 16],
+        payload: firewhal_kernel_common::KernelEventPayload {
+            block_event: (block_event_payload),
+        },
+    };
+
+    // --- 2. Define Rule Keys to Check, from most to least specific ---
+    let keys_to_check = [
+        // Most specific: Proto + IP + Port
+        RuleKey { protocol: tuple.protocol as u32, dest_ip: tuple.daddr, dest_port: tuple.dport, source_ip: 0, source_port: 0 },
+        // Wildcard Port: Proto + IP
+        RuleKey { protocol: tuple.protocol as u32, dest_ip: tuple.daddr, dest_port: 0, source_ip: 0, source_port: 0 },
+        // Wildcard IP: Proto + Port
+        RuleKey { protocol: tuple.protocol as u32, dest_ip: 0, dest_port: tuple.dport, source_ip: 0, source_port: 0 },
+        // Wildcard Protocol: IP + Port
+        RuleKey { protocol: 0, dest_ip: tuple.daddr, dest_port: tuple.dport, source_ip: 0, source_port: 0 },
+        // Wildcard Protocol & Port: IP only
+        RuleKey { protocol: 0, dest_ip: tuple.daddr, dest_port: 0, source_ip: 0, source_port: 0 },
+        // Wildcard Protocol & IP: Port only
+        RuleKey { protocol: 0, dest_ip: 0, dest_port: tuple.dport, source_ip: 0, source_port: 0 },
+    ];
+
+    // --- 3. Check for a matching rule ---
+    let mut matched_action: Option<&RuleAction> = None;
+
+    // The verifier can unroll this sequence of checks.
+    if let Some(action) = unsafe { RULES.get(&keys_to_check[0]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[1]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[2]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[3]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[4]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { RULES.get(&keys_to_check[5]) } { matched_action = Some(action); }
+
+    // --- 4. Process the matched rule ---
+    if let Some(action) = matched_action {
+        return match action.action {
+            Action::Allow => {
+                info!(ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection to {}:{}", action.rule_id, Ipv4Addr::from(u32::from_be(tuple.daddr)), tuple.dport);
+                // Add to stateful map for return traffic
+                if unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) }.is_err() {
+                    info!(ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT);
+                }
+                Ok(TC_ACT_OK)
+            }
+            Action::Deny => {
+                info!(ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection to {}:{}", action.rule_id, Ipv4Addr::from(u32::from_be(tuple.daddr)), tuple.dport);
+                unsafe { EVENTS.output(ctx, &block_event, 0) };
+                Ok(TC_ACT_SHOT)
+            }
+        };
+    }
+
+    // --- 5. Default Action: No rule matched ---
+    // If we reach here, no rule matched. Your previous logic defaulted to block.
+    info!(ctx, "[Kernel] [egress_tc] No rule matched. Blocking connection to {}:{}", Ipv4Addr::from(u32::from_be(tuple.daddr)), tuple.dport);
+    Ok(TC_ACT_SHOT)
+}
+
+#[inline(always)]
+fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32, ()> {
+    // --- 1. Prepare Block Event (in case we need it) ---
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let tgid = (pid_tgid >> 32) as u32;
+
+    let block_event_payload = BlockEventPayload {
+        key: ConnectionKey {
+            sport: tuple.sport,
+            dport: tuple.dport,
+            protocol: tuple.protocol,
+            saddr: tuple.saddr,
+            daddr: tuple.daddr,
+            _padding: [0; 3],
+        },
+        reason: BlockReason::IpBlockedIngress, // A more specific reason
+    };
+    let block_event = KernelEvent {
+        event_type: EventType::BlockEvent,
+        pid: pid_tgid as u32,
+        tgid: tgid,
+        comm: [0; 16],
+        payload: firewhal_kernel_common::KernelEventPayload {
+            block_event: (block_event_payload),
+        },
+    };
+
+    // --- 2. Define Rule Keys for INGRESS traffic ---
+    // For ingress, we match against the SOURCE IP and PORT.
+    let keys_to_check = [
+        // Most specific: Proto + Source IP + Source Port
+        RuleKey { protocol: tuple.protocol as u32, source_ip: tuple.saddr, source_port: tuple.sport, dest_ip: 0, dest_port: 0 },
+        // Wildcard Port: Proto + Source IP
+        RuleKey { protocol: tuple.protocol as u32, source_ip: tuple.saddr, source_port: 0, dest_ip: 0, dest_port: 0 },
+        // Wildcard Protocol: Source IP only
+        RuleKey { protocol: 0, source_ip: tuple.saddr, source_port: 0, dest_ip: 0, dest_port: 0 },
+        // Wildcard All: Source Port Only
+        RuleKey { protocol: 0, source_ip: 0, source_port: tuple.sport, dest_ip: 0, dest_port: 0 },
+        // Wildcard All: Destination Port Only
+        RuleKey { protocol: 0, source_ip: 0, source_port: 0, dest_ip: 0, dest_port: tuple.dport },
+    ];
+
+    // --- 3. Check for a matching rule ---
+    let mut matched_action: Option<&RuleAction> = None;
+
+    if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[0]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[1]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[2]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[3]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[4]) } { matched_action = Some(action); }
+
+
+    // --- 4. Process the matched rule ---
+    if let Some(action) = matched_action {
+        return match action.action {
+            Action::Allow => {
+                info!(ctx, "[Kernel] [ingress_tc] Rule {} ALLOWED incoming connection from {}:{}", action.rule_id, Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
+                // Check if TCP traffic
+                if tuple.protocol == 6 {
+                    let tcp_header_result = parse_tcp_header(ctx);
+
+                    if let Ok(tcp_header) =  tcp_header_result{
+                        info!(ctx, "[Kernel] [ingress_tc] TCP connection SYN Check: {}", tcp_header.syn());
+                        if tcp_header.syn() == 1 {
+                            // let ts = unsafe { bpf_ktime_get_ns() };
+                            info!(ctx, "[Kernel] [ingress_tc] Inserting Handshake Allow: {} {} {} {} {}", tuple.saddr, tuple.daddr, tuple.sport, tuple.dport, tuple.protocol);
+                            unsafe { HANDSHAKE_ALLOWED.insert(&tuple, &0, 0) };
+                        }
+                    }
+                }
+
+                Ok(TC_ACT_OK)
+            }
+            Action::Deny => {
+                info!(ctx, "[Kernel] [ingress_tc] Rule {} BLOCKED incoming connection from {}:{}", action.rule_id, Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
+                unsafe { EVENTS.output(ctx, &block_event, 0) };
+                Ok(TC_ACT_SHOT)
+            }
+        };
+    }
+
+    // --- 5. Default Action: No rule matched ---
+    info!(ctx, "[Kernel] [ingress_tc] No ingress rule matched. Blocking connection from {}:{}", Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
+    Ok(TC_ACT_SHOT)
+}
+
 // INGRESS PROGRAMS
-// #[xdp]
-// pub fn firewhal_xdp(ctx: XdpContext) -> u32 {
-//     let result = || -> Result<u32, ()> {
-//         let data_end = ctx.data_end();
-//         let data_start = ctx.data();
-
-//         // We manually track the offset as we parse headers.
-//         let mut offset = 0;
-
-//         // Load Ethernet header. All pointer operations are unsafe and must be
-//         // enclosed in an unsafe block. The bounds check is what makes this
-//         // operation safe.
-//         let eth_hdr: EthHdr = unsafe {
-//             let ptr = (data_start as *const u8).add(offset) as *const EthHdr;
-//             if (ptr as *const u8).add(mem::size_of::<EthHdr>()) > (data_end as *const u8) {
-//                 return Err(());
-//             }
-//             *ptr
-//         };
-//         offset += mem::size_of::<EthHdr>();
-
-//         if !matches!(eth_hdr.ether_type, EtherType::Ipv4) {
-//             return Ok(xdp_action::XDP_PASS);
-//         }
-
-//         // Load IPv4 header.
-//         let ipv4_hdr: Ipv4Hdr = unsafe {
-//             let ptr = (data_start as *const u8).add(offset) as *const Ipv4Hdr;
-//             if (ptr as *const u8).add(mem::size_of::<Ipv4Hdr>()) > (data_end as *const u8) {
-//                 return Err(());
-//             }
-//             *ptr
-//         };
-//         let icmp_block_ptr = core::ptr::addr_of_mut!(ICMP_BLOCK_ENABLED);
-        
-//         if ipv4_hdr.proto == IpProto::Icmp {
-//             if unsafe { (*icmp_block_ptr).get(&1).is_some() } {
-//                 // <-- NEW: Send a BlockEvent
-//                 let event = BlockEvent {
-//                     reason: BlockReason::IcmpBlocked,
-//                     pid: 0, // PID is not available in the XDP context
-//                     dest_addr: IpAddr::V4(ipv4_hdr.dst_addr()),
-//                     dest_port: 0,
-//                 };
-//                 //unsafe { EVENTS.output(&ctx,&event, 0) };
-//                 return Ok(xdp_action::XDP_DROP);
-//             }
-//         }
-
-//         Ok(xdp_action::XDP_PASS)
-//     }();
-
-//     match result {
-//         Ok(ret) => ret,
-//         Err(_) => xdp_action::XDP_PASS, // On parsing error, better to pass than to drop unexpectedly
-//     }
-// }
-
-#[classifier] // Replaces primary use of XDP for all incoming packets, uses a map of current connections to implement stateful filtering
-pub fn firewall_ingress_tc(ctx: TcContext) -> i32 {
-    match try_firewall_ingress_tc(ctx) {
+#[classifier] // Checks incoming traffic, allowed traffic should include either explicit allows via rules, or connection map matches for the stateful firewall
+pub fn firewhal_ingress_tc(ctx: TcContext) -> i32 {
+    match try_firewhal_ingress_tc(ctx) {
         Ok(ret) => ret,
         Err(_) => {
             TC_ACT_OK // If parsing fails, allow. It means there is no handling for that type of traffic
@@ -135,19 +345,19 @@ pub fn firewall_ingress_tc(ctx: TcContext) -> i32 {
     }
 }
 
-fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
+fn try_firewhal_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
 
         let result = || -> Result<i32, i32> {
-            if let Ok(incoming_tuple) = parse_packet_tuple(&ctx) {
+            if let Ok(tuple) = parse_packet_tuple(&ctx) {
                 // For ingress, we need to check for the REVERSE tuple, since we are
                 // looking for the return path of an outgoing connection.
                 let reversed_tuple = ConnectionTuple {
-                    saddr: incoming_tuple.daddr, // Swapped
-                    daddr: incoming_tuple.saddr, // Swapped
-                    sport: incoming_tuple.dport, // Swapped
-                    dport: incoming_tuple.sport, // Swapped
-                    protocol: incoming_tuple.protocol,
-                    ..incoming_tuple
+                    saddr: tuple.daddr, // Swapped
+                    daddr: tuple.saddr, // Swapped
+                    sport: tuple.dport, // Swapped
+                    dport: tuple.sport, // Swapped
+                    protocol: tuple.protocol,
+                    ..tuple
                 };
 
                 // Also check for a portless version for protocols like ICMP
@@ -189,8 +399,9 @@ fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
                     // info!(&ctx, "[Kernel] [firewall_ingress_tc]: Allowed portless tuple found: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
                     return Ok(TC_ACT_OK);
                 } else {
-                    // info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
-                    return Ok(TC_ACT_SHOT)
+                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Tuple not found for: [{} {} {} {} {}]", source_address, destination_address, source_port, destination_port, protocol);
+                    // If no stateful match, fall back to stateless ingress rule matching.
+                    return ingress_rule_matching(&ctx, tuple).map_err(|_| 0);
                 }
             } else {
                 info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
@@ -208,108 +419,6 @@ fn try_firewall_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
 
 
 // EGRESS PROGRAMS
-/*
-Down the line, what the plan is is to use cgroup outgoing to check if the application's traffic is allowed
-Then use the outgoing TC programs to check for subsequent rules, either for all applications or 
-for a specific application.
-Why do this? Because at the point of a connect() call, for instance, its so early that port numbers may have
-not been assigned. This is an issue that will never occurr at the stage a TC program is triggered
-*/
-
-
-// TEST FUNCTION 
-fn app_tracking(prog_name: &str, ctx: &SockAddrContext) {
-    //Consider changing these back to safe "ctx.user_ipv" and the like if you can
-    let sockaddr_pointer = ctx.sock_addr;
-    let user_ip4 = unsafe { (*sockaddr_pointer).user_ip4 };
-    let user_port = unsafe { (*sockaddr_pointer).user_port }; 
-    let protocol = unsafe { (*sockaddr_pointer).protocol };
-    let command_fetch = ctx.command();
-    let command: [u8; 16]; 
-    if command_fetch.is_ok() {
-        command = command_fetch.unwrap();
-    } else { 
-        command = [0; 16];
-        info!(ctx, "Command fetching failed");
-    }
-
-    //Ports are u32 instead of u16 because src and dst are stored into one value for efficiency
-    // They need to be converted to be used first
-    let source_port =  u32::from_be(user_port) as u16;
-    let destination_port = (u32::from_be(user_port) >> 16) as u16;
-
-    // Check to see if permissive mode is not enabled
-    // if let Some(flag_val) = unsafe { PERMISSIVE_MODE_ENABLED.get(0) } {
-        // if *flag_val == 0 {
-            // Check if TGID already exists in map
-            if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(&ctx.tgid()) } {
-                info!(ctx, "[Kernel] [{}] Trusted PID {} found for {}", prog_name, (ctx.tgid()) as u32, Ipv4Addr::from(u32::from_be(user_ip4)));
-                // Build connection key for payload
-                let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
-                // Insert into again, in case of a trusted process connecting to a new ip address
-                if let Err(e) = unsafe { TRUSTED_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
-                    warn!(ctx, "[Kernel] [{}] Failed to insert connection key: PID:{}, Key: [{}, src[{}:{}], dst[{}:{}]]", 
-                    prog_name, 
-                    ctx.tgid(), 
-                    key_to_use.protocol as u8,
-                    Ipv4Addr::from(u32::from_be(key_to_use.saddr)), 
-                    key_to_use.sport, 
-                    Ipv4Addr::from(u32::from_be(key_to_use.daddr)),  
-                    key_to_use.dport,                
-                    );
-                } else {
-                    info!(ctx, "[Kernel] [{}] Successfully inserted connection key: PID:{}, Key: [{}, src[{}:{}], dst[{}:{}]]", 
-                    prog_name, 
-                    ctx.tgid(), 
-                    key_to_use.protocol as u8,
-                    Ipv4Addr::from(u32::from_be(key_to_use.saddr)), 
-                    key_to_use.sport, 
-                    Ipv4Addr::from(u32::from_be(key_to_use.daddr)),  
-                    key_to_use.dport, 
-                    );
-                }
-                return 
-            } else { // If it doesn't send event to check application
-                // Build connection key for payload
-                let key_to_use = ConnectionKey { saddr: 0, daddr: user_ip4, sport: 0, dport: destination_port, protocol: protocol as u8, _padding: [0; 3]};
-                let conn_attempt_payload = ConnectionAttemptPayload {
-                    key: key_to_use
-                };
-                let connection_attempt_event = KernelEvent {
-                    event_type: EventType::ConnectionAttempt, // Specific event type
-                    pid: ctx.pid(),
-                    tgid: ctx.tgid(),
-                    comm: command,
-                    payload: firewhal_kernel_common::KernelEventPayload { connection_attempt: (conn_attempt_payload) }
-                };
-                // Insert into pending connections map
-                if let Err(e) = unsafe { PENDING_CONNECTIONS_MAP.insert(&key_to_use, &ctx.tgid(), 0) } {
-                    warn!(ctx, "[Kernel] [{}] Failed to insert connection key: PID:{}, Key: [{}, src[{}:{}], dst[{}:{}]]", 
-                    prog_name, 
-                    ctx.tgid(), 
-                    key_to_use.protocol as u8,
-                    Ipv4Addr::from(u32::from_be(key_to_use.saddr)), 
-                    key_to_use.sport, 
-                    Ipv4Addr::from(u32::from_be(key_to_use.daddr)),  
-                    key_to_use.dport,                
-                );
-                } else {
-                    info!(ctx, "[Kernel] [{}] Successfully inserted connection key: PID:{}, Key: [{}, src[{}:{}], dst[{}:{}]]", 
-                    prog_name, 
-                    ctx.tgid(), 
-                    key_to_use.protocol as u8,
-                    Ipv4Addr::from(u32::from_be(key_to_use.saddr)), 
-                    key_to_use.sport, 
-                    Ipv4Addr::from(u32::from_be(key_to_use.daddr)),  
-                    key_to_use.dport, 
-                    );
-                }
-                // Send event for processing
-                unsafe { EVENTS.output(ctx, &connection_attempt_event, 0) };
-            }
-}
-
-//END TEST FUNCTION MOVE LATER
 #[cgroup_sock_addr(connect4)]
 pub fn firewhal_egress_connect4(ctx: SockAddrContext) -> i32 {
     match try_firewhal_egress_connect4(ctx) {
@@ -362,6 +471,16 @@ pub fn firewhal_egress_sendmsg4(ctx: SockAddrContext) -> i32 {
 #[cgroup_sock_addr(bind4)]
 pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
     let result = || -> Result<i32, i32> {
+        let user_port = unsafe { (*ctx.sock_addr).user_port }; 
+        let destination_port = (u32::from_be(user_port) >> 16) as u16;
+        
+        info!(&ctx, "[Kernel] [bind4] Destination Port: {}", destination_port);
+        
+        let insertion_result = unsafe {PENDING_LISTENING_PORTS.insert(&u32::from(destination_port), &ctx.tgid(), 0) };
+        if insertion_result.is_err() {
+                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
+                    return Ok(TC_ACT_SHOT)
+                }
         app_tracking("bind4", &ctx);
         Ok(1) // Allow the connection for now, blocking delegated to tc egress program
     }();
@@ -376,14 +495,14 @@ pub fn firewhal_egress_bind4(ctx: SockAddrContext) -> i32 {
 }
 
 #[classifier] // Used for connection tracking when an outgoing connection is allowed
-pub fn firewall_egress_tc(ctx: TcContext) -> i32 { // Change return type to include tuple, and then insert it here
-    match try_firewall_egress_tc(ctx) {
+pub fn firewhal_egress_tc(ctx: TcContext) -> i32 { // Change return type to include tuple, and then insert it here
+    match try_firewhal_egress_tc(ctx) {
         Ok(ret) => ret,
         Err(_) => TC_ACT_OK, // If there is a parsing error, allow the traffic. It means we haven't implemented a way to handle it yet.
     }
 }
 
-fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
+fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     let mut tuple = parse_packet_tuple(&ctx)?;
     // Create debug printing fields
     let debug_saddr = Ipv4Addr::from(u32::from_be(tuple.saddr));
@@ -420,6 +539,17 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
 
     // Extract Connection Key for Pending Match
     let incoming_connection_key = ConnectionKey {
+        saddr: tuple.saddr,
+        daddr: tuple.daddr,
+        sport: tuple.sport,
+        dport: tuple.dport,
+        protocol: tuple.protocol,
+        _padding: [0; 3],
+     };
+
+     // Two potential pending keys for matching
+     // Likely Pending Connection Key (with port)
+     let pending_connection_key = ConnectionKey {
         saddr: 0,
         daddr: tuple.daddr,
         sport: 0,
@@ -427,35 +557,126 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
         protocol: tuple.protocol,
         _padding: [0; 3],
      };
+
+     // Portless Pending Connection Key: *** This is for instances when QUIC or other contexts cause the port to be 0 in the syscall programs
+     let portless_pending_connection_key = ConnectionKey {
+        saddr: 0,
+        daddr: tuple.daddr,
+        sport: 0,
+        dport: tuple.dport,
+        protocol: tuple.protocol,
+        _padding: [0; 3],
+     };
+
      // Print for Debug
      info!(&ctx, "[Kernel] [egress_tc] ConnectionKey: {} {} {} {} {}", debug_saddr, debug_daddr, debug_sport, debug_dport, incoming_connection_key.protocol as u8);
-     // Lookup in TRUSTED_CONNECTIONS_MAP
-     if let Some(tgid_match) = unsafe { TRUSTED_CONNECTIONS_MAP.get(&incoming_connection_key) } {
-        
-        // --- YOUR NEW LOGIC GOES HERE ---
-        // Check if the associated PID is *still* trusted
-        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
-            if pid_info.action == Action::Allow {
-                // PID is still trusted, refresh the connection's timestamp in the LRU map
-                unsafe { TRUSTED_CONNECTIONS_MAP.insert(&incoming_connection_key, tgid_match, 0) }.map_err(|_| ())?;
-                info!(&ctx, "[Kernel] [egress_tc] Trusted Connection for TGID {} refreshed.", *tgid_match);
-                // Fall through to the final Ok(1) to allow the packet
-            } else {
-                // PID is in the map, but is explicitly DENIED. Block the packet.
-                info!(&ctx, "[Kernel] [egress_tc] Connection for TGID {} is explicitly DENIED. Blocking.", *tgid_match);
-                return Ok(TC_ACT_SHOT);
+
+    // THIS NEEDS TO BE MOVED: Server Functionality
+    //
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr() as *mut _) };
+    if cookie == 0 {
+        // Packet is not associated with a socket.
+        // info!(&ctx, "[Kernel] [egress_tc] Packet has no socket cookie.");
+    } else if unsafe { TRUSTED_COOKIES.get(&cookie).is_some() } {
+        // info!(&ctx, "[Kernel] [egress_tc] Trusted Cookie Found: {}", cookie);
+        return Ok(TC_ACT_OK)
+    } else {
+        // info!(&ctx, "[Kernel] [egress_tc] No Trusted Cookie Found: {}", cookie);
+        if tuple.protocol == 6 {
+            let tcp_header_result = parse_tcp_header(&ctx);
+
+            if let Ok(tcp_header) =  tcp_header_result{
+                // info!(&ctx, "HANDSHAKE CHECK");
+                // Check if packet is a SYN-ACK packet, this means its a local server responding to a SYN packet
+                if tcp_header.syn() != 0 && tcp_header.ack() != 0 {
+                    // info!(&ctx, "HANDSHAKE CHECK TRUE");
+
+                    // Reverse tuple to match insertion
+                    let reversed_tuple = ConnectionTuple {
+                        saddr: tuple.daddr, // Swapped
+                        daddr: tuple.saddr, // Swapped
+                        sport: tuple.dport, // Swapped
+                        dport: tuple.sport, // Swapped
+                        protocol: tuple.protocol,
+                        ..tuple
+                    };
+                    // info!(&ctx, "CHECKING KEY: {} {} {} {} {}", reversed_tuple.saddr, reversed_tuple.daddr, reversed_tuple.sport, reversed_tuple.dport, reversed_tuple.protocol);
+                    // Check for temporary allow entry made for allowed incoming traffic
+                    if unsafe { HANDSHAKE_ALLOWED.get(&reversed_tuple).is_some() } {
+                        // Check whether application is allowed or not
+                        // Get pid of the application associated with bind
+                        // info!(&ctx, "KEY MATCH");
+                        // Check for already trusted ports in trusted port map
+                        if let Some(tgid) = unsafe { TRUSTED_LISTENING_PORTS.get(&u32::from(reversed_tuple.dport)) } {
+                            // info!(&ctx, "PORT MATCH");
+                            // Check if that pid (tgid) is in the trusted map
+                            if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid) } {
+                                // info!(&ctx, "PID MATCH");
+                                // Check if the action for that PID is allow
+                                if pid_info.action == Action::Allow {
+                                    return Ok(TC_ACT_OK); // Explicitly allow the SYN-ACK
+                                } else if pid_info.action == Action::Deny {
+                                    // Delete entry from TRUSTED_LISTENING_PORTS
+                                    unsafe { TRUSTED_LISTENING_PORTS.remove(&u32::from(reversed_tuple.dport)) }.map_err(|_| ())?;
+                                    return Ok(TC_ACT_SHOT); // Explicitly deny the SYN-ACK
+                                }
+                            }
+                        } else if let Some(tgid) = unsafe { PENDING_LISTENING_PORTS.get(&u32::from(reversed_tuple.dport)) } {
+                            // info!(&ctx, "PORT MATCH");
+                            // Check if that pid (tgid) is in the trusted map
+                            if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid) } {
+                                // info!(&ctx, "PID MATCH");
+                                // Check if the action for that PID is allow
+                                if pid_info.action == Action::Allow {
+                                    // Delete entry from PENDING_LISTENING_PORTS
+                                    unsafe { PENDING_LISTENING_PORTS.remove(&u32::from(reversed_tuple.dport)) }.map_err(|_| ())?;
+                                    // Add entry to TRUSTED_LISTENING_PORTS
+                                    unsafe { TRUSTED_LISTENING_PORTS.insert(&u32::from(reversed_tuple.dport), &tgid, 0) }.map_err(|_| ())?;
+                                    return Ok(TC_ACT_OK); // Explicitly allow the SYN-ACK
+                                } else if pid_info.action == Action::Deny {
+                                    // Delete entry from PENDING_LISTENING_PORTS
+                                    unsafe { PENDING_LISTENING_PORTS.remove(&u32::from(reversed_tuple.dport)) }.map_err(|_| ())?;
+                                    return Ok(TC_ACT_SHOT); // Explicitly deny the SYN-ACK
+                                }
+                            }
+                        }
+                        
+                    }
+                }
             }
+
+        }
+    }
+
+
+    // THIS NEEDS TO GO IN A FUNCTION
+    // Lookup in TRUSTED_CONNECTIONS_MAP
+    if let Some(tgid_match) = unsafe { TRUSTED_CONNECTIONS_MAP.get(&incoming_connection_key) } {
+    info.pid = *tgid_match;
+
+    // Check if the associated PID is still trusted
+    if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
+        if pid_info.action == Action::Allow {
+            // PID is still trusted, refresh the connection's timestamp in the LRU map
+            unsafe { TRUSTED_CONNECTIONS_MAP.insert(&incoming_connection_key, tgid_match, 0) }.map_err(|_| ())?;
+            info!(&ctx, "[Kernel] [egress_tc] Trusted Connection for TGID {} refreshed.", *tgid_match);
+            // Fall through to the final Ok(1) to allow the packet
         } else {
-            // RACE CONDITION HANDLED:
-            // The connection is known, but the PID (TGID) is no longer in the trusted map.
-            // This is a stale connection. Block it and remove it.
-            info!(&ctx, "[Kernel] [egress_tc] Stale connection for untrusted TGID {}. Blocking and removing.", *tgid_match);
-            unsafe { TRUSTED_CONNECTIONS_MAP.remove(&incoming_connection_key) }.map_err(|_| ())?;
+            // PID is in the map, but is explicitly DENIED. Block the packet.
+            info!(&ctx, "[Kernel] [egress_tc] Connection for TGID {} is explicitly DENIED. Blocking.", *tgid_match);
             return Ok(TC_ACT_SHOT);
         }
-        
-    // 2. Check if the connection is new and pending verification
-    } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&incoming_connection_key) } {
+    } else {
+        // The connection is known, but the PID (TGID) is no longer in the trusted map
+        // This is a stale connection. Block it and remove it
+        info!(&ctx, "[Kernel] [egress_tc] Stale connection for untrusted TGID {}. Blocking and removing.", *tgid_match);
+        unsafe { TRUSTED_CONNECTIONS_MAP.remove(&incoming_connection_key) }.map_err(|_| ())?;
+        return Ok(TC_ACT_SHOT);
+    }
+    
+    // Check if the connection is new and pending verification
+    } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&pending_connection_key) } {
+        info.pid = *tgid_match;
         info!(&ctx, "[Kernel] [egress_tc] Pending Connection for {}, checking.", *tgid_match);
         
         if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
@@ -464,7 +685,28 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
                 // Move from PENDING to TRUSTED
                 unsafe {
                     TRUSTED_CONNECTIONS_MAP.insert(&incoming_connection_key, tgid_match, 0).map_err(|_| ())?;
-                    PENDING_CONNECTIONS_MAP.remove(&incoming_connection_key).map_err(|_| ())?;
+                    PENDING_CONNECTIONS_MAP.remove(&pending_connection_key).map_err(|_| ())?;
+                }
+                // Fall through to the final Ok(1) to allow the packet
+            } else { 
+                info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked (PID Denied) {}", *tgid_match);
+                return Ok(TC_ACT_SHOT); // Block the connection
+             }
+        } else {
+            info!(&ctx, "[Kernel] [egress_tc] Pending Connection Blocked (PID Not Found).");
+            return Ok(TC_ACT_SHOT);
+        }
+    } else if let Some(tgid_match) = unsafe { PENDING_CONNECTIONS_MAP.get(&portless_pending_connection_key) } {
+        info.pid = *tgid_match;
+        info!(&ctx, "[Kernel] [egress_tc] Pending Connection for {}, checking.", *tgid_match);
+        
+        if let Some(pid_info) = unsafe { TRUSTED_PIDS.get(tgid_match) } {
+            if pid_info.action == Action::Allow {
+                info!(&ctx, "[Kernel] [egress_tc] Pending Connection Allowed {}", *tgid_match);
+                // Move from PENDING to TRUSTED
+                unsafe {
+                    TRUSTED_CONNECTIONS_MAP.insert(&incoming_connection_key, tgid_match, 0).map_err(|_| ())?;
+                    PENDING_CONNECTIONS_MAP.remove(&pending_connection_key).map_err(|_| ())?;
                 }
                 // Fall through to the final Ok(1) to allow the packet
             } else { 
@@ -483,209 +725,66 @@ fn try_firewall_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     }
 
     
-    
-    // This is where you would track the new outgoing connection.
-    // TODO: A real implementation would check if this egress is from an approved PID.
-    // For now, we'll add any outgoing connection to the map to allow its return traffic.
-    
-
-    
-
-    // Get a reference to the RULES hashmap
-    let rules_ptr =  core::ptr::addr_of_mut!(RULES);
-
-    // Create keys to check for Rule Match
-    // Specific Match
-    let full_key = RuleKey {
-        protocol: tuple.protocol as u32, // Don't forget about wild card for protocol
-        source_port: 0, // Source port is irrelevant in this filter
-        dest_port: tuple.dport,
-        source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        dest_ip: tuple.daddr,
-    };
-    // Wildcard port match
-    let wildcard_port_key = RuleKey {
-        protocol: tuple.protocol as u32, // Don't forget about wild card for protocol
-        source_port: 0, // Source port is irrelevant in this filter
-        dest_port: 0,
-        source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        dest_ip: tuple.daddr,
-    };
-    // Wildcard IP match
-    let wildcard_ip_key = RuleKey {
-        protocol: tuple.protocol as u32, // Don't forget about wild card for protocol
-        source_port: 0, // Source port is irrelevant in this filter
-        dest_port: tuple.dport,
-        source_ip: 0, // src is available in ingress programs, not egress since we already know its from us
-        dest_ip: 0,
-    };
-    // Wildcard Protocol Match on Dest IP
-    let ip_wildcard_proto_key = RuleKey {
-        protocol: 0,
-        source_port: 0,
-        dest_port: 0,
-        source_ip: 0,
-        dest_ip: tuple.daddr,
-    };
-    // Wildcard Protocol Match on Dest Port
-    let port_wildcard_proto_key = RuleKey {
-        protocol: 0,
-        source_port: 0,
-        dest_port: tuple.dport,
-        source_ip: 0,
-        dest_ip: 0,
-    };
-    // Wildcard Protocol Match on Dest IP and Port
-    let full_wildcard_proto_key = RuleKey {
-        protocol: 0,
-        source_port: 0,
-        dest_port: tuple.dport,
-        source_ip: 0,
-        dest_ip: tuple.daddr,
-    };
-    
-    // Create block event to report block
-    let pid_tgid = bpf_get_current_pid_tgid();
-    let tgid = (pid_tgid >> 32) as u32;
     //let mut comm = unsafe { bpf_get_current_comm().unwrap() };
-    // Create payload to send in KernelEvent
-    let block_event_payload = BlockEventPayload {
-        key: ConnectionKey {
-            sport: tuple.sport,
-            dport: tuple.dport,
-            protocol: tuple.protocol,
-            saddr: tuple.saddr,
-            daddr: tuple.daddr,
-            _padding: [0; 3],
-        },
-        reason: BlockReason::IpBlockedEgressTcp,
-    };
-    let block_event = KernelEvent {
-        event_type: EventType::BlockEvent, // Specific event type
-        pid: pid_tgid as u32,
-        tgid: tgid,
-        comm: [0; 16],
-        payload: firewhal_kernel_common::KernelEventPayload { block_event: (block_event_payload) }
-    };
+
 
     
 
     // ADD TEMP DEBUG PRINT OF FIELDS
     info!(&ctx, "[Kernel] [egress_tc] CHECKING TRAFFIC: [{}:{}, {}:{}]", debug_saddr, debug_sport, debug_daddr, debug_dport);
 
-    // Check all keys
-    if let Some(action) = unsafe { (*rules_ptr).get(&full_key) } {
-        // New matching 
-        match action.action {
-            Action::Deny => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(&ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_port_key) } {
-        match action.action {
-            Action::Deny => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(&ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&wildcard_ip_key) } {
-        match action.action {
-            Action::Deny => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(&ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&ip_wildcard_proto_key) } {
-        match action.action {
-            Action::Deny => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(&ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&port_wildcard_proto_key) } {
-        match action.action {
-            Action::Deny => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(&ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    } else if let Some(action) = unsafe { (*rules_ptr).get(&full_wildcard_proto_key) } {
-        match action.action {
-            Action::Deny => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} BLOCKED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                unsafe { EVENTS.output(&ctx, &block_event, 0) };
-                return Ok(TC_ACT_SHOT); // Block
-            }
-            Action::Allow => {
-                info!(&ctx, "[Kernel] [egress_tc] Rule {} ALLOWED connection Source: {}:{}, Destination: {}:{}, Protocol: {}", action.rule_id, debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                info!(&ctx, "[Kernel] [egress_tc]: Adding tuple for related incoming traffic: [{} {} {} {} {}]", debug_saddr, debug_sport, debug_daddr, debug_dport, tuple.protocol);
-                let result = unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) };
-                if result.is_err() {
-                    info!(&ctx, "[Egress] FAILED to insert tuple into map!");
-                    return Ok(TC_ACT_SHOT)
-                }
-                return Ok(TC_ACT_OK);
-            }
-        }
-    }
+    // Insert fxn call here
+    let rule_matching_result = rule_matching(&ctx, tuple, info)?;
 
-    Ok(TC_ACT_SHOT) // Default: Block All 
+    Ok(rule_matching_result) // Default: Block All 
+}
+
+
+// NEW PROGRAM TESTING
+#[sock_ops]
+pub fn firewhal_sock_ops(ctx: SockOpsContext) -> u32 {
+    match try_firewhal_sock_ops(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_firewhal_sock_ops(ctx: SockOpsContext) -> Result<u32, u32> {
+    match ctx.op() {
+        BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB => {
+            // 1. Get Local Port
+            // Note: local_port in sock_ops is usually host byte order, 
+            // but verify against your architecture.
+            let local_port = ctx.local_port(); 
+            info!(&ctx, "[Kernel] Checking Local Port: {}", local_port);
+            
+            // 2. Check if the port is trusted (set by your bind program)
+            if unsafe { TRUSTED_LISTENING_PORTS.get(&local_port).is_some() } {
+                
+                // 3. Get the cookie of THIS new child socket
+                let cookie = unsafe { bpf_get_socket_cookie(ctx.ops as *mut _) };
+                info!(&ctx, "[Kernel] Trusted Port Found, Inserting Cookie: {},{}", local_port, cookie);
+                
+                // 4. Whitelist this specific connection for TC
+                let val: u8 = 1;
+                unsafe { TRUSTED_COOKIES.insert(&cookie, &val, 0) };
+
+                // 2. Cleanup the Handshake Map
+                let key = ConnectionTuple {
+                    saddr: ctx.remote_ip4(), 
+                    sport: ctx.remote_port() as u16, // Ensure byte order is correct here!
+                    daddr: ctx.local_ip4(),
+                    dport: ctx.local_port() as u16,
+                    protocol: 6,
+                    _pad: [0; 3],
+                };
+                
+                unsafe { HANDSHAKE_ALLOWED.remove(&key) };
+            }
+        }
+        _ => {}
+    }
+    Ok(0)
 }
 
 #[cfg(not(test))]

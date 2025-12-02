@@ -1,7 +1,8 @@
 use ratatui::{prelude::*, widgets::*};
 use crossterm::event::{KeyCode, KeyModifiers};
-use firewhal_core::{FireWhalMessage, ApplicationAllowlistConfig, AppIdentity, RequestToUpdateHashes};
+use firewhal_core::{FireWhalMessage, ApplicationAllowlistConfig, AppIdentity, RequestToUpdateHash};
 use crate::ui::app::{App, HashState};
+use crate::ui::centered_rect;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -140,9 +141,9 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
                     let mut app_to_rehash = std::collections::HashMap::new();
                     app_to_rehash.insert(name.clone(), identity.clone());
 
-                    let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHashes {
+                    let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHash {
                         component: "TUI".to_string(),
-                        apps_to_update_hash_for: app_to_rehash
+                        app_to_update_hash_for: (name.clone(), identity.clone())
                     });
 
                     if let Some(tx) = &app.to_zmq_tx {
@@ -163,20 +164,23 @@ fn handle_viewing_keys(key_code: KeyCode, app: &mut App) {
 pub fn handle_key_event_with_modifiers(key_code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
     if modifiers == KeyModifiers::CONTROL && key_code == KeyCode::Char('h') {
         // Re-hash all applications
-        let all_apps_to_rehash = app.apps.clone();
-        let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHashes {
-            component: "TUI".to_string(),
-            apps_to_update_hash_for: all_apps_to_rehash,
-        });
+        for (name, identity) in &app.apps {
 
-        if let Some(tx) = &app.to_zmq_tx {
-            if let Err(e) = tx.try_send(msg) {
-                app.debug_print.add_message(format!("[TUI] Failed to send bulk HashUpdateRequest: {}", e));
-            } else {
-                app.debug_print.add_message("[TUI] Sent HashUpdateRequest for all apps".to_string());
-                app.apps_modified = true; // Mark as modified
+            let msg = FireWhalMessage::HashUpdateRequest(RequestToUpdateHash {
+                component: "TUI".to_string(),
+                app_to_update_hash_for: (name.clone(), identity.clone()),
+            });
+
+            if let Some(tx) = &app.to_zmq_tx {
+                if let Err(e) = tx.try_send(msg) {
+                    app.debug_print.add_message(format!("[TUI] Failed to send bulk HashUpdateRequest: {}", e));
+                } else {
+                    app.debug_print.add_message("[TUI] Sent HashUpdateRequest for all apps".to_string());
+                    app.apps_modified = true; // Mark as modified
+                }
             }
         }
+ 
     } else {
         // If no modifiers, or not the one we're looking for, pass to the normal handler
         handle_key_event(key_code, app);
@@ -302,8 +306,7 @@ fn get_sorted_apps(app: &App) -> Vec<(String, AppIdentity)> {
     app_vec
 }
 
-pub fn render(f: &mut Frame, app: &mut App) {
-    let area = f.area();
+pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     render_apps_table(f, app, area);
 
     match &app.app_list_state.mode {
@@ -334,7 +337,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
             let hash_val = if state.focused_field == FormField::Hash { &state.input_buffer } else { &state.identity.hash };
             render_form_field(f, form_chunks[2], "Hash", hash_val, state.focused_field == FormField::Hash);
-
 
             let save_text = "Save App";
             let save_style = if state.focused_field == FormField::Save {
@@ -383,16 +385,30 @@ fn render_form_field(f: &mut Frame, area: Rect, title: &str, value: &str, is_foc
 }
 
 fn render_apps_table(f: &mut Frame, app: &mut App, area: Rect) {
-    let title = if app.apps_modified {
-        "App Management* (a: add, e: edit, d: delete, h: re-hash, Ctrl+h: re-hash all, p: apply)"
-    } else {
-        "App Management (a: add, e: edit, d: delete, h: re-hash, Ctrl+h: re-hash all)"
-    };
+    let modified_indicator = if app.apps_modified { "*" } else { "" };
+    let title = Line::from(vec![
+        Span::styled("App ", Style::default().fg(Color::LightCyan)),
+        Span::styled("Management", Style::default().fg(Color::LightCyan)),
+        Span::styled(modified_indicator, Style::default().fg(Color::Yellow)),
+        Span::raw(" ("),
+        Span::styled("a", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": add, "),
+        Span::styled("e", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": edit, "),
+        Span::styled("d", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": delete, "),
+        Span::styled("h", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": re-hash, "),
+        Span::styled("Ctrl+h", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(": re-hash all"),
+        if app.apps_modified { Span::raw(", p: apply") } else { Span::raw("") },
+        Span::raw(")"),
+    ]);
 
-    let header = Row::new(["Name", "Path", "Hash"])
-        .style(Style::default().fg(Color::Rgb(255, 165, 0)).bold())
-        .height(1)
-        .bottom_margin(1);
+    let header_cells = ["Name", "Path", "Hash"]
+        .iter()
+        .map(|h| Cell::from(*h).style(Style::default().fg(Color::LightCyan).bold()));
+    let header = Row::new(header_cells).height(1);
 
     let sorted_apps = get_sorted_apps(app);
     let rows = sorted_apps.iter().map(|(app_name, identity)| {
@@ -410,25 +426,46 @@ fn render_apps_table(f: &mut Frame, app: &mut App, area: Rect) {
         ]).height(1)
     });
 
+    let main_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(title);
+    let inner_area = main_block.inner(area);
+    f.render_widget(main_block, area);
+
+    let horizontal_chunks = Layout::horizontal([
+        Constraint::Length(1), // Left spacing
+        Constraint::Min(0),    // Main content
+        Constraint::Length(1), // Right spacing
+    ]).split(inner_area);
+    let content_area = horizontal_chunks[1];
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // Top spacing
+        Constraint::Length(1), // Separator line
+        Constraint::Length(1), // Header text
+        Constraint::Length(1), // Separator line
+        Constraint::Min(0),    // Table
+        Constraint::Length(1), // Bottom spacing
+    ]).split(content_area);
+
+    let top_separator = Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Blue));
+    let bottom_separator = Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Blue));
+
     let widths = [Constraint::Percentage(20), Constraint::Percentage(50), Constraint::Percentage(30)];
+    // The row is only visually highlighted when the content pane has focus.
+    let highlight_style = if !app.focus_on_navigation {
+        Style::default().bg(Color::Rgb(255, 165, 0)).fg(Color::Black).bold()
+    } else {
+        Style::default() // A muted style for when nav is focused
+    };
     let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .row_highlight_style(Style::default().bg(Color::DarkGray));
+        .row_highlight_style(highlight_style);
 
-    f.render_stateful_widget(table, area, &mut app.app_list_state.table_state);
-}
+    let header_table = Table::new(Vec::<Row>::new(), widths.clone()).header(header);
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
-    ]).split(r);
-
-    Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
-    ]).split(popup_layout[1])[1]
+    f.render_widget(top_separator, layout[1]);
+    f.render_widget(header_table, layout[2]);
+    f.render_widget(bottom_separator, layout[3]);
+    f.render_stateful_widget(table, layout[4], &mut app.app_list_state.table_state);
 }

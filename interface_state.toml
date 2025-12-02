@@ -1,4 +1,6 @@
+# enforced_interfaces = []
+
 enforced_interfaces = [
+    "wlp5s0",
     "eth0",
-    "wlp5s0"
 ]

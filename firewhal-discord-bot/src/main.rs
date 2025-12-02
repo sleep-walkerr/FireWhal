@@ -1,5 +1,7 @@
 use std::env;
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 use serenity::async_trait;
 use serenity::model::gateway::{GatewayIntents, Ready};
 use serenity::model::id::UserId;
@@ -26,7 +28,6 @@ impl TypeMapKey for ZmqTxKey {
 async fn message_handler(to_zmq_tx: Arc<Mutex<mpsc::Sender<FireWhalMessage>>>, mut from_zmq_rx: mpsc::Receiver<FireWhalMessage>, http: Arc<Http>) {
     // This loop waits for messages from the zmq_client_connection task.
     while let Some(message) = from_zmq_rx.recv().await {
-
         // Match on the message type to decide what to do.
         match message {
             // For example, forward any Debug messages to the Discord user.
@@ -84,7 +85,7 @@ impl EventHandler for Handler {
         // .get returns an Option, but we can .unwrap() because we *know* we inserted it at startup.
         let to_zmq_tx = data.get::<ZmqTxKey>().unwrap().clone();
         // lock zmq_sender
-        let mut zmq_sender_guard = to_zmq_tx.lock().await;
+        let zmq_sender_guard = to_zmq_tx.lock().await;
 
 
         // --- Identification ---
@@ -107,6 +108,8 @@ impl EventHandler for Handler {
 
 #[tokio::main]
 async fn main() {
+    // Add 5 second sleep to give firewhal time to set up. Connection failure occurrs otherwise.
+    sleep(Duration::from_secs(1));
     dotenv().ok();
 
     // Create the channels required by the unified IPC function.
@@ -119,8 +122,6 @@ async fn main() {
 
     // Spawn the unified ZMQ connection task.
     tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, shutdown_rx, "DiscordBot".to_string()));
-
-    
 
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
     let intents = GatewayIntents::GUILDS | GatewayIntents::DIRECT_MESSAGES;
@@ -135,7 +136,7 @@ async fn main() {
     }
     // Spawn our new message handler task.
     tokio::spawn(message_handler(zmq_sender.clone(), from_zmq_rx, client.http.clone()));
-
+    
     if let Err(why) = client.start().await {
         println!("Client error: {why:?}");
     }

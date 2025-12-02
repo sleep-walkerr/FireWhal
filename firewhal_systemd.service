@@ -1,0 +1,34 @@
+[Unit]
+Description=Firewhal Supervisor Daemon
+# This ensures the network is fully up before the firewall starts.
+Before=pre-network.target
+DefaultDependencies=no
+Wants=systemd-modules-load.service local-fs.target
+After=systemd-modules-load.service local-fs.target
+Wants=network-pre.target
+
+[Service]
+# 'forking' is the correct type for a traditional daemon that
+# creates a PID file and runs in the background.
+Type=forking
+
+# The daemon needs to start as root to launch privileged components like the kernel loader.
+User=root
+Group=root
+
+# The full path to the firewhal daemon executable.
+ExecStart=/usr/local/sbin/firewhal-daemon
+
+# Graceful shutdown command.
+ExecStop=/bin/pkill firewhal-daemon
+
+# I'm using daemonize, this is where the pid file is created that the daemon uses. 
+PIDFile=/var/run/firewhal-daemon.pid
+
+# Automatically restart the service if it fails.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+# This enables the service to start automatically at boot for a multi-user system.
+WantedBy=multi-user.target

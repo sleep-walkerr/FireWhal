@@ -1,7 +1,7 @@
 use aya::{
     Ebpf, include_bytes_aligned, maps::{Array as AyaArray, AsyncPerfEventArray, HashMap as AyaHashMap, MapData, perf::AsyncPerfEventArrayBuffer
     }, programs::{
-            CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, XdpFlags, tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}}, util::online_cpus
+            CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, XdpFlags, tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}, SockOps}, util::online_cpus
 };
 use anyhow::{bail, Context, Result};
 use aya_log::EbpfLogger;
@@ -145,13 +145,13 @@ async fn attach_tc_programs(
         if let Some((ingress_id, egress_id)) = active_tc.active_links.remove(&iface) {
             info!("[Kernel] Detaching TC programs from '{}'...", iface);
             {
-                let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into()?;
+                let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewhal_ingress_tc").unwrap().try_into()?;
                 if let Err(e) = prog_ingress.detach(ingress_id) {
                     warn!("[Kernel] Failed to detach TC ingress from '{}': {}", iface, e);
                 }
             }
             {
-                let prog_egress: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into()?;
+                let prog_egress: &mut SchedClassifier = bpf.program_mut("firewhal_egress_tc").unwrap().try_into()?;
                 if let Err(e) = prog_egress.detach(egress_id) {
                     warn!("[Kernel] Failed to detach TC egress from '{}': {}", iface, e);
                 }
@@ -161,11 +161,11 @@ async fn attach_tc_programs(
 
     // Load programs once before the loop, scoping the mutable borrows.
     {
-        let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into()?;
+        let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewhal_ingress_tc").unwrap().try_into()?;
         prog_ingress.load();
     }
     {
-        let prog_egress: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into()?;
+        let prog_egress: &mut SchedClassifier = bpf.program_mut("firewhal_egress_tc").unwrap().try_into()?;
         prog_egress.load();
     }
 
@@ -178,7 +178,7 @@ async fn attach_tc_programs(
         let mut egress_id: Option<SchedClassifierLinkId> = None;
         info!("[Kernel] Attaching TC programs to '{}'...", iface);
         {
-            let ingress_prog: &mut SchedClassifier = bpf.program_mut("firewall_ingress_tc").unwrap().try_into().unwrap();
+            let ingress_prog: &mut SchedClassifier = bpf.program_mut("firewhal_ingress_tc").unwrap().try_into().unwrap();
             if let Ok(ingress_identifier) = ingress_prog.attach(&iface, TcAttachType::Ingress) {
                 ingress_id = Some(ingress_identifier);
             } else {
@@ -187,7 +187,7 @@ async fn attach_tc_programs(
         }
 
         {
-            let egress_prog: &mut SchedClassifier = bpf.program_mut("firewall_egress_tc").unwrap().try_into().unwrap();
+            let egress_prog: &mut SchedClassifier = bpf.program_mut("firewhal_egress_tc").unwrap().try_into().unwrap();
             if let Ok(egress_identifier) = egress_prog.attach(&iface, TcAttachType::Egress) {
                 egress_id = Some(egress_identifier);
             } else {
@@ -212,13 +212,6 @@ async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file:
     let mut bpf = bpf.lock().await;
     // CGROUP
     info!("[Kernel] Applying CGROUP programs...");
-    // INGRESS PROGRAMS
-    //
-    // let ingress_recvmsg4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_ingress_recvmsg4").unwrap().try_into().unwrap();
-    // ingress_recvmsg4_program.load();
-    // _ = ingress_recvmsg4_program.attach(&cgroup_file, CgroupAttachMode::Single);
-    // EGRESS PROGRAMS
-    //
     let egress_connect4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
     let _ = egress_connect4_program.load();
     _ = egress_connect4_program.attach(&cgroup_file, CgroupAttachMode::Single);
@@ -230,6 +223,10 @@ async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file:
     let firewhal_egress_bind4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_bind4").unwrap().try_into().unwrap();
     let _ = firewhal_egress_bind4_program.load();
     _ = firewhal_egress_bind4_program.attach(&cgroup_file, CgroupAttachMode::Single);
+
+    let firewhal_sock_ops: &mut SockOps = bpf.program_mut("firewhal_sock_ops").unwrap().try_into()?;
+    let _ = firewhal_sock_ops.load();
+    _ = firewhal_sock_ops.attach(&cgroup_file, CgroupAttachMode::default())?;
     
     info!("[Kernel] CGROUP programs applied.");
 
@@ -239,96 +236,125 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfi
     let mut bpf = bpf.lock().await;
     info!("[Kernel] [Rule] Applying ruleset...");
 
-    let mut rulelist = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("RULES").unwrap())?;
+    // Process outgoing rules in a separate scope to manage borrows.
+    {
+        let mut rulelist = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("RULES").unwrap())?;
+        let mut new_rule_keys = HashSet::<RuleKey>::new();
 
-    // This set will hold all the keys that *should* be in the map.
-    let mut new_rule_keys = HashSet::<RuleKey>::new();
+        info!("[Kernel] [Rule] Upserting new/updated outgoing rules...");
+        for rule in config.outgoing_rules {
+            let mut new_key = RuleKey {
+                protocol: rule.protocol.unwrap_or(firewhal_core::Protocol::Wildcard) as u32,
+                dest_ip: 0,
+                dest_port: rule.dest_port.unwrap_or(0),
+                source_ip: 0,
+                source_port: rule.source_port.unwrap_or(0),
+            };
 
-    // -----------------------------------------------------------------
-    // PASS 1: Insert and update all new rules
-    // -----------------------------------------------------------------
-    info!("[Kernel] [Rule] Upserting new/updated rules...");
-    for rule in config.outgoing_rules { // Assuming this is now config.rules
-        
-        // --- FIX 1: Your protocol is u8 in the common struct, not u32 ---
-        let mut new_key = RuleKey {
-            protocol: rule.protocol.unwrap_or(firewhal_core::Protocol::Wildcard) as u32, // <-- Changed to u8
-            dest_ip: 0,
-            dest_port: rule.dest_port.unwrap_or(0),
-            source_ip: 0,
-            source_port: rule.source_port.unwrap_or(0),
-        };
+            let action = match rule.action {
+                firewhal_core::Action::Allow => firewhal_kernel_common::RuleAction {
+                    action: firewhal_kernel_common::Action::Allow,
+                    rule_id: 127,
+                },
+                firewhal_core::Action::Deny => firewhal_kernel_common::RuleAction {
+                    action: firewhal_kernel_common::Action::Deny,
+                    rule_id: 127,
+                },
+            };
 
-        let action = match rule.action {
-            firewhal_core::Action::Allow => firewhal_kernel_common::RuleAction {
-                action: firewhal_kernel_common::Action::Allow,
-                rule_id: 127,
-            },
-            firewhal_core::Action::Deny => firewhal_kernel_common::RuleAction {
-                action: firewhal_kernel_common::Action::Deny,
-                rule_id: 127,
-            },
-        };
-
-        let dest_is_v4 = rule.dest_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
-        let src_is_v4 = rule.source_ip.as_ref().is_some_and(|ip| ip.is_ipv4());
-
-        if dest_is_v4 || src_is_v4 {
-            let src_ip_u32: u32;
-            let dst_ip_u32: u32;
-
-            // --- CRITICAL FIX 2: Use from_be_bytes for Network Byte Order ---
-            // eBPF maps and packet headers use Network Byte Order (Big Endian).
-            // `from_le_bytes` was inserting the wrong byte order into the map.
             if let Some(IpAddr::V4(source_ip)) = rule.source_ip {
-                src_ip_u32 = u32::from_be_bytes(source_ip.octets()); // <-- Use from_be_bytes
-            } else { src_ip_u32 = 0; }
-            if let Some(IpAddr::V4(destination_ip)) = rule.dest_ip {
-                dst_ip_u32 = u32::from_be_bytes(destination_ip.octets()); // <-- Use from_be_bytes
-            } else { dst_ip_u32 = 0; }
-            
-            new_key.source_ip = src_ip_u32;
-            new_key.dest_ip = dst_ip_u32;
-        }
-
-        // Add the key to our userspace set for the next pass
-        new_rule_keys.insert(new_key);
-
-        // Insertion of completed key into eBPF map
-        if let Err(e) = rulelist.insert(&new_key, action, 0) {
-            warn!("[Kernel] Failed to insert rule: {}", e);
-        } else {
-            // Your logging logic was fine, but let's correct the IP display.
-            // Ipv4Addr::from() expects host-endian, so we must convert back from network-endian (BE).
-            info!("[Kernel] [Rule] Applied: {:?} traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}",
-            action.action, new_key.protocol, Ipv4Addr::from(u32::from_be(new_key.dest_ip)), new_key.dest_port, Ipv4Addr::from(u32::from_be(new_key.source_ip)), new_key.source_port);
-        }
-    }
-
-    // -----------------------------------------------------------------
-    // PASS 2: Prune stale rules
-    // -----------------------------------------------------------------
-    info!("[Kernel] [Rule] Pruning stale rules...");
-    let mut stale_keys = Vec::new();
-
-    // We must collect keys to delete first, as we can't delete while iterating.
-    for previous_rule_result in rulelist.iter() {
-        if let Ok((key, _value)) = previous_rule_result {
-            // This is the O(1) check, much faster than Vec::contains
-            if !new_rule_keys.contains(&key) {
-                // This key is in the eBPF map but NOT in our new ruleset. It's stale.
-                stale_keys.push(key);
+                new_key.source_ip = u32::from_le_bytes(source_ip.octets());
             }
-        } else if let Err(e) = previous_rule_result {
-            warn!("[Kernel] Failed to read map entry during stale check: {}", e);
-        }
-    }
+            if let Some(IpAddr::V4(destination_ip)) = rule.dest_ip {
+                new_key.dest_ip = u32::from_le_bytes(destination_ip.octets());
+            }
 
-    // Now, delete all the stale keys we found.
-    info!("[Kernel] [Rule] Found {} stale rules to remove.", stale_keys.len());
-    for key in stale_keys {
-        if let Err(e) = rulelist.remove(&key) {
-            warn!("[Kernel] Failed to remove stale rule: {}", e);
+            new_rule_keys.insert(new_key);
+
+            if let Err(e) = rulelist.insert(&new_key, action, 0) {
+                warn!("[Kernel] Failed to insert outgoing rule: {}", e);
+            } else {
+                info!("[Kernel] [Rule] Applied Outgoing: {:?} traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}",
+                action.action, new_key.protocol, Ipv4Addr::from(u32::from_be(new_key.dest_ip)), new_key.dest_port, Ipv4Addr::from(u32::from_be(new_key.source_ip)), new_key.source_port);
+            }
+        }
+
+        info!("[Kernel] [Rule] Pruning stale outgoing rules...");
+        let mut stale_keys = Vec::new();
+        for previous_rule_result in rulelist.iter() {
+            if let Ok((key, _)) = previous_rule_result {
+                if !new_rule_keys.contains(&key) {
+                    stale_keys.push(key);
+                }
+            }
+        }
+
+        info!("[Kernel] [Rule] Found {} stale outgoing rules to remove.", stale_keys.len());
+        for key in stale_keys {
+            if let Err(e) = rulelist.remove(&key) {
+                warn!("[Kernel] Failed to remove stale outgoing rule: {}", e);
+            }
+        }
+    } // `rulelist` and its mutable borrow of `bpf` are dropped here.
+
+    // Process incoming rules in a new scope.
+    {
+        let mut incoming_rulelist = AyaHashMap::<_, RuleKey, RuleAction>::try_from(bpf.map_mut("INCOMING_RULES").unwrap())?;
+        let mut new_incoming_rule_keys = HashSet::<RuleKey>::new();
+
+        info!("[Kernel] [Rule] Upserting new/updated incoming rules...");
+        for rule in config.incoming_rules {
+            let mut new_key = RuleKey {
+                protocol: rule.protocol.unwrap_or(firewhal_core::Protocol::Wildcard) as u32,
+                dest_ip: 0,
+                dest_port: rule.dest_port.unwrap_or(0),
+                source_ip: 0,
+                source_port: rule.source_port.unwrap_or(0),
+            };
+
+            let action = match rule.action {
+                firewhal_core::Action::Allow => firewhal_kernel_common::RuleAction {
+                    action: firewhal_kernel_common::Action::Allow,
+                    rule_id: 127,
+                },
+                firewhal_core::Action::Deny => firewhal_kernel_common::RuleAction {
+                    action: firewhal_kernel_common::Action::Deny,
+                    rule_id: 127,
+                },
+            };
+
+            if let Some(IpAddr::V4(source_ip)) = rule.source_ip {
+                new_key.source_ip = u32::from_be_bytes(source_ip.octets());
+            }
+            if let Some(IpAddr::V4(destination_ip)) = rule.dest_ip {
+                new_key.dest_ip = u32::from_be_bytes(destination_ip.octets());
+            }
+
+            new_incoming_rule_keys.insert(new_key);
+
+            if let Err(e) = incoming_rulelist.insert(&new_key, action, 0) {
+                warn!("[Kernel] Failed to insert incoming rule: {}", e);
+            } else {
+                info!("[Kernel] [Rule] Applied Incoming: {:?} traffic to Protocol: {}, Destination IP: {}, Destination Port: {}, Source IP: {}, Source Port: {}",
+                action.action, new_key.protocol, Ipv4Addr::from(u32::from_be(new_key.dest_ip)), new_key.dest_port, Ipv4Addr::from(u32::from_be(new_key.source_ip)), new_key.source_port);
+            }
+        }
+
+        info!("[Kernel] [Rule] Pruning stale incoming rules..."); 
+        let mut stale_incoming_keys = Vec::new();
+        for previous_rule_result in incoming_rulelist.iter() {
+            if let Ok((key, _)) = previous_rule_result {
+                if !new_incoming_rule_keys.contains(&key) {
+                    stale_incoming_keys.push(key);
+                }
+            }
+        }
+
+        info!("[Kernel] [Rule] Found {} stale incoming rules to remove.", stale_incoming_keys.len());
+        for key in stale_incoming_keys {
+            if let Err(e) = incoming_rulelist.remove(&key) {
+                warn!("[Kernel] Failed to remove stale incoming rule: {}", e);
+            }
         }
     }
 
@@ -872,12 +898,12 @@ async fn main() -> Result<(), anyhow::Error> {
                                         }
                                     }
 
-                                    if decision == Action::Allow {
-                                        let mut trusted_connections = trusted_connections_for_task.lock().await;
-                                        let mut pending_connections = pending_connections_for_task.lock().await;
-                                        let _ = trusted_connections.insert(&connection_key, pid, 0);
-                                        let _ = pending_connections.remove(&connection_key);
-                                    }
+                                    // if decision == Action::Allow {
+                                    //     let mut trusted_connections = trusted_connections_for_task.lock().await;
+                                    //     let mut pending_connections = pending_connections_for_task.lock().await;
+                                    //     let _ = trusted_connections.insert(&connection_key, pid, 0);
+                                    //     let _ = pending_connections.remove(&connection_key);
+                                    // }
                                 }
                                 EventType::BlockEvent => {
                                     let payload = unsafe { kernel_event.payload.block_event };
@@ -1009,7 +1035,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("[Kernel] 🧹 Detaching eBPF programs and exiting...");
     shutdown_tx.send(()).unwrap();
-    let _ = zmq_handle.await;
+    // Wait for the ZMQ task to shut down, but with a timeout to prevent hangs.
+    // if let Err(_) = time::timeout(Duration::from_secs(2), zmq_handle).await {
+    //     warn!("[Kernel] Timeout waiting for ZMQ task to shut down. It may be forcefully terminated.");
+    // } else {
+    //     info!("[Kernel] ZMQ task shut down gracefully.");
+    // }
 
     Ok(())
 }

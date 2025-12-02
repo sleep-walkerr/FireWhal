@@ -22,6 +22,7 @@ use serde::Deserialize;
 use toml;
 use pnet::{datalink};
 use anyhow::{bail, Context, Result};
+use sha3::{Digest, Sha3_256};
 
 // Standard library imports
 use std::collections::{HashMap, HashSet};
@@ -37,7 +38,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashesResponse, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashesResponse, zmq_client_connection};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashResponse, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, zmq_client_connection};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -62,9 +63,21 @@ fn save_rules(path: &path::Path, config: &FireWhalConfig) -> Result<(), Box<dyn 
 
 // Loads and deserializes the defined applications that will be used in filtering
 fn load_app_ids(path: &path::Path) -> Result<ApplicationAllowlistConfig, Box<dyn std::error::Error>> {
-    let toml_content = fs::read_to_string(path)?;
-    let config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
-    Ok(config)
+    if !path.exists() {
+        eprintln!("[Supervisor] App identity file not found at '{}'. Creating a new, empty one.", path.display());
+        // Create a default, empty config
+        let empty_config = ApplicationAllowlistConfig {
+            apps: HashMap::new(),
+        };
+        // Save it to create the file with the correct empty structure.
+        save_app_ids(path, &empty_config)?;
+        // Return the empty config
+        Ok(empty_config)
+    } else {
+        let toml_content = fs::read_to_string(path)?;
+        let config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
+        Ok(config)
+    }
 }
 
 // Same as load_app_ids but this time adds new applications sent from permissive mode
@@ -211,27 +224,25 @@ fn launch_process(
     }
 }
 
-/// Calculates a file's hash by spawning an external process as root.
-/// This is required to read files that may have restrictive permissions.
+// Calculates a files hash
+// Changed from external hashing application to solve for instability, requires daemon to be built in release mode
 async fn calculate_file_hash(path: PathBuf) -> Result<String, anyhow::Error> {
-    // 1. Build the command. Since the daemon runs as root, the child process
-    //    will inherit root privileges by default. No special setup is needed.
-    let mut command = tokio::process::Command::new("/opt/firewhal/bin/firewhal-hashing");
-    command.arg(path);
+    // No spawn, no fork, no crash.
+    let hash_result = task::spawn_blocking(move || {
+        let mut file = File::open(&path).context(format!("Failed to open file: {:?}", path))?;
+        let mut hasher = Sha3_256::new();
+        let mut buffer = [0; 1024 * 128]; 
 
-    // 2. Execute the command asynchronously and capture the output.
-    let output = command.output()
-        .await
-        .context("Failed to spawn 'firewhal-hashing' command")?;
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 { break; }
+            hasher.update(&buffer[..count]);
+        }
+        
+        Ok::<String, anyhow::Error>(hex::encode(hasher.finalize()))
+    }).await;
 
-    // 3. Check the result and return the hash or an error.
-    if output.status.success() {
-        let line = String::from_utf8_lossy(&output.stdout);
-        Ok(line.trim().to_string())
-    } else {
-        let error_message = String::from_utf8_lossy(&output.stderr);
-        bail!("firewhal-hashing failed with status {}: {}", output.status, error_message.trim());
-    }
+    hash_result.context("Hashing task panicked")?
 }
 
 
@@ -288,18 +299,26 @@ fn main() {
 }
 
 // Takes an app_id_config and then uses the hasher to rehash each application and then update the config with the updated hashes
-async fn correct_hashes_in_app_id_config(
-    mut apps_to_hash: HashMap<String, AppIdentity>,
-) -> Result<HashMap<String, AppIdentity>, anyhow::Error> {
+async fn correct_hash_for_app_id(
+    mut app_to_hash: (String, AppIdentity),
+) -> Result<(String, AppIdentity), anyhow::Error> {
     // Reverting to a sequential loop. This is slower than concurrent versions
     // but has proven to be the most stable, as it avoids spawning many
     // processes at once, which was causing resource exhaustion and crashes.
-    for identity in apps_to_hash.values_mut() {
-        identity.hash = calculate_file_hash(identity.path.clone()).await?;
+
+    // Check if file at path actually exists.
+    if app_to_hash.1.path.exists() && app_to_hash.1.path.is_file() { 
+        println!("[Supervisor] Updating hash for '{}'.", app_to_hash.1.path.display());
+        app_to_hash.1.hash = calculate_file_hash(app_to_hash.1.path.clone()).await?;
+    } else {
+        // Change path text to say INVALID PATH
+        app_to_hash.1.path = PathBuf::from("INVALID PATH");
+        app_to_hash.1.hash = "UNKNOWN".to_string();
     }
 
+
     // Return the modified map by value.
-    Ok(apps_to_hash)
+    Ok(app_to_hash)
 }
 
 /// The main async logic for the supervisor daemon.
@@ -590,14 +609,14 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                             }
                         }
                     }
-                    FireWhalMessage::HashesRequest(message) => {
+                    FireWhalMessage::HashRequest(message) => {
                         println!("[Supervisor] Received HashesRequest command from TUI");
                         // Collect update all hashes in app list and then send back
-                        let updated_hashes = correct_hashes_in_app_id_config(message.apps_to_get_hashes_for).await?;
-                        let msg = FireWhalMessage::HashesResponse(
-                            DaemonHashesResponse {
+                        let updated_hash = correct_hash_for_app_id(message.app_to_get_hash_for).await?;
+                        let msg = FireWhalMessage::HashResponse(
+                            DaemonHashResponse {
                                 component: "Daemon".to_string(),
-                                apps_with_updated_hashes: updated_hashes,
+                                app_with_updated_hash: updated_hash,
                             }
                         );
                         if let Err(e) = to_zmq_tx.send(msg).await {
@@ -608,11 +627,11 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     }
                     FireWhalMessage::HashUpdateRequest(message) => {
                         println!("[Supervisor] Received HashUpdateRequest command from TUI");
-                        let updated_hashes = correct_hashes_in_app_id_config(message.apps_to_update_hash_for).await?;
+                        let updated_hash = correct_hash_for_app_id(message.app_to_update_hash_for).await?;
                         let msg = FireWhalMessage::HashUpdateResponse(
-                            UpdatedHashesResponse {
+                            UpdatedHashResponse {
                                 component: "Daemon".to_string(),
-                                updated_apps: updated_hashes,
+                                updated_app: updated_hash,
                             }
                         );
                         if let Err(e) = to_zmq_tx.send(msg).await {

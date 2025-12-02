@@ -33,13 +33,16 @@ else
     echo "-> User '$current_user' is already a member of the 'firewhal-admin' group."
 fi
 
+# Add nobody to firewhal-admin group
+sudo usermod -aG firewhal-admin nobody 
+
 echo "Killing previous instances of FireWhal"
 sudo pkill -f firewhal-daemon
 
-# echo "Installing Rule, App ID, and Interface State files."
-# sudo cp app_identity.toml /opt/firewhal/bin
-# sudo cp firewall_rules.toml /opt/firewhal/bin
-# sudo cp interface_state.toml /opt/firewhal/bin
+echo "Installing Rule, App ID, and Interface State files."
+sudo cp app_identity.toml /opt/firewhal/bin
+sudo cp firewall_rules.toml /opt/firewhal/bin
+sudo cp interface_state.toml /opt/firewhal/bin
 
 echo "Building binaries"
 # Build all binaries in the workspace in release mode
@@ -54,8 +57,8 @@ echo "Installing binaries to /opt/firewhal/bin"
 sudo cp target/debug/firewhal-ipc /opt/firewhal/bin
 sudo cp target/debug/firewhal-discord-bot /opt/firewhal/bin
 
-echo "Installing daemon to /usr/local/sbin (the daemon will be started from a systemd unit file and located in /opt/firewhal/bin in the future)"
-sudo cp target/debug/firewhal-daemon /usr/local/sbin
+# echo "Installing daemon to /usr/local/sbin (the daemon will be started from a systemd unit file and located in /opt/firewhal/bin in the future)"
+# sudo cp target/debug/firewhal-daemon /usr/local/sbin
 
 echo "Installing Discord token and user ID"
 sudo cp firewhal-discord-bot/.env /opt/firewhal
@@ -73,6 +76,11 @@ echo "Building hashing program in release mode"
 echo $(cargo build --bin firewhal-hashing --release)
 echo "Copying hashing program to /opt/firewhal/bin"
 sudo cp target/release/firewhal-hashing /opt/firewhal/bin
+
+echo "Building daemon program in release mode"
+echo $(cargo build --bin firewhal-daemon --release)
+echo "Installing daemon to /usr/local/sbin (the daemon will be started from a systemd unit file and located in /opt/firewhal/bin in the future)"
+sudo cp target/release/firewhal-daemon /usr/local/sbin
 
 echo "Ensuring proper permissions for access purposes"
 sudo chmod 755 /opt/firewhal/bin/*

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use ratatui::{prelude::*, widgets::*};
+use color_eyre::owo_colors::OwoColorize;
+use ratatui::{prelude::*, widgets::*, widgets::block::Title};
 use crossterm::event::KeyCode;
 use tokio::sync::mpsc;
 use firewhal_core::{FireWhalMessage, UpdateInterfaces};
@@ -70,26 +71,40 @@ impl InterfaceListState {
 
 // User input processing
 pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
+
+
+    // Create a sorted list of interfaces to ensure consistent ordering for navigation
+    let mut sorted_interfaces: Vec<_> = app.available_interfaces.iter().cloned().collect();
+    sorted_interfaces.sort();
+
     match key_code {
         KeyCode::Up => {
-            if !app.available_interfaces.is_empty() {
-                let current_selection = app.interface_list_state.selected().unwrap_or(0);
+            if !sorted_interfaces.is_empty() {
+                let current_selection = match app.interface_list_state.selected() {
+                    Some(i) => i,
+                    None => 0, // Default to first item if nothing is selected
+                };
                 let new_selection = current_selection.saturating_sub(1); // wrap around
                 app.interface_list_state.select(Some(new_selection));
             }
         }
         KeyCode::Down => {
-            if !app.available_interfaces.is_empty() {
-                let current_selection = app.interface_list_state.selected().unwrap_or(0);
-                let new_selection = (current_selection + 1).min(app.available_interfaces.len() - 1);
+            if !sorted_interfaces.is_empty() {
+                let current_selection = match app.interface_list_state.selected() {
+                    Some(i) => i,
+                    None => {
+                        0 // Default to first item if nothing is selected
+                    }
+                };
+                let new_selection = (current_selection + 1).min(sorted_interfaces.len() - 1);
                 app.interface_list_state.select(Some(new_selection));
             }
         }
         KeyCode::Char(' ') => {
             if let Some(selected_index) = app.interface_list_state.selected() {
-                if let Some(selected_interface) = app.available_interfaces.get(selected_index) {
+                if let Some(selected_interface) = sorted_interfaces.get(selected_index) {
                     // If the interface is already toggled, untoggle it. Otherwise, toggle it.
-                    if !app.toggled_interfaces.remove(selected_interface.as_str()) {
+                    if !app.toggled_interfaces.remove(selected_interface) {
                         app.toggled_interfaces.insert(selected_interface.clone());
                     }
                 }
@@ -110,46 +125,110 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
     }
 }
 
-pub fn render(f: &mut Frame, app: &App) {
-    
+pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
+    // Create a Title with its own style, independent of the border
+    let title = Title::from(Line::from(vec![
+        Span::styled(" Select Interfaces", Style::default().fg(Color::LightCyan)),
+        Span::raw(" ("),
+        Span::styled("Space", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(" to toggle, "),
+        Span::styled("Enter", Style::default().fg(Color::Rgb(255, 165, 0))),
+        Span::raw(" to apply) "),
+    ]));  // Set the default style for unstyled parts
 
-    // let block = Block::default()
-    //     .title("Interface Selection")
-    //     .borders(Borders::ALL)
-    //     .title_alignment(Alignment::Center)
-    //     .border_type(BorderType::Rounded)
-    //     .title_style(Style::default().fg(Color::LightBlue));
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .title(title) // Pass the explicitly styled Title
+        // Style the border to be blue
+        .border_style(Style::default().fg(Color::Blue));
+    let inner_area = outer_block.inner(area);
+    f.render_widget(outer_block, area);
 
-    // let area = f.area();
-    // // We get the inner area from the block BEFORE we render it and move it.
-    // let inner_area = block.inner(area);
-    // // Now we can render the block.
-    // f.render_widget(block, area); // `block` is consumed here.
+    // Create a sorted list of interfaces to ensure consistent ordering for rendering
+    let mut sorted_interfaces: Vec<_> = app.available_interfaces.iter().cloned().collect();
+    sorted_interfaces.sort();
 
-    // Create a list of `ListItem`s from your data
-    let items: Vec<ListItem> = app.available_interfaces
-        .iter()
-        .map(|iface_name| {
-            // Check if the current interface is in the toggled set
-            let is_toggled = app.toggled_interfaces.contains(iface_name);
-            
-            let prefix = if is_toggled { "[x] " } else { "[ ] " };
-            let style = if is_toggled {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+    if sorted_interfaces.is_empty() {
+        return;
+    }
 
-            ListItem::new(format!("{}{}", prefix, iface_name)).style(style)
-        })
-        .collect();
+    let num_items = sorted_interfaces.len();
+    let constraints: Vec<Constraint> = std::iter::repeat(Constraint::Length(3)).take(num_items).collect();
+    let rows_layout = Layout::vertical(constraints).split(inner_area);
 
-    let list_widget = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Select Interfaces (Space to toggle, Enter to apply)"))
-        .highlight_style(Style::default().bg(Color::DarkGray))
-        .highlight_symbol(">> ");
+    let selected_index = app.interface_list_state.selected();
 
-    // We pass a mutable reference to the ListState to the render function
-    let mut list_state = app.interface_list_state.clone();
-    f.render_stateful_widget(list_widget, f.area(), &mut list_state.interface_list_state);
+    for (i, iface_name) in sorted_interfaces.iter().enumerate() {
+        let row_area = rows_layout[i];
+        // Create a centered area that is 50% of the row's width
+        let centered_row_area = Layout::horizontal([
+            Constraint::Percentage(38), // (100 - 25) / 2, rounded up
+            Constraint::Percentage(25),
+            Constraint::Percentage(37), // (100 - 25) / 2, rounded down
+        ]).split(row_area)[1];
+
+        // An item is only visually selected if the content pane has focus
+        let is_selected = if !app.focus_on_navigation {
+            selected_index == Some(i)
+        } else {
+            false
+        };
+        let is_toggled = app.toggled_interfaces.contains(iface_name);
+
+        // Determine styles based on toggled and selected state
+        let mut border_style = if is_toggled {
+            // Toggled: Green border
+            Style::default().fg(Color::Green)
+        } else {
+            // Untoggled: Gray border
+            Style::default().fg(Color::DarkGray)
+        };
+
+        // All interface text is blue by default
+        let mut iface_style = Style::default().fg(Color::Blue);
+
+        // Selected items get a blue border and white text to stand out
+        if is_selected {
+            border_style = Style::default().fg(Color::Rgb(255, 165, 0)); // Override border color
+            iface_style = Style::default(); // Override text color
+        }
+
+        let border_type = BorderType::Rounded; // All items are rounded
+
+        let item_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(border_type)
+            .border_style(border_style);
+
+        // Get the inner area of the block to create a new layout inside it
+        let inner_block_area = item_block.inner(centered_row_area);
+
+        // Split the inner area to align the component name and status separately
+        let inner_chunks = Layout::horizontal([
+            Constraint::Percentage(50), // Left side for interface name
+            Constraint::Percentage(50), // Right side for status
+        ]).split(inner_block_area);
+
+        let (status_text, status_style) = if is_toggled {
+            ("Active", Style::default().fg(Color::Green))
+        } else {
+            ("Inactive", Style::default().fg(Color::Red))
+        };
+
+        // Interface name paragraph (right-aligned)
+        let iface_line = Line::from(vec![
+            Span::styled(iface_name.clone(), iface_style),
+            Span::styled(" :", Style::default()),
+        ]);
+        let iface_paragraph = Paragraph::new(iface_line).right_aligned();
+
+
+        // Status paragraph (left-aligned)
+        let status_paragraph = Paragraph::new(Span::styled(format!(" {}", status_text), status_style))
+            .left_aligned();
+
+        f.render_widget(item_block, centered_row_area);
+        f.render_widget(iface_paragraph, inner_chunks[0]);
+        f.render_widget(status_paragraph, inner_chunks[1]);
+    }
 }

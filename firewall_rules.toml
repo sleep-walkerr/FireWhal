@@ -1,11 +1,8 @@
 [[incoming_rules]]
 action = "Allow"
-protocol = "Tcp"
-#source_ip = None 
-#source_port = None 
-#dest_ip = None 
-dest_port = 443 
-description = "Dummy incoming rule" 
+dest_port = 22
+description = "SSHD"
+
 
 [[outgoing_rules]]
 action = "Allow"

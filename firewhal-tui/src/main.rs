@@ -27,6 +27,7 @@ use tokio::sync::Mutex;
 
 use crate::ui::app;
 
+
 // Upon entering the interface selection menu, have the TUI send a message requesting the interface list
 // The userspace loader receives the message, scans for interfaces, and then sends a request response
 // The TUI then populates the list with the message it receives containing the available interfaces
@@ -148,7 +149,10 @@ async fn main() -> Result<(), io::Error> {
                             app_guard.debug_print.add_message(format!("[TUI]: Permissive Mode Tuple Received: [{}]", lineage_tuple.0));
                         }
                         app_guard.process_lineage_tuple_list.add_tuple(tuple_message.lineage_tuple.iter().cloned().collect());
-                        // app_guard.debug_print.add_message("[TUI]: Permissive Mode Tuple Received".to_string());
+                        // Select the first item if nothing is selected
+                        if app_guard.permissive_mode_list_state.lineage_list_state.selected().is_none() {
+                            app_guard.permissive_mode_list_state.lineage_list_state.select(Some(0));
+                        }
                     }
                     
                 }
@@ -156,12 +160,22 @@ async fn main() -> Result<(), io::Error> {
                     app_guard.debug_print.add_message(format!("[TUI]: RulesResponse Received."));
                     // Clear existing rules and add new ones
                     app_guard.rules.clear();
+                    app_guard.incoming_rules.clear();
                     // For now, we only show outgoing rules. This can be expanded later.
                     app_guard.rules.extend(rules_message.outgoing_rules);
-                    app_guard.rules.extend(rules_message.incoming_rules);
+                    app_guard.incoming_rules.extend(rules_message.incoming_rules);
+
+                    // Select the first item if nothing is selected
+                    if app_guard.outgoing_rule_state.table_state.selected().is_none() {
+                        app_guard.outgoing_rule_state.table_state.select(Some(0));
+                    }
+                    if app_guard.incoming_rule_state.table_state.selected().is_none() {
+                        app_guard.incoming_rule_state.table_state.select(Some(0));
+                    }
                 }
                 FireWhalMessage::AppsResponse(app_id_message) => {
                     app_guard.debug_print.add_message(format!("[TUI]: AppIdsResponse Received."));
+
                     // Clear existing apps and add new ones
                     app_guard.apps.clear();
                     // Also clear the hash states
@@ -169,7 +183,6 @@ async fn main() -> Result<(), io::Error> {
 
                     app_guard.apps.extend(app_id_message.apps.into_iter());
 
-                    // --- THE FIX: Send HashesRequest *after* receiving the app list ---
                     let apps_to_hash: std::collections::HashMap<String, firewhal_core::AppIdentity> = app_guard.apps.clone();
                     if !apps_to_hash.is_empty() {
                         // Set all hashes to unchecked initially
@@ -177,43 +190,47 @@ async fn main() -> Result<(), io::Error> {
                             app_guard.hash_states.insert(name.clone(), HashState::Unchecked);
                         }
 
-                        let hashes_request_msg = FireWhalMessage::HashesRequest(firewhal_core::TUIHashesRequest {
-                            component: "TUI".to_string(),
-                            apps_to_get_hashes_for: apps_to_hash,
-                        });
+                        // Send each hash request individually
+                        for (app_name, app_identity) in apps_to_hash {
+                            let hashes_request_msg = FireWhalMessage::HashRequest(firewhal_core::TUIHashRequest {
+                                component: "TUI".to_string(),
+                                app_to_get_hash_for: (app_name, app_identity),
+                            });
 
-                        if let Some(tx) = &app_guard.to_zmq_tx {
-                            // Use try_send as we are in an async block but don't want to block it.
-                            let _ = tx.try_send(hashes_request_msg);
+                            if let Some(zmq_sender) = &app_guard.to_zmq_tx {
+                                if let Err(e) = zmq_sender.try_send(hashes_request_msg) {
+                                    _ = &app_guard.debug_print.add_message(format!("Failed to send HashRequest message: {}", e));
+                                }
+                            } else { _ = &app_guard.debug_print.add_message("found no zmq sender".to_string()); }
                         }
+                    }
+
+                    // Select the first item if nothing is selected
+                    if app_guard.app_list_state.table_state.selected().is_none() {
+                        app_guard.app_list_state.table_state.select(Some(0));
                     }
                 }
-                FireWhalMessage::HashesResponse(message) => {
-                    app_guard.debug_print.add_message(format!("[TUI]: HashesResponse Received."));
-                    // Iterate through the original apps list to compare hashes
-                    for (app_name, local_identity) in &app_guard.apps.clone() {
-                        if let Some(app_identity) = message.apps_with_updated_hashes.get(app_name) {
-                            let new_state = if local_identity.hash == app_identity.hash {
-                                HashState::Valid
-                            } else {
-                                HashState::Invalid
-                            };
-                            app_guard.hash_states.insert(app_name.clone(), new_state);
-                        }
+                FireWhalMessage::HashResponse(message) => { //*** */
+                    let (app_name, daemon_identity) = message.app_with_updated_hash;
+                    app_guard.debug_print.add_message(format!("[TUI]: HashResponse received for '{}'.", app_name));
 
+                    if let Some(local_identity) = app_guard.apps.get(&app_name) {
+                        let new_state = if local_identity.hash == daemon_identity.hash {
+                            HashState::Valid
+                        } else {
+                            HashState::Invalid
+                        };
+                        app_guard.hash_states.insert(app_name, new_state);
                     }
                 }
-                FireWhalMessage::HashUpdateResponse(message) => {
-                    app_guard.debug_print.add_message(format!("[TUI]: HashUpdateResponse Received."));
-                    // Iterate through the original apps list to compare hashes
-                    for (app_name, local_identity) in &app_guard.apps.clone() {
-                        if let Some(app_identity) = message.updated_apps.get(app_name) {
-                            let valid_state = HashState::Valid; // All applications are valid at this point
-                            app_guard.hash_states.insert(app_name.clone(), valid_state);
-                            app_guard.apps.insert(app_name.clone(), app_identity.clone());
-                        }
+                FireWhalMessage::HashUpdateResponse(message) => { //*** */
+                    let (app_name, updated_identity) = message.updated_app;
+                    app_guard.debug_print.add_message(format!("[TUI]: HashUpdateResponse received for '{}'.", app_name));
 
-                    }
+                    // Update the local app data with the new, correct hash from the daemon.
+                    app_guard.apps.insert(app_name.clone(), updated_identity);
+                    // Since the hash is now up-to-date, we can mark it as Valid.
+                    app_guard.hash_states.insert(app_name, HashState::Valid);
                 }
                 _ => {}
             }
@@ -231,110 +248,72 @@ async fn main() -> Result<(), io::Error> {
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('q') if app_guard.focus_on_navigation =>  break, // Only quit from navigation
                     KeyCode::Tab => {
-                        app_guard.next_screen();
-                        // THIS CODE CAUSES BUSY WAITING
-                        // Match to correct interface and then perform relevant operations
-                        match app_guard.screen {
-                            AppScreen::InterfaceSelection => {
-                                // Send a interface request message to firewhal-kernel if screen is interface selection
-                                // Craft request message
-                                let request_message = FireWhalMessage::InterfaceRequest(firewhal_core::NetInterfaceRequest {
-                                    source: "TUI".to_string(),
-                                });
-                                // Send request message
-                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
-                                    if let Err(e) = zmq_sender.try_send(request_message) {
-                                        _ = &app_guard.debug_print.add_message(format!("Failed to send InterfaceRequest message: {}", e));
-                                    }
-                                } else { _ = &app_guard.debug_print.add_message("Interface Selection found no zmq sender".to_string()); }
-                            }
-                            AppScreen::PermissiveMode => {
-                                let enable_message = FireWhalMessage::EnablePermissiveMode(firewhal_core::PermissiveModeEnable { component: ("TUI".to_string()) });
-                                // Send enable message to enable permissive mode
-                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
-                                    if let Err(e) = zmq_sender.try_send(enable_message) {
-                                        _ = &app_guard.debug_print.add_message(format!("Failed to send EnablePermissiveMode message: {}", e));
-                                    }
-                                } else { _ = &app_guard.debug_print.add_message("Permissive Mode found no zmq sender".to_string()); }
-                                //app_guard.process_lineage_tuple_list.clear_interfaces();
-                            }
-                            AppScreen::MainMenu => {
-                                // Reset Status Values
-                                app_guard.main_menu.reset_status_values();
-                                // Send ping to components
-                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
-                                    if let Err(e) = zmq_sender.try_send(FireWhalMessage::Ping(firewhal_core::StatusPing { source: "TUI".to_string() })) {
-                                        _ = &app_guard.debug_print.add_message(format!("Failed to send Ping message: {}", e));
-                                    }
-                                } else { _ = &app_guard.debug_print.add_message("Main Menu found no zmq sender".to_string()); }
-                            }
-                            AppScreen::RuleManagement => {
-                                // FIX ME, permissive mode will have a toggle button in its interface, for now, just send the disable message when you swap to main
-                                let disable_message = FireWhalMessage::DisablePermissiveMode(firewhal_core::PermissiveModeDisable { component: ("TUI".to_string()) });
-                                // Send enable message to enable permissive mode
-                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
-                                    if let Err(e) = zmq_sender.try_send(disable_message) {
-                                        _ = &app_guard.debug_print.add_message(format!("Failed to send EnablePermissiveMode message: {}", e));
-                                    }
-                                } else { _ = &app_guard.debug_print.add_message("Permissive Mode found no zmq sender".to_string()); }
-                                // Send rule request to daemon
-                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
-                                    if let Err(e) = zmq_sender.try_send(FireWhalMessage::RulesRequest(firewhal_core::TUIRulesRequest { component: "TUI".to_string() })) {
-                                        _ = &app_guard.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
-                                    }
-                                } else { _ = &app_guard.debug_print.add_message("Found no zmq sender".to_string()); }
-                            }
-                            AppScreen::AppManagement => {
-                                // Send app request to daemon
-                                if let Some(zmq_sender) = &app_guard.to_zmq_tx {
-                                    if let Err(e) = zmq_sender.try_send(FireWhalMessage::AppsRequest(firewhal_core::TUIAppsRequest { component: "TUI".to_string() })) {
-                                        _ = &app_guard.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
-                                    }
-                                } else { _ = &app_guard.debug_print.add_message("Found no zmq sender".to_string()); }
-                                // The HashesRequest is now sent automatically after AppsResponse is received.
-                            }
-                            _ => { 
-                            }
-                        }
+                        app_guard.next_screen(); // This just toggles focus now.
                     },
-                    _ => { // For other keys used in specific interfaces
-                        match app_guard.screen {
-                                    AppScreen::InterfaceSelection => {
-                                        ui::interface_selection::handle_key_event(key.code, &mut app_guard);
-                                    },
-                                    AppScreen::PermissiveMode => {
-                                        ui::permissive_mode::handle_key_event(key.code, &mut app_guard);
-                                    },
-                                    AppScreen::RuleManagement => {
-                                        ui::rule_management::handle_key_event(key.code, &mut app_guard);
-                                    }
-                                    AppScreen::AppManagement => {
-                                        ui::app_management::handle_key_event_with_modifiers(key.code, key.modifiers, &mut app_guard);
-                                    }
-                                    AppScreen::MainMenu => {
-                                    },
-                                    _ => {}
+                    KeyCode::Up if app_guard.focus_on_navigation => {
+                        let old_screen = app_guard.screen;
+                        app_guard.select_prev_nav_item(); // This changes app_guard.screen
+                        let new_screen = app_guard.screen;
+
+                        // Handle state changes when leaving a screen
+                        handle_screen_exit(old_screen, new_screen, &mut app_guard);
+                        // Handle state changes when entering a screen
+                        handle_screen_enter(&mut app_guard);
+                    },
+                    KeyCode::Down if app_guard.focus_on_navigation => {
+                        let old_screen = app_guard.screen;
+                        app_guard.select_next_nav_item(); // This changes app_guard.screen
+                        let new_screen = app_guard.screen;
+
+                        // Handle state changes when leaving a screen
+                        handle_screen_exit(old_screen, new_screen, &mut app_guard);
+                        // Handle state changes when entering a screen
+                        handle_screen_enter(&mut app_guard);
+                    },
+                    _ => { // Delegate to active screen's handler if content pane is focused
+                        if !app_guard.focus_on_navigation { // Content is focused
+                            match app_guard.screen {
+                                AppScreen::InterfaceSelection => {
+                                    ui::interface_selection::handle_key_event(key.code, &mut app_guard);
+                                },
+                                AppScreen::PermissiveMode => {
+                                    ui::permissive_mode::handle_key_event(key.code, &mut app_guard);
+                                },
+                                AppScreen::OutgoingRules | AppScreen::IncomingRules => {
+                                    ui::rule_management::handle_key_event(key.code, &mut app_guard);
+                                },
+                                AppScreen::AppManagement => {
+                                    ui::app_management::handle_key_event_with_modifiers(key.code, key.modifiers, &mut app_guard);
                                 }
+                                AppScreen::MainMenu => {
+                                    // Main menu might have its own key events later, but for now, none.
+                                },
+                                AppScreen::Debug => {
+                                    // Debug screen might have its own key events later, but for now, none.
+                                }
+                            }
+
+                            // Global keybinds for content panes
+                            if key.code == KeyCode::Char('p') && app_guard.rules_modified {
+                                app_guard.send_rules_to_daemon();
+                            }
+                        } // End of if !app_guard.focus_on_navigation
                     }
                 }
             }
         }
         if last_tick.elapsed() >= tick_rate {
             // Delegate updates to the active screen's state
-            match app_guard.screen {
-                AppScreen::MainMenu => app_guard.main_menu.update_progress(),
-                _ => { /* Other screens might have their own updates here */ }
-            }
+            // Other screens might have their own updates here
             last_tick = Instant::now();
         }
     }
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?;
-    terminal.show_cursor()?; // optional: make sure cursor reappears
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?; // Ensure cursor is shown
 
     // 3. Send the shutdown signal
     println!("TUI exited. Shutting down ZMQ task...");
@@ -349,4 +328,69 @@ async fn main() -> Result<(), io::Error> {
     }
 
     Ok(())
+}
+
+/// Sends the appropriate ZMQ message when entering a new screen.
+fn handle_screen_enter(app: &mut App) {
+    match app.screen {
+        AppScreen::InterfaceSelection => {
+            // Send a interface request message to firewhal-kernel if screen is interface selection
+            let request_message = FireWhalMessage::InterfaceRequest(firewhal_core::NetInterfaceRequest {
+                source: "TUI".to_string(),
+            });
+            if let Some(zmq_sender) = &app.to_zmq_tx {
+                if let Err(e) = zmq_sender.try_send(request_message) {
+                    _ = &app.debug_print.add_message(format!("Failed to send InterfaceRequest message: {}", e));
+                }
+            } else { _ = &app.debug_print.add_message("Interface Selection found no zmq sender".to_string()); }
+        }
+        AppScreen::PermissiveMode => {
+            let enable_message = FireWhalMessage::EnablePermissiveMode(firewhal_core::PermissiveModeEnable { component: ("TUI".to_string()) });
+            if let Some(zmq_sender) = &app.to_zmq_tx {
+                if let Err(e) = zmq_sender.try_send(enable_message) {
+                    _ = &app.debug_print.add_message(format!("Failed to send EnablePermissiveMode message: {}", e));
+                }
+            } else { _ = &app.debug_print.add_message("Permissive Mode found no zmq sender".to_string()); }
+        }
+        AppScreen::MainMenu => {
+            app.main_menu.reset_status_values();
+            if let Some(zmq_sender) = &app.to_zmq_tx {
+                if let Err(e) = zmq_sender.try_send(FireWhalMessage::Ping(firewhal_core::StatusPing { source: "TUI".to_string() })) {
+                    _ = &app.debug_print.add_message(format!("Failed to send Ping message: {}", e));
+                }
+            } else { _ = &app.debug_print.add_message("Main Menu found no zmq sender".to_string()); }
+        }
+        AppScreen::OutgoingRules | AppScreen::IncomingRules => {
+            // Send rule request to daemon
+            if let Some(zmq_sender) = &app.to_zmq_tx {
+                if let Err(e) = zmq_sender.try_send(FireWhalMessage::RulesRequest(firewhal_core::TUIRulesRequest { component: "TUI".to_string() })) {
+                    _ = &app.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
+                }
+            } else { _ = &app.debug_print.add_message("Found no zmq sender".to_string()); }
+        }
+        AppScreen::AppManagement => {
+            if let Some(zmq_sender) = &app.to_zmq_tx {
+                if let Err(e) = zmq_sender.try_send(FireWhalMessage::AppsRequest(firewhal_core::TUIAppsRequest { component: "TUI".to_string() })) {
+                    _ = &app.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
+                }
+            } else { _ = &app.debug_print.add_message("Found no zmq sender".to_string()); }
+        }
+        _ => {}
+    }
+}
+
+/// Handles cleanup actions when navigating away from a screen.
+fn handle_screen_exit(old_screen: AppScreen, new_screen: AppScreen, app: &mut App) {
+    if old_screen == new_screen {
+        return; // Didn't actually change screens
+    }
+
+    if old_screen == AppScreen::PermissiveMode {
+        let disable_message = FireWhalMessage::DisablePermissiveMode(firewhal_core::PermissiveModeDisable { component: ("TUI".to_string()) });
+        if let Some(zmq_sender) = &app.to_zmq_tx {
+            if let Err(e) = zmq_sender.try_send(disable_message) {
+                _ = &app.debug_print.add_message(format!("Failed to send DisablePermissiveMode message: {}", e));
+            }
+        }
+    }
 }
