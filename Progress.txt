@@ -1,8 +1,0 @@
-Connection Cookie for bind and connect calls made from sshd will be different from the connection cookies used for actual connections
-
-[INFO  firewhal_kernel] [Kernel] [ingress_tc] Rule 127 ALLOWED incoming connection from 192.168.0.20:50404
-[INFO  firewhal_kernel] [Kernel] [egress_tc] ConnectionKey: 192.168.0.202 192.168.0.20 22 50404 6
-[INFO  firewhal_kernel] [Kernel] [egress_tc] No Trusted Cookie Found: 28897
-[INFO  firewhal_kernel] [Kernel] [ingress_tc] Rule 127 ALLOWED incoming connection from 192.168.0.20:50404
-[INFO  firewhal_kernel] [Kernel] [ingress_tc] Rule 127 ALLOWED incoming connection from 192.168.0.20:50404
-[INFO  firewhal_kernel] [Kernel] Checking Local Port: 22
