@@ -1,0 +1,9 @@
+[package]
+name = "zmq-router"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = "1.11.0"
+tokio = "1.48.0"
+zeromq = "0.4.1"

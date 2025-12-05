@@ -1,0 +1,11 @@
+[package]
+name = "firewhal-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bincode = "2.0.1"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = "1.48.0"
+zeromq = "0.4.1"
+

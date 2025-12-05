@@ -1,0 +1,17 @@
+[package]
+name = "firewhal-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+firewhal-core = { path = "../firewhal-core" }
+tokio = { version = "1.40.0", default-features = false, features = [
+    "rt", 
+    "rt-multi-thread", 
+    "macros", 
+    "time", 
+    "sync", 
+    "signal",
+    "process",
+    "net"
+] }
