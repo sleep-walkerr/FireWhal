@@ -69,7 +69,8 @@ pub async fn zmq_client_connection(
                 // A DEALER socket receiving from a ROUTER gets a 2-part message:
                 // [empty_delimiter, payload]. We need the payload at index 1.
                 // We use .get(1) which returns an Option<&Bytes>.
-                if let Some(payload) = multipart.get(1) {
+                if let Some(payload) = multipart.get(0) {
+                    println!("[Client IPC] Message received!");
                     match bincode::decode_from_slice::<FireWhalMessage, _>(payload, config) {
                         Ok((message, _)) => {
                             if from_zmq_tx.send(message).await.is_err() {
@@ -80,6 +81,8 @@ pub async fn zmq_client_connection(
                             eprintln!("[{component} IPC Client] Received malformed message, discarding. Error: {}", e);
                         }
                     }
+                } else {
+                    println!("No payload");
                 }
             },
             else => {

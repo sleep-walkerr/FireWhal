@@ -1,8 +1,10 @@
 
 use tokio::net::unix::pipe::Sender;
 use tokio::sync::{mpsc, Mutex, oneshot, broadcast};
+use tokio::time::sleep;
 use firewhal_core::{FireWhalMessage, zmq_client_connection, StatusUpdate};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
@@ -22,10 +24,16 @@ async fn main() {
     let registration_message = FireWhalMessage::Status(StatusUpdate { component: "Client Test".to_string(), is_healthy: true, message: "Ready".to_string() });
     to_zmq_tx.clone().send(registration_message).await.unwrap();
 
+
     loop {
         tokio::select! {
             Some(message) = from_zmq_rx.recv() => {
-                println!("Message received!");
+                match message {
+                    FireWhalMessage::Status(status) => {
+                        println!("Status message received: {}", status.component); 
+                    }
+                    _ => {}
+                }
             }
         }
     }
