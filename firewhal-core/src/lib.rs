@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::{fmt, fs, path};
+use std::fmt;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::collections::{HashMap, HashSet};
@@ -8,13 +8,15 @@ use bincode::{config, Encode, Decode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio::task;
-use zmq::Context;
 use tokio::time::{sleep, Duration, timeout};
+use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, SocketOptions, ZmqError, ZmqMessage};
+
+pub const DEFAULT_IPC_ENDPOINT: &str = "ipc:///tmp/firewhal_ipc.sock";
 
 //Test error implementation for Zero Message Queue related functionalities
 #[derive(Debug)]
 pub enum IpcError {
-    Zmq(zmq::Error),
+    Zmq(ZmqError),
     Deserialization(String),
 }
 
@@ -34,106 +36,200 @@ impl std::error::Error for IpcError {}
 
 
 // ZMQ dealer client to be used by IPC clients
-// One function instead of have a separate implementation inside of each subprogram
-/// A task that handles two-way ZMQ communication.
-pub async fn zmq_client_connection(
+// One function instead of having a separate implementation inside of each subprogram
+
+/// Creates a DEALER socket for `endpoint` and connects to the router.
+///
+/// The socket uses an unbounded connect timeout: if the router is not up yet,
+/// the connect call keeps retrying internally (this is the pure-Rust equivalent
+/// of the old `ZMQ_IMMEDIATE=0` slow-joiner workaround). The wait is raced
+/// against the shutdown signal so the task can always be cancelled cleanly.
+///
+/// Returns `Err(IpcError::Zmq)` if the endpoint itself is malformed (a
+/// configuration error that retrying would never fix); `Ok(None)` if shutdown
+/// was requested while waiting; `Ok(Some(socket))` on a live connection.
+async fn connect_dealer(
+    endpoint: &str,
+    shutdown_rx: &mut broadcast::Receiver<()>,
+) -> Result<Option<DealerSocket>, IpcError> {
+    // Fail fast on a malformed endpoint; otherwise the connect call retries
+    // internally until the router appears.
+    let _validated: zeromq::Endpoint = endpoint
+        .parse()
+        .map_err(ZmqError::from)
+        .map_err(IpcError::Zmq)?;
+
+    let mut options = SocketOptions::default();
+    options.no_connect_timeout();
+    let mut socket = DealerSocket::with_options(options);
+
+    tokio::select! {
+        _ = shutdown_rx.recv() => Ok(None),
+        result = socket.connect(endpoint) => {
+            result.map_err(IpcError::Zmq)?;
+            Ok(Some(socket))
+        }
+    }
+}
+
+/// Sends this component's registration message so the router can route to it.
+/// Called after every successful (re)connect.
+async fn register_component(socket: &mut DealerSocket, component: &str) {
+    let ready = FireWhalMessage::Status(StatusUpdate {
+        component: component.to_string(),
+        is_healthy: true,
+        message: "Ready".to_string(),
+    });
+    let config = bincode::config::standard().with_big_endian();
+    if let Ok(payload) = bincode::encode_to_vec(&ready, config) {
+        if let Err(e) = socket.send(ZmqMessage::from(payload)).await {
+            eprintln!("[{component} IPC Client] Failed to send registration message: {}", e);
+        }
+    }
+}
+
+/// Default interval between client heartbeats. The heartbeat keeps the
+/// client's send path active so a dead router is detected even when the
+/// component is otherwise idle (a pure recv wait would block forever).
+pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// A task that handles two-way ZMQ communication for a component.
+///
+/// Resilience guarantees:
+/// - Slow joiner: waits (retrying) for the router to come up before sending,
+///   so no message is lost to an unconnected socket.
+/// - Reconnect: if the connection to the router is lost, the task recreates
+///   its socket, reconnects (retrying until the router returns), and
+///   re-registers this component.
+/// - Liveness: a periodic (routed-to-nowhere) heartbeat detects a dead router
+///   even while the component is idle.
+/// - Clean exit: shuts down on the broadcast signal or when the component
+///   drops its outbound channel.
+pub async fn ipc_client_connection(
+    endpoint: String,
     mut to_zmq_rx: mpsc::Receiver<FireWhalMessage>,
     from_zmq_tx: mpsc::Sender<FireWhalMessage>,
     mut shutdown_rx: broadcast::Receiver<()>,
     component: String,
+    heartbeat_interval: Option<Duration>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    
     let config = bincode::config::standard().with_big_endian();
-    let context = zmq::Context::new();
-    let socket = context.socket(zmq::DEALER)?;
+    let heartbeat_interval = heartbeat_interval.unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
+    let heartbeat_msg = FireWhalMessage::Status(StatusUpdate {
+        component: component.clone(),
+        is_healthy: true,
+        message: "Heartbeat".to_string(),
+    });
 
-    // Set ZMQ_IMMEDIATE to 0. This makes the .connect() call block until the
-    // connection is fully established, preventing the "slow joiner" problem where
-    // the first message can be silently dropped.
-    socket.set_immediate(false)?;
-    socket.connect("ipc:///tmp/firewhal_ipc.sock")?;
+    // Initial connect, racing the shutdown signal.
+    let mut socket = match connect_dealer(&endpoint, &mut shutdown_rx).await? {
+        Some(socket) => socket,
+        None => return Ok(()),
+    };
+    println!("[{component} IPC Client] Connected to IPC router at {}.", endpoint);
+    register_component(&mut socket, &component).await;
 
-    println!("[{component} IPC Client] Connected to IPC router.");
+    let mut heartbeat = tokio::time::interval(heartbeat_interval);
+    heartbeat.tick().await; // first tick completes immediately; skip it
 
     loop {
-        tokio::select! {
-            // Branch 1: Listen for shutdown signal.
-            _ = shutdown_rx.recv() => {
-                println!("[{component} IPC Client] Shutdown signal received. Terminating.");
-                break; // Exit the loop
-            },
-            // Branch 2: Handle messages from the component TO the router
-            Some(message) = to_zmq_rx.recv() => {
-                if let Ok(payload) = bincode::encode_to_vec(&message, config) {
-                    if socket.send(&payload, 0).is_err() {
-                        eprintln!("[{component} IPC Client] Failed to send message to router.");
-                    }
-                }
-            },
+        // One iteration of the connection loop. The send/recv operations are
+        // only ever run on a live socket; any transport failure flips us into
+        // the reconnect path instead of killing the task.
+        enum Turn {
+            Stay,
+            Incoming(ZmqMessage),
+            Lost,
+            Bye,
+        }
 
-            // Branch 3: Poll for messages FROM the router
-            _ = sleep(Duration::from_millis(1)) => {
-                // Use a loop to drain any messages that have queued up
-                loop {
-                    // Poll the socket without blocking
-                    match socket.recv_multipart(zmq::DONTWAIT) {
-                        Ok(multipart) => {
-                            if multipart.is_empty() { continue; }
-                            let payload = &multipart[0];
-
-                            match bincode::decode_from_slice::<FireWhalMessage, _>(payload, config) {
-                                Ok((message, _)) => {
-                                    if from_zmq_tx.send(message).await.is_err() {
-                                        return Ok(()); // Component is gone, shut down.
+        let turn = tokio::select! {
+            biased;
+            // Listen for a shutdown signal from the component.
+            _ = shutdown_rx.recv() => Turn::Bye,
+            // Handle messages from the component's business logic.
+            maybe_outgoing = to_zmq_rx.recv() => {
+                match maybe_outgoing {
+                    Some(message) => {
+                        match bincode::encode_to_vec(&message, config) {
+                            Ok(payload) => {
+                                match socket.send(ZmqMessage::from(payload)).await {
+                                    Ok(()) => Turn::Stay,
+                                    Err(e) => {
+                                        eprintln!("[{component} IPC Client] Send failed ({}), reconnecting.", e);
+                                        Turn::Lost
                                     }
                                 }
-                                Err(e) => {
-                                    eprintln!("[{component} IPC Client] Received malformed message, discarding. Error: {}", e);
-                                }
                             }
-                        },
-                        Err(zmq::Error::EAGAIN) => {
-                            // No message was waiting, so we break the inner loop.
-                            break;
-                        },
-                         Err(e) => {
-                            eprintln!("[{component} IPC Client] ZMQ receive error: {}", e);
-                            break;
+                            Err(e) => {
+                                eprintln!("[{component} IPC Client] Failed to encode message, discarding: {}", e);
+                                Turn::Stay
+                            }
                         }
+                    }
+                    // Component dropped its sender: nothing left to do.
+                    None => Turn::Bye,
+                }
+            }
+            // Liveness probe; also the idle-path way of noticing a dead router.
+            _ = heartbeat.tick() => {
+                if let Ok(payload) = bincode::encode_to_vec(&heartbeat_msg, config) {
+                    match socket.send(ZmqMessage::from(payload)).await {
+                        Ok(()) => Turn::Stay,
+                        Err(e) => {
+                            eprintln!("[{component} IPC Client] Heartbeat failed ({}), reconnecting.", e);
+                            Turn::Lost
+                        }
+                    }
+                } else {
+                    Turn::Stay
+                }
+            }
+            // Handle incoming messages from the router.
+            result = socket.recv() => {
+                match result {
+                    Ok(frames) => Turn::Incoming(frames),
+                    Err(e) => {
+                        eprintln!("[{component} IPC Client] Receive failed ({}), reconnecting.", e);
+                        Turn::Lost
+                    }
+                }
+            }
+        };
+
+        match turn {
+            Turn::Stay => {}
+            Turn::Bye => break,
+            Turn::Lost => {
+                println!("[{component} IPC Client] Connection lost. Waiting for router to return...");
+                match connect_dealer(&endpoint, &mut shutdown_rx).await? {
+                    Some(new_socket) => {
+                        socket = new_socket;
+                        println!("[{component} IPC Client] Reconnected to IPC router at {}.", endpoint);
+                        register_component(&mut socket, &component).await;
+                    }
+                    None => return Ok(()),
+                }
+            }
+            Turn::Incoming(frames) => {
+                if let Some(payload) = frames.get(0) {
+                    match bincode::decode_from_slice::<FireWhalMessage, _>(payload, config) {
+                        Ok((message, _)) => {
+                            // If the channel is closed, the component has shut down, so we exit.
+                            if from_zmq_tx.send(message).await.is_err() {
+                                println!("[{component} IPC Client] Component channel closed. Shutting down IPC task.");
+                                break;
+                            }
+                        }
+                        Err(e) => eprintln!("[{component} IPC Client] Received malformed message, discarding. Error: {}", e),
                     }
                 }
             }
         }
     }
+
     println!("[{component} IPC Client] Disconnected.");
     Ok(())
-}
-
-/// Serializes and sends any AppMessage over a ZMQ socket using bincode 2.0.
-pub fn send_message(socket: &zmq::Socket, message: &FireWhalMessage) -> Result<(), zmq::Error> {
-    // 1. Get the standard bincode configuration.
-    let config = bincode::config::standard().with_big_endian();
-    // 2. Encode the message directly into a Vec<u8>.
-    let bytes = bincode::encode_to_vec(message, config)
-        .expect("Failed to encode AppMessage");
-    socket.send(&bytes, 0)
-}
-
-/// Receives and deserializes an AppMessage from a ZMQ socket using bincode 2.0.
-pub fn recv_message(socket: &zmq::Socket) -> Result<FireWhalMessage, IpcError> {
-    let bytes = socket.recv_bytes(0).map_err(IpcError::Zmq)?;
-
-    // 1. Get the standard bincode configuration.
-    let config = bincode::config::standard().with_big_endian();
-    // 2. Decode the message from the received byte slice.
-    let (message, len) = bincode::decode_from_slice(&bytes, config)
-            .map_err(|e| IpcError::Deserialization(e.to_string()))?;
-
-    // The `decode_from_slice` function also returns the number of bytes read.
-    // You can use `len` to confirm the entire message was consumed, if needed.
-    //println!("Decoded {} bytes.", len);
-
-    Ok(message)
 }
 
 

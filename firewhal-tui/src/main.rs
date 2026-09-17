@@ -20,8 +20,7 @@ use tokio::{
     time::sleep,
     sync::{broadcast, mpsc},
 };
-use zmq;
-use firewhal_core::{zmq_client_connection, FireWhalMessage, StatusUpdate, StatusPing};
+use firewhal_core::{ipc_client_connection, DEFAULT_IPC_ENDPOINT, FireWhalMessage, StatusUpdate, StatusPing};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::Mutex;
 
@@ -46,7 +45,7 @@ async fn main() -> Result<(), io::Error> {
     // Spawn the ZMQ task.
     // `to_zmq_rx` is the `outgoing_rx` for the ZMQ task.
     // `from_zmq_tx` is the `incoming_tx` for the ZMQ task.
-    let ipc_connection = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, shutdown_rx, "TUI".to_string()));
+    let ipc_connection = tokio::spawn(ipc_client_connection(DEFAULT_IPC_ENDPOINT.to_string(), to_zmq_rx, from_zmq_tx, shutdown_rx, "TUI".to_string(), None));
 
     // Setup terminal
     enable_raw_mode()?;

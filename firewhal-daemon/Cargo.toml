@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 firewhal-core = { path = "../firewhal-core" }
-zmq = { workspace = true }
+zeromq = { workspace = true }
 daemonize = "0.5.0"
 nix = { workspace = true, features = ["signal", "user", "fs"] }
 bincode = { workspace = true }

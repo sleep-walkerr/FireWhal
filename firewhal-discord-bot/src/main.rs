@@ -12,7 +12,7 @@ use tokio::net::unix::pipe::Sender;
 use tokio::sync::{mpsc, Mutex, oneshot, broadcast};
 
 // Import the necessary items from your shared core library
-use firewhal_core::{zmq_client_connection, DebugMessage, FireWhalMessage, StatusPong, StatusUpdate, DiscordBlockNotification};
+use firewhal_core::{ipc_client_connection, DEFAULT_IPC_ENDPOINT, DebugMessage, FireWhalMessage, StatusPong, StatusUpdate, DiscordBlockNotification};
 
 struct Handler;
 
@@ -121,7 +121,7 @@ async fn main() {
     let zmq_sender = Arc::new(Mutex::new(to_zmq_tx));
 
     // Spawn the unified ZMQ connection task.
-    tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, shutdown_rx, "DiscordBot".to_string()));
+    tokio::spawn(ipc_client_connection(DEFAULT_IPC_ENDPOINT.to_string(), to_zmq_rx, from_zmq_tx, shutdown_rx, "DiscordBot".to_string(), None));
 
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
     let intents = GatewayIntents::GUILDS | GatewayIntents::DIRECT_MESSAGES;

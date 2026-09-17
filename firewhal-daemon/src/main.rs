@@ -38,7 +38,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashResponse, DebugMessage, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, zmq_client_connection};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, ipc_client_connection};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -329,7 +329,7 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
     let (zmq_shutdown_tx, zmq_shutdown_rx) = broadcast::channel::<()>(1);
-    let zmq_task_handle = tokio::spawn(zmq_client_connection(to_zmq_rx, from_zmq_tx, zmq_shutdown_rx, "Daemon".to_string()));
+    let zmq_task_handle = tokio::spawn(ipc_client_connection(DEFAULT_IPC_ENDPOINT.to_string(), to_zmq_rx, from_zmq_tx, zmq_shutdown_rx, "Daemon".to_string(), None));
     let ident_msg = FireWhalMessage::Status(StatusUpdate {
         component: "Daemon".to_string(),
         is_healthy: true,

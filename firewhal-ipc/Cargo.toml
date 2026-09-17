@@ -7,4 +7,6 @@ edition = "2024"
 bincode = { workspace = true }
 firewhal-core = { path = "../firewhal-core" } # Depends on the shared library
 nix = { workspace = true, features = ["fs", "user"] }
-zmq = { workspace = true }
+zeromq = { workspace = true }
+tokio = { workspace = true }
+bytes = "1"

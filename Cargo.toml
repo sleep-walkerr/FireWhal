@@ -51,7 +51,7 @@ tokio = { version = "1.40.0", default-features = false, features = [
     "process"
 ] }
 which = { version = "6.0.0", default-features = false }
-zmq = "0.10.0"
+zeromq = "0.6.0"
 bincode = "2.0.1"
 serde = "1.0.226"
 nix = "0.30.1"

@@ -622,7 +622,7 @@ async fn main() -> Result<(), anyhow::Error> {
     // ZMQ shutdown signal channels, for shutting down IPC async task
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
-    let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx, "Firewall".to_string()));
+    let zmq_handle = tokio::spawn(firewhal_core::ipc_client_connection(firewhal_core::DEFAULT_IPC_ENDPOINT.to_string(), to_zmq_rx, from_zmq_tx.clone(), shutdown_rx, "Firewall".to_string(), None));
     
 
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;
