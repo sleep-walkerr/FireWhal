@@ -2,8 +2,8 @@
 
 One-command end-to-end test of FireWhal enforcement inside the disposable
 `fw-test` KVM VM. This is **a** test — the first permanent regression gate —
-not **the** whole test strategy; see `test-vm/README.md` for the rig itself
-and the open ticket for the comprehensive mechanism to build on top of it.
+not **the** whole test strategy; the comprehensive mechanism to build on top
+of it is tracked in ticket #106. See `test-vm/README.md` for the rig itself.
 
 ```
 tests/e2e/run-e2e.sh          # from the host, from anywhere in the repo
@@ -63,4 +63,4 @@ network gate (rule match).
 - Baseline-vs-enforced comparison
 - CI (needs a KVM runner; see ticket)
 
-These belong in the comprehensive test mechanism — tracked separately.
+These belong in the comprehensive test mechanism — ticket #106.
