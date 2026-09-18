@@ -1,8 +1,23 @@
-# VM Enforcement Testing — Findings (2026-09-18)
+# VM Enforcement Testing — Runbook & Findings
 
-E2e test of FireWhal inside the disposable KVM VM `fw-test` (see ticket:
-"Integrate VM-based e2e test rig into the repo"). Everything below ran in the
-VM; the host was never subjected to enforcement or BPF.
+E2e testing of FireWhal inside the disposable KVM VM `fw-test`. Everything
+runs in the VM; the host is never subjected to enforcement or BPF.
+
+## Running the rig (since 2026-09-18, one command)
+
+```
+tests/e2e/run-e2e.sh
+```
+
+Builds the release workspace on the host, deploys it to the VM, and runs the
+regression gate: stack readiness (all FireWhal BPF programs including both TC
+classifiers, all three config pushes) plus the three enforcement differentials
+(allow / rule-block / app-block, asserted from kernel verdict log lines). See
+`tests/e2e/README.md` for the probe table and `test-vm/README.md` for rig
+setup. The findings below document what the first manual runs found and what
+each probe guards against.
+
+## Findings (first manual run, 2026-09-18)
 
 ## Rig layout
 
@@ -50,7 +65,7 @@ registration, reset on rebind.
 `firewhal-kernel` discarded `load()` results and reused the "ingress" warn
 text in the egress branch. Now prints the real errors.
 
-### 4. FAIL-OPEN: TC classifiers fail to load on kernel 6.8 (open bug)
+### 4. FAIL-OPEN: TC classifiers failed to load on kernel 6.8 (**fixed**, PR #97)
 
 Architecture (by design): the cgroup `sock_addr` programs are deliberately
 pass-through (`Ok(1) // blocking delegated to tc egress program`). They log
@@ -61,7 +76,7 @@ Actual packet drops happen in the **TC classifiers** (default `TC_ACT_SHOT`
 on no match).
 
 On this VM (Ubuntu 24.04, kernel `6.8.0-139-generic`) both TC classifiers
-fail `BPF_PROG_LOAD`:
+failed `BPF_PROG_LOAD`:
 
 - aya verifier log: a single line `0: R1=ctx() R10=fp0` (buffer is 10KB+, so
   the kernel genuinely logged only that)
@@ -71,9 +86,16 @@ fail `BPF_PROG_LOAD`:
 - the cgroup programs from the **same object** load fine, so BPF itself works
   in this environment
 
-Observed behavior: allowlisted ports (80, 443 TCP) pass; **non-allowlisted
-ports also pass** (8080 TCP returned an HTTP response through enp0s3). The
-firewall currently monitors and logs but drops nothing in this environment.
+Observed behavior at the time: allowlisted ports (80, 443 TCP) pass;
+**non-allowlisted ports also pass** (8080 TCP returned an HTTP response
+through enp0s3). The firewall monitored and logged but dropped nothing — a
+silent fail-open.
+
+**Resolution (2026-09-18):** the eBPF object was fixed (PR #97) and the
+release build verified in this VM: both `sched_cls` classifiers now load on
+6.8.0-139 and actually drop. The e2e rig's readiness phase asserts both TC
+programs are present on every run, so a regression to this state fails the
+gate before any probe runs.
 
 ### 5. Connect-only probes are insufficient
 
@@ -85,10 +107,10 @@ probe, not a firewall drop.)
 
 ## Open work
 
-- [ ] Get the full verifier rejection: bisect with a minimal `#[classifier]`
-      program (isolates "TC BPF broken in this KVM/kernel env" vs "something
-      in this program's code"), then fix.
-- [ ] Decide target kernel for the VM (user's real machine runs a newer
-      kernel; 6.8 may be the wrong baseline).
-- [ ] Wire the procedure in this file into a permanent, repo-integrated test
-      harness (see ticket).
+- [x] TC classifier load failure — fixed (PR #97), regression-guarded by the
+      e2e rig's readiness phase.
+- [x] Wire the procedure into a permanent, repo-integrated test rig —
+      `tests/e2e/` + `test-vm/` (one command: `tests/e2e/run-e2e.sh`).
+- [ ] Design the comprehensive test mechanism: data-level transfer probes,
+      mgmt-NIC isolation, resilience (kill/re-attach), baseline-vs-enforced,
+      and a KVM-capable CI runner (tracked in its own ticket).

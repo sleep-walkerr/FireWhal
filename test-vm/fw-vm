@@ -1,0 +1,73 @@
+#!/bin/bash
+# FireWhal test VM manager (raw qemu/KVM, no root needed).
+#
+#   fw-vm reset          recreate the pristine write-overlay over golden.qcow2
+#   fw-vm boot           boot the VM (overlay + seed), daemonized
+#   fw-vm ssh [cmd...]   ssh into the VM (host port 2222 -> guest 22)
+#   fw-vm stop           stop the VM
+#
+# The image files (noble.img, golden.qcow2, run.qcow2, seed.iso) live next to
+# this script; see README.md for how to build them.
+#
+# Networking:
+#   mgmt  52:54:00:12:34:56  slirp + hostfwd 127.0.0.1:2222->22 (this interface
+#         is NOT what FireWhal guards; keep it alive no matter what)
+#   test0 52:54:00:12:34:57  slirp, isolated; the interface under test
+
+set -euo pipefail
+D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GOLDEN=$D/golden.qcow2
+RUN=$D/run.qcow2
+PIDF=$D/fw-test.pid
+SERIAL=$D/fw-test-serial.log
+MAC_MGMT=52:54:00:12:34:56
+MAC_TEST=52:54:00:12:34:57
+
+case "${1:-}" in
+  reset)
+    if [ -f "$PIDF" ]; then
+      kill "$(cat "$PIDF")" 2>/dev/null || true
+      sleep 1
+    fi
+    rm -f "$RUN"
+    qemu-img create -f qcow2 -F qcow2 -b "$GOLDEN" "$RUN" >/dev/null
+    echo "pristine overlay created: $RUN"
+    ;;
+  boot)
+    [ -f "$RUN" ] || { echo "no overlay present; run: fw-vm reset"; exit 1; }
+    if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+      echo "already running, pid $(cat "$PIDF"); run: fw-vm stop first"
+      exit 1
+    fi
+    rm -f "$PIDF"
+    qemu-system-x86_64 \
+      -name fw-test \
+      -machine q35 -accel kvm -cpu host \
+      -m 4096 -smp 4 \
+      -drive file="$RUN",if=virtio,format=qcow2 \
+      -cdrom "$D/seed.iso" \
+      -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 \
+      -device virtio-net-pci,netdev=n0,mac="$MAC_MGMT" \
+      -netdev user,id=n1 \
+      -device virtio-net-pci,netdev=n1,mac="$MAC_TEST" \
+      -serial file:"$SERIAL" \
+      -daemonize -pidfile "$PIDF"
+    echo "started, pid $(cat "$PIDF")"
+    echo "ssh: $0 ssh"
+    ;;
+  ssh)
+    shift
+    exec ssh -i "$HOME/.ssh/id_ed25519_fwvm" -p 2222 \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      ubuntu@127.0.0.1 "$@"
+    ;;
+  stop)
+    [ -f "$PIDF" ] || { echo "not running (no pidfile)"; exit 1; }
+    kill "$(cat "$PIDF")" && echo "stopped"
+    rm -f "$PIDF"
+    ;;
+  *)
+    echo "usage: fw-vm {reset|boot|ssh [cmd...]|stop}"
+    exit 1
+    ;;
+esac
