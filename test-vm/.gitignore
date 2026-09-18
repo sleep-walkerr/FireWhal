@@ -1,0 +1,8 @@
+*.qcow2
+*.img
+*.iso
+*.pid
+*.log
+*.sock
+*.status
+*.py

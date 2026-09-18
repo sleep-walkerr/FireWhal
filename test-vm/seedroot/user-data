@@ -1,0 +1,37 @@
+#cloud-config
+hostname: fw-test
+users:
+  - name: ubuntu
+    groups: [sudo, adm]
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXNp+ZOD30Jd3INA/Sc3TedGaBBUmye8piKAZ0LTco/ torch@silverarch"
+write_files:
+  - path: /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf
+    content: |
+      [Service]
+      TimeoutSec=15
+  - path: /etc/netplan/01-test0.yaml
+    permissions: '0600'
+    content: |
+      network:
+        version: 2
+        ethernets:
+          enp0s3:
+            dhcp4: true
+  - path: /etc/sudoers.d/90-cloud-init-users
+    permissions: '0440'
+    content: |
+      ubuntu ALL=(ALL) NOPASSWD: ALL
+runcmd:
+  - sh -c 'exec >> /var/log/provision.log 2>&1; echo "=== runcmd start ==="; echo "ubuntu:fwvm123" | chpasswd && echo PW_OK || echo PW_FAIL; growpart /dev/vda 1; resize2fs /dev/vda1; df -h / | tail -1; echo DISK_DONE'
+  - sh -c 'exec >> /var/log/provision.log 2>&1; apt-get update -qq; apt-get install -y -qq build-essential pkg-config libssl-dev curl wget iproute2 iptables libbpf-dev >/dev/null && echo APT_OK || echo APT_FAIL'
+  - sh -c 'exec >> /var/log/provision.log 2>&1; curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null && echo RUST_OK || echo RUST_FAIL'
+  - sh -c 'exec >> /var/log/provision.log 2>&1; groupadd -f firewhal-admin; mkdir -p /opt/firewhal/bin /opt/firewhal/config; echo FWDIR_OK'
+  - sh -c 'exec >> /var/log/provision.log 2>&1; netplan apply && sleep 5 && ip -br addr && echo NET_OK || echo NET_FAIL'
+  - sh -c 'echo "=== PROVISION_DONE ===" >> /var/log/provision.log'
+#config
+version: 2
+ethernets:
+  enp0s2:
+    dhcp4: true
