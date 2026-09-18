@@ -8,7 +8,7 @@ Define IPv4 address via u32::from_be_bytes([192, 168, 1, 2])
 use core::{fmt::DebugTuple, hash::Hash, mem, net::{IpAddr,Ipv4Addr}};
 
 use aya_ebpf::{
-    EbpfContext, bindings::{TC_ACT_OK, TC_ACT_SHOT, sockaddr, xdp_action, bpf_sock_tuple, bpf_sock, BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB}, helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_get_socket_cookie, bpf_skc_lookup_tcp, bpf_sk_release}, macros::{cgroup_sock_addr, classifier, map, xdp, sock_ops}, maps::{Array, HashMap, LpmTrie, LruHashMap, PerfEventArray, RingBuf}, programs::{SockAddrContext, TcContext, SockOpsContext} 
+    EbpfContext, bindings::{TC_ACT_OK, TC_ACT_SHOT, sockaddr, xdp_action, bpf_sock_tuple, bpf_sock, BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB}, helpers::{bpf_get_current_comm, bpf_get_socket_cookie, bpf_skc_lookup_tcp, bpf_sk_release}, macros::{cgroup_sock_addr, classifier, map, xdp, sock_ops}, maps::{Array, HashMap, LpmTrie, LruHashMap, PerfEventArray, RingBuf}, programs::{SockAddrContext, TcContext, SockOpsContext} 
 };
 use aya_log_ebpf::{info, error, warn};
 
@@ -166,7 +166,10 @@ fn app_tracking(prog_name: &str, ctx: &SockAddrContext) {
 #[inline(always)]
 fn rule_matching(ctx: &TcContext, tuple: ConnectionTuple, info: ConnectionInfo) -> Result<i32, ()> {
     // --- 1. Prepare Block Event (in case we need it) ---
-    let pid_tgid = bpf_get_current_pid_tgid();
+    // bpf_get_current_pid_tgid() is not available in SCHED_CLS (TC) programs,
+    // so block events emitted from TC carry a zero pid/tgid. Per-connection
+    // pid attribution comes from the cgroup programs, which do have it.
+    let pid_tgid: u64 = 0;
     let tgid = (pid_tgid >> 32) as u32;
 
     let block_event_payload = BlockEventPayload {
@@ -251,7 +254,9 @@ fn rule_matching(ctx: &TcContext, tuple: ConnectionTuple, info: ConnectionInfo) 
 #[inline(always)]
 fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32, ()> {
     // --- 1. Prepare Block Event (in case we need it) ---
-    let pid_tgid = bpf_get_current_pid_tgid();
+    // bpf_get_current_pid_tgid() is not available in SCHED_CLS (TC) programs,
+    // so ingress block events carry a zero pid/tgid (see rule_matching).
+    let pid_tgid: u64 = 0;
     let tgid = (pid_tgid >> 32) as u32;
 
     let block_event_payload = BlockEventPayload {
@@ -512,7 +517,9 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
     // Placeholder Info, Move Inside ConnectionKey Matching Later for REAL TGID
     let mut info = ConnectionInfo {
         pid: 0, // In TC we don't know the PID, this would be set by the cgroup program
-        last_seen: unsafe { bpf_ktime_get_ns() },
+        // bpf_ktime_get_ns() is not in the SCHED_CLS helper whitelist, and last_seen
+        // is never read by userspace, so track it with 0 for now.
+        last_seen: 0,
     };
     // Check to see if broadcast for DHCP
     if tuple.saddr == Ipv4Addr::from([0,0,0,0]).into() && tuple.daddr == Ipv4Addr::from([255,255,255,255]).into() { // Add port 68 and 67 here as well
