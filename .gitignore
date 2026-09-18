@@ -3,3 +3,4 @@ primary-workspace/target
 primary-workspace/firewhal-discord-bot/.env
 firewall-rule-testing/target
 target
+firewhal-discord-bot/.env
