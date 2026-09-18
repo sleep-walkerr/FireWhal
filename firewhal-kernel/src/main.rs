@@ -162,11 +162,15 @@ async fn attach_tc_programs(
     // Load programs once before the loop, scoping the mutable borrows.
     {
         let prog_ingress: &mut SchedClassifier = bpf.program_mut("firewhal_ingress_tc").unwrap().try_into()?;
-        prog_ingress.load();
+        if let Err(e) = prog_ingress.load() {
+            warn!("[Kernel] Failed to load TC ingress program: {}", e);
+        }
     }
     {
         let prog_egress: &mut SchedClassifier = bpf.program_mut("firewhal_egress_tc").unwrap().try_into()?;
-        prog_egress.load();
+        if let Err(e) = prog_egress.load() {
+            warn!("[Kernel] Failed to load TC egress program: {}", e);
+        }
     }
 
     // Attach to new interfaces
@@ -179,19 +183,17 @@ async fn attach_tc_programs(
         info!("[Kernel] Attaching TC programs to '{}'...", iface);
         {
             let ingress_prog: &mut SchedClassifier = bpf.program_mut("firewhal_ingress_tc").unwrap().try_into().unwrap();
-            if let Ok(ingress_identifier) = ingress_prog.attach(&iface, TcAttachType::Ingress) {
-                ingress_id = Some(ingress_identifier);
-            } else {
-                warn!("[Kernel] Failed to attach TC ingress to '{}'", iface)
+            match ingress_prog.attach(&iface, TcAttachType::Ingress) {
+                Ok(ingress_identifier) => ingress_id = Some(ingress_identifier),
+                Err(e) => warn!("[Kernel] Failed to attach TC ingress to '{}': {}", iface, e),
             }
         }
 
         {
             let egress_prog: &mut SchedClassifier = bpf.program_mut("firewhal_egress_tc").unwrap().try_into().unwrap();
-            if let Ok(egress_identifier) = egress_prog.attach(&iface, TcAttachType::Egress) {
-                egress_id = Some(egress_identifier);
-            } else {
-                warn!("[Kernel] Failed to attach TC ingress to '{}'", iface)
+            match egress_prog.attach(&iface, TcAttachType::Egress) {
+                Ok(egress_identifier) => egress_id = Some(egress_identifier),
+                Err(e) => warn!("[Kernel] Failed to attach TC egress to '{}': {}", iface, e),
             }
         }
         if let Some(ingress_id) = ingress_id{
@@ -622,7 +624,7 @@ async fn main() -> Result<(), anyhow::Error> {
     // ZMQ shutdown signal channels, for shutting down IPC async task
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
-    let zmq_handle = tokio::spawn(firewhal_core::zmq_client_connection(to_zmq_rx, from_zmq_tx.clone(), shutdown_rx, "Firewall".to_string()));
+    let zmq_handle = tokio::spawn(firewhal_core::ipc_client_connection(firewhal_core::DEFAULT_IPC_ENDPOINT.to_string(), to_zmq_rx, from_zmq_tx.clone(), shutdown_rx, "Firewall".to_string(), None));
     
 
     let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(env!("OUT_DIR"), "/firewhal-kernel")))?;

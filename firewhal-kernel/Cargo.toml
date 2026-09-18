@@ -50,7 +50,7 @@ log = { workspace = true }
 network-interface = "2.0.3"
 simple-logging = "2.0.2"
 tokio = { workspace=true }
-zmq = { workspace = true } 
+zeromq = { workspace = true }
 nix = { workspace = true, features = ["user"] }
 
 # [profile.release]
