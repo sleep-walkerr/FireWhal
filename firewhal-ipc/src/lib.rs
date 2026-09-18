@@ -38,11 +38,21 @@ async fn send_to_identity(router: &mut RouterSocket, identity: &[u8], payload: V
     }
 }
 
+/// Maximum messages buffered per not-yet-registered component.
+const MAX_PENDING_PER_COMPONENT: usize = 100;
+
 /// Forwards `data` to a registered component, evicting that client from the
 /// table if the send failed (its peer task will reconnect and re-register).
+///
+/// If the target component has not registered yet, the message is buffered
+/// and delivered on registration: registration order between components is a
+/// race (the router is a child of the Daemon, so the Daemon's own connect can
+/// lose it), and dropping e.g. the Firewall's "Ready" would leave the Daemon
+/// waiting forever for a notification that never comes.
 async fn deliver(
     router: &mut RouterSocket,
     clients: &mut HashMap<String, Vec<u8>>,
+    pending: &mut HashMap<String, Vec<Vec<u8>>>,
     to: &str,
     data: Vec<u8>,
 ) {
@@ -52,7 +62,15 @@ async fn deliver(
                 clients.remove(to);
             }
         }
-        None => eprintln!("[ROUTER] Message for '{}' dropped: client not registered.", to),
+        None => {
+            let queue = pending.entry(to.to_string()).or_default();
+            if queue.len() >= MAX_PENDING_PER_COMPONENT {
+                eprintln!("[ROUTER] Pending queue for '{}' full; dropping oldest.", to);
+                queue.remove(0);
+            }
+            queue.push(data);
+            eprintln!("[ROUTER] Buffered message for '{}' (client not registered yet).", to);
+        }
     }
 }
 
@@ -60,6 +78,7 @@ async fn deliver(
 async fn route_message(
     router: &mut RouterSocket,
     clients: &mut HashMap<String, Vec<u8>>,
+    pending: &mut HashMap<String, Vec<Vec<u8>>>,
     message: &FireWhalMessage,
     sender_identity: &[u8],
     payload: &[u8],
@@ -71,9 +90,15 @@ async fn route_message(
         FireWhalMessage::Status(status) if status.message == "Ready" => {
             println!("[ROUTER] Registered client '{}' with identity {:?}.", status.component, sender_identity);
             clients.insert(status.component.clone(), sender_identity.to_vec());
+            // Deliver anything that was buffered while this component was away.
+            if let Some(buffered) = pending.remove(&status.component) {
+                for data in buffered {
+                    deliver(router, clients, pending, &status.component, data).await;
+                }
+            }
             if status.component != "Daemon" {
                 // Let the Daemon know the rest of the stack is up.
-                deliver(router, clients, "Daemon", payload.to_vec()).await;
+                deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
             }
         }
 
@@ -86,36 +111,36 @@ async fn route_message(
                     content: format!("{:?}", message),
                 });
                 if let Ok(bytes) = bincode::encode_to_vec(&forward, bincode_config) {
-                    deliver(router, clients, "TUI", bytes).await;
+                    deliver(router, clients, pending, "TUI", bytes).await;
                 }
             }
         }
 
         // --- Firewall configuration ---
         FireWhalMessage::LoadRules(_) => {
-            deliver(router, clients, "Firewall", payload.to_vec()).await;
+            deliver(router, clients, pending, "Firewall", payload.to_vec()).await;
         }
         FireWhalMessage::LoadAppIds(_) => {
-            deliver(router, clients, "Firewall", payload.to_vec()).await;
+            deliver(router, clients, pending, "Firewall", payload.to_vec()).await;
         }
         FireWhalMessage::LoadInterfaceState(_) => {
-            deliver(router, clients, "Firewall", payload.to_vec()).await;
+            deliver(router, clients, pending, "Firewall", payload.to_vec()).await;
         }
 
         // --- Interface management (TUI <-> Daemon) ---
         FireWhalMessage::InterfaceRequest(req) => {
             if req.source == "TUI" {
-                deliver(router, clients, "Daemon", payload.to_vec()).await;
+                deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
             }
         }
         FireWhalMessage::InterfaceResponse(resp) => {
             if resp.source == "Daemon" {
-                deliver(router, clients, "TUI", payload.to_vec()).await;
+                deliver(router, clients, pending, "TUI", payload.to_vec()).await;
             }
         }
         FireWhalMessage::UpdateInterfaces(update) => {
             if update.source == "TUI" {
-                deliver(router, clients, "Daemon", payload.to_vec()).await;
+                deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
             }
         }
 
@@ -124,78 +149,78 @@ async fn route_message(
             if ping.source == "TUI" {
                 let pong = FireWhalMessage::Pong(StatusPong { source: "IPC".to_string() });
                 if let Ok(bytes) = bincode::encode_to_vec(&pong, bincode_config) {
-                    deliver(router, clients, "TUI", bytes).await;
+                    deliver(router, clients, pending, "TUI", bytes).await;
                 }
                 for target in ["Firewall", "Daemon", "DiscordBot"] {
-                    deliver(router, clients, target, payload.to_vec()).await;
+                    deliver(router, clients, pending, target, payload.to_vec()).await;
                 }
             }
         }
         FireWhalMessage::Pong(_) => {
-            deliver(router, clients, "TUI", payload.to_vec()).await;
+            deliver(router, clients, pending, "TUI", payload.to_vec()).await;
         }
 
         // --- Discord notifications ---
         FireWhalMessage::DiscordBlockNotify(_) => {
-            deliver(router, clients, "DiscordBot", payload.to_vec()).await;
+            deliver(router, clients, pending, "DiscordBot", payload.to_vec()).await;
         }
 
         // --- Permissive mode ---
         FireWhalMessage::EnablePermissiveMode(msg) => {
             if msg.component == "TUI" {
-                deliver(router, clients, "Firewall", payload.to_vec()).await;
+                deliver(router, clients, pending, "Firewall", payload.to_vec()).await;
             }
         }
         FireWhalMessage::DisablePermissiveMode(msg) => {
             if msg.component == "TUI" {
-                deliver(router, clients, "Firewall", payload.to_vec()).await;
+                deliver(router, clients, pending, "Firewall", payload.to_vec()).await;
             }
         }
         FireWhalMessage::PermissiveModeTuple(msg) => {
             if msg.component == "Firewall" {
-                deliver(router, clients, "TUI", payload.to_vec()).await;
+                deliver(router, clients, pending, "TUI", payload.to_vec()).await;
             }
         }
 
         // --- App/rule management (TUI <-> Daemon) ---
         FireWhalMessage::AddAppIds(msg) => {
             if msg.component == "TUI" {
-                deliver(router, clients, "Daemon", payload.to_vec()).await;
+                deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
             }
         }
         FireWhalMessage::RulesRequest(msg) => {
             if msg.component == "TUI" {
-                deliver(router, clients, "Daemon", payload.to_vec()).await;
+                deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
             }
         }
         FireWhalMessage::RulesResponse(_) => {
-            deliver(router, clients, "TUI", payload.to_vec()).await;
+            deliver(router, clients, pending, "TUI", payload.to_vec()).await;
         }
         FireWhalMessage::UpdateRules(_) => {
-            deliver(router, clients, "Daemon", payload.to_vec()).await;
+            deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
         }
         FireWhalMessage::AppsRequest(msg) => {
             if msg.component == "TUI" {
-                deliver(router, clients, "Daemon", payload.to_vec()).await;
+                deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
             }
         }
         FireWhalMessage::AppsResponse(_) => {
-            deliver(router, clients, "TUI", payload.to_vec()).await;
+            deliver(router, clients, pending, "TUI", payload.to_vec()).await;
         }
         FireWhalMessage::UpdateAppIds(_) => {
-            deliver(router, clients, "Daemon", payload.to_vec()).await;
+            deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
         }
         FireWhalMessage::HashRequest(_) => {
-            deliver(router, clients, "Daemon", payload.to_vec()).await;
+            deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
         }
         FireWhalMessage::HashResponse(_) => {
-            deliver(router, clients, "TUI", payload.to_vec()).await;
+            deliver(router, clients, pending, "TUI", payload.to_vec()).await;
         }
         FireWhalMessage::HashUpdateRequest(_) => {
-            deliver(router, clients, "Daemon", payload.to_vec()).await;
+            deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
         }
         FireWhalMessage::HashUpdateResponse(_) => {
-            deliver(router, clients, "TUI", payload.to_vec()).await;
+            deliver(router, clients, pending, "TUI", payload.to_vec()).await;
         }
 
         // CommandShutdown and RuleAddBlock currently have no route.
@@ -204,7 +229,11 @@ async fn route_message(
 }
 
 /// Serves on a bound router socket until the transport dies.
-async fn serve(router: &mut RouterSocket, clients: &mut HashMap<String, Vec<u8>>) -> Result<(), ()> {
+async fn serve(
+    router: &mut RouterSocket,
+    clients: &mut HashMap<String, Vec<u8>>,
+    pending: &mut HashMap<String, Vec<Vec<u8>>>,
+) -> Result<(), ()> {
     let bincode_config = bincode::config::standard().with_big_endian();
 
     loop {
@@ -223,7 +252,7 @@ async fn serve(router: &mut RouterSocket, clients: &mut HashMap<String, Vec<u8>>
         };
         let payload_bytes = payload.to_vec();
 
-        route_message(router, clients, &message, sender_identity, &payload_bytes).await;
+        route_message(router, clients, pending, &message, sender_identity, &payload_bytes).await;
     }
 }
 
@@ -275,9 +304,12 @@ pub async fn run_router(endpoint: String, drop_privileges: bool) -> Result<(), B
         }
 
         // Client identities live with the socket; a rebind invalidates them
-        // and every client will reconnect and re-register itself.
+        // and every client will reconnect and re-register itself. Buffered
+        // messages are tied to the same lifecycle: old identities are gone,
+        // so anything buffered for them is stale too.
         let mut clients: HashMap<String, Vec<u8>> = HashMap::new();
-        serve(&mut router, &mut clients).await;
+        let mut pending: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
+        serve(&mut router, &mut clients, &mut pending).await;
 
         eprintln!("[ROUTER] Transport error; rebinding in 200ms...");
         tokio::time::sleep(Duration::from_millis(200)).await;
