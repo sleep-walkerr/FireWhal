@@ -58,10 +58,21 @@ unsafe impl Plain for ConnectionTuple {}
 
 
 
+// Why a packet could not be turned into a connection tuple.
+// Ipv6 is a policy decision: FireWhal blocks all IPv6 traffic, so the TC
+// classifiers drop it (TC_ACT_SHOT). Other covers ether types FireWhal does
+// not handle (ARP, VLAN, truncated frames) and keeps the historical
+// pass-through behavior.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PacketParseError {
+    Ipv6,
+    Other,
+}
+
 // TC Program Packet Parser for tuples
 #[inline(always)]
-pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
-    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, PacketParseError> {
+    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| PacketParseError::Other)?;
     // The ether_type from the packet is big-endian. The EtherType::Ipv4 enum
     // has the value 0x0800. We must ensure the comparison is correct.
     // The simplest way is to use the `into()` conversion provided by network-types.
@@ -69,14 +80,12 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
     if eth_hdr.ether_type == EtherType::Ipv4.into() {
         //info!(ctx, "IPv4 packet found. Continuing");
     } else if eth_hdr.ether_type == EtherType::Ipv6.into() {
-        info!(ctx, "IPv6 {} Packet found. Breaking", u16::from_be(eth_hdr.ether_type));
-        return Err(());
+        return Err(PacketParseError::Ipv6);
     } else {
-        info!(ctx, "Unsupported Type {} found. Breaking", u16::from_be(eth_hdr.ether_type));
-        return Err(())
+        return Err(PacketParseError::Other)
     }
 
-    let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
+    let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| PacketParseError::Other)?;
     let l4_hdr_offset = EthHdr::LEN + Ipv4Hdr::LEN;
     //info!(ctx, "Successfully loaded Ipv4 header");
     // --- Convert IP addresses from [u8; 4] to u32 in Network Byte Order ---
@@ -87,15 +96,15 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, ()> {
 
     let (sport, dport) = match ipv4_hdr.proto {
         IpProto::Tcp => {
-            let tcp_hdr: TcpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?; // Use dynamic offset
+            let tcp_hdr: TcpHdr = ctx.load(l4_hdr_offset).map_err(|_| PacketParseError::Other)?; // Use dynamic offset
             (u16::from_be_bytes(tcp_hdr.source), u16::from_be_bytes(tcp_hdr.dest))
         }
         IpProto::Udp => {
-            let udp_hdr: UdpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?; // Use dynamic offset
+            let udp_hdr: UdpHdr = ctx.load(l4_hdr_offset).map_err(|_| PacketParseError::Other)?; // Use dynamic offset
             (u16::from_be_bytes(udp_hdr.src), u16::from_be_bytes(udp_hdr.dst))
         }
         IpProto::Icmp => {
-            let icmp_hdr: IcmpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?;
+            let icmp_hdr: IcmpHdr = ctx.load(l4_hdr_offset).map_err(|_| PacketParseError::Other)?;
             // For ICMP, we can use type and code as pseudo-ports for more specific tracking.
             (icmp_hdr.type_.into(), icmp_hdr.code.into())
         }

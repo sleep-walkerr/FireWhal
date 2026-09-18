@@ -11,8 +11,9 @@ tests/e2e/run-e2e.sh
 
 Builds the release workspace on the host, deploys it to the VM, and runs the
 regression gate: stack readiness (all FireWhal BPF programs including both TC
-classifiers, all three config pushes) plus the three enforcement differentials
-(allow / rule-block / app-block, asserted from kernel verdict log lines). See
+classifiers, all three config pushes) plus the enforcement differentials
+(allow / rule-block / app-block / ipv6-block, asserted from kernel verdict
+log lines). See
 `tests/e2e/README.md` for the probe table and `test-vm/README.md` for rig
 setup. The findings below document what the first manual runs found and what
 each probe guards against.
@@ -104,6 +105,22 @@ cut at send time (the cgroup layer lets connects through; blocking happens on
 data). Probes must transfer data (e.g. an HTTP GET) to measure enforcement.
 (The port-53 "block" in raw testing was the DNS server not answering an HTTP
 probe, not a firewall drop.)
+
+### 6. IPv6 was completely unguarded (fail-open, fixed — ticket #70)
+
+The whole stack was IPv4-only by construction: the cgroup hooks only cover
+`connect4`/`sendmsg4`/`bind4` (no v6 variants), and the TC parser returned an
+error for ether type `0x86dd` which the classifier wrappers converted to
+`TC_ACT_OK` (allow). Net effect: an app on an enforced interface could
+communicate over IPv6 bypassing both the app gate and the rule gate.
+
+Fix: `parse_packet_tuple` now distinguishes the failure modes
+(`PacketParseError::Ipv6` vs `Other`), and both TC classifiers drop IPv6
+packets with `TC_ACT_SHOT` (`IPv6 packet blocked (policy: all IPv6 is
+blocked)`), while still passing through truly unhandled ether types (ARP,
+VLAN, ...) as before. The e2e rig asserts this with the ipv6-block probe
+(`ping6` to the connected `fec0::/64` subnet — deterministic guest v6 egress,
+no raw sockets needed).
 
 ## Open work
 

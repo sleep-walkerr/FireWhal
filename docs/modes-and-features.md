@@ -107,6 +107,7 @@ whichever is active when the mode changes, rather than branching on a flag.
 | Feature | Where | Notes |
 |---|---|---|
 | **Two-gate default-deny model** | eBPF + loader | App gate (process trust) and network gate (rules); deny at every layer. See [Overview](./overview.md). |
+| **All-IPv6 blocked** | TC classifiers | IPv6 packets on enforced interfaces are dropped (`TC_ACT_SHOT`), so v6 cannot bypass the app or rule gates (which are IPv4-only). Unhandled ether types (ARP, VLAN, ...) still pass through. |
 | **Process lineage verification** | loader event loop | Walks up to 10 ancestors via `/proc/<pid>/exe` + `PPid`; each level is hash-checked, so a trusted interpreter does not auto-trust an arbitrary script. |
 | **SHA3-256 integrity checking** | shared `firewhal_core` helper, loader, daemon | Trust is `(path, hash)`; the running binary is re-hashed in-process and compared. A tampered binary is a different hash → untrusted. |
 | **Stateful return traffic** | `CONNECTION_MAP` | An allowed egress tuple admits its reversed (return) traffic without re-checking. |
