@@ -12,7 +12,7 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::{info, error, warn};
 
-use firewhal_kernel_common::{Action, BlockEvent, BlockEventPayload, BlockReason, ConnectionAttemptPayload, ConnectionInfo, ConnectionKey, ConnectionTuple, EventType, KernelEvent, LpmIpKey, PidTrustInfo, RuleAction, RuleKey, parse_packet_tuple, parse_tcp_header};
+use firewhal_kernel_common::{Action, BlockEvent, BlockEventPayload, BlockReason, ConnectionAttemptPayload, ConnectionInfo, ConnectionKey, ConnectionTuple, EventType, KernelEvent, LpmIpKey, PacketParseError, PidTrustInfo, RuleAction, RuleKey, parse_packet_tuple, parse_tcp_header};
 
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -353,8 +353,18 @@ pub fn firewhal_ingress_tc(ctx: TcContext) -> i32 {
 fn try_firewhal_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
 
         let result = || -> Result<i32, i32> {
-            if let Ok(tuple) = parse_packet_tuple(&ctx) {
-                // For ingress, we need to check for the REVERSE tuple, since we are
+            let tuple = match parse_packet_tuple(&ctx) {
+                Ok(t) => t,
+                Err(PacketParseError::Ipv6) => {
+                    info!(&ctx, "[Kernel] [ingress_tc] IPv6 packet blocked (policy: all IPv6 is blocked).");
+                    return Ok(TC_ACT_SHOT);
+                }
+                Err(PacketParseError::Other) => {
+                    info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
+                    return Ok(TC_ACT_OK);
+                }
+            };
+            // For ingress, we need to check for the REVERSE tuple, since we are
                 // looking for the return path of an outgoing connection.
                 let reversed_tuple = ConnectionTuple {
                     saddr: tuple.daddr, // Swapped
@@ -408,10 +418,6 @@ fn try_firewhal_ingress_tc(ctx: TcContext) -> Result<i32, ()> {
                     // If no stateful match, fall back to stateless ingress rule matching.
                     return ingress_rule_matching(&ctx, tuple).map_err(|_| 0);
                 }
-            } else {
-                info!(&ctx, "[Kernel] [firewall_ingress_tc]: Parsing error");
-                return Err(TC_ACT_OK)
-            }
         }();
 
     match result {
@@ -508,7 +514,14 @@ pub fn firewhal_egress_tc(ctx: TcContext) -> i32 { // Change return type to incl
 }
 
 fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
-    let mut tuple = parse_packet_tuple(&ctx)?;
+    let mut tuple = match parse_packet_tuple(&ctx) {
+        Ok(t) => t,
+        Err(PacketParseError::Ipv6) => {
+            info!(&ctx, "[Kernel] [egress_tc] IPv6 packet blocked (policy: all IPv6 is blocked).");
+            return Ok(TC_ACT_SHOT);
+        }
+        Err(PacketParseError::Other) => return Ok(TC_ACT_OK),
+    };
     // Create debug printing fields
     let debug_saddr = Ipv4Addr::from(u32::from_be(tuple.saddr));
     let debug_daddr = Ipv4Addr::from(u32::from_be(tuple.daddr));

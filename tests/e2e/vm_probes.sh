@@ -80,5 +80,16 @@ check "app-block: untrusted python3 -> 10.0.2.2:443 denied at the app gate" \
 check "app-block: pending connection dropped (PID Denied)" \
     "$hay" "Pending Connection Blocked \(PID Denied\)"
 
+# --- P4 ipv6 block: guest IPv6 egress must be dropped at the TC layer.
+# The rig keeps IPv6 enabled on enp0s3 (slirp assigns a fec0::/64 + fe80
+# link-local), so ping6 to that connected subnet deterministically emits
+# IPv6 through the egress classifier; the neighbor never answers, so even the
+# neighbor solicitation is a v6 packet that must be (and is) dropped.
+off=$(wc -l < "$LOG")
+sudo timeout 5 ping6 -I "$IFACE" -c 1 -W 2 fec0::1 2>/dev/null || true
+sleep 2
+check "ipv6-block: guest IPv6 egress on $IFACE dropped at the TC layer" \
+    "$(newlog_since "$off")" "IPv6 packet blocked"
+
 say "results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

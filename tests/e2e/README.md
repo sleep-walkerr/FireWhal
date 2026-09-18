@@ -36,6 +36,7 @@ assertions:
 | allow | trusted `curl` (allowlisted, hash-verified) → `10.0.2.2:80` (rule allows TCP/80) | `Rule N ALLOWED connection to 10.0.2.2:80` |
 | rule block | trusted `curl` → `10.0.2.2:8080` (no rule matches) | `No rule matched. Blocking connection to 10.0.2.2:8080` |
 | app block | untrusted `python3` (not in allowlist) → `10.0.2.2:443` (port is allowed) | `Inserted trust for PID N: Deny` + `Pending Connection Blocked (PID Denied)` |
+| ipv6 block | `ping6` to the connected `fec0::/64` subnet (deterministic guest IPv6 egress) | `IPv6 packet blocked (policy: all IPv6 is blocked)` |
 
 Egress is forced onto the test NIC with `--interface` / `SO_BINDTODEVICE`
 (both slirp NICs share the guest IP). The allow probe exercises the full
