@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = { workspace = true, default-features = true }
 bincode = { workspace = true }
+hex = "0.4.3"
 serde = { workspace = true, features = ["derive"] }
+sha3 = "0.10.8"
 tokio = { workspace = true }
 zeromq = { workspace = true }

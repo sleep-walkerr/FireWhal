@@ -13,6 +13,33 @@ use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, SocketOptions, ZmqErr
 
 pub const DEFAULT_IPC_ENDPOINT: &str = "ipc:///tmp/firewhal_ipc.sock";
 
+/// Computes the SHA3-256 hash of the file at `path` (lowercase hex).
+/// Streams in 128 KiB chunks on a blocking thread so the async runtime is not stalled.
+/// Shared by the Daemon and the Kernel (userspace loader) so both hash identically.
+pub async fn calculate_file_hash(path: PathBuf) -> anyhow::Result<String> {
+    use anyhow::Context;
+
+    let hash_result = task::spawn_blocking(move || {
+        use sha3::Digest;
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to open file {:?}: {}", path, e))?;
+        let mut hasher = sha3::Sha3_256::new();
+        let mut buffer = [0u8; 1024 * 128];
+
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 { break; }
+            hasher.update(&buffer[..count]);
+        }
+
+        Ok::<String, anyhow::Error>(hex::encode(hasher.finalize()))
+    }).await;
+
+    hash_result.context("Hashing task panicked")?
+}
+
 //Test error implementation for Zero Message Queue related functionalities
 #[derive(Debug)]
 pub enum IpcError {

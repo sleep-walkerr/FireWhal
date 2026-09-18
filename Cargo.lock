@@ -836,8 +836,11 @@ checksum = "3a3076410a55c90011c298b04d0cfa770b00fa04e1e3c97d3f6c9de105a03844"
 name = "firewhal-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bincode",
+ "hex",
  "serde",
+ "sha3",
  "tokio",
  "zeromq",
 ]
@@ -851,11 +854,9 @@ dependencies = [
  "daemonize",
  "firewhal-core",
  "futures",
- "hex",
  "nix",
  "pnet",
  "serde",
- "sha3",
  "tokio",
  "toml",
  "zeromq",
@@ -912,10 +913,8 @@ dependencies = [
  "libc",
  "log",
  "network-interface",
- "nix",
  "plain",
  "pnet",
- "sha3",
  "simple-logging",
  "tokio",
  "zeromq",

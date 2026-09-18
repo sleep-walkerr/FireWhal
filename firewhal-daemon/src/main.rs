@@ -22,7 +22,6 @@ use serde::Deserialize;
 use toml;
 use pnet::{datalink};
 use anyhow::{bail, Context, Result};
-use sha3::{Digest, Sha3_256};
 
 // Standard library imports
 use std::collections::{HashMap, HashSet};
@@ -38,7 +37,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, ipc_client_connection};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, calculate_file_hash, ipc_client_connection};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -224,26 +223,7 @@ fn launch_process(
     }
 }
 
-// Calculates a files hash
-// Changed from external hashing application to solve for instability, requires daemon to be built in release mode
-async fn calculate_file_hash(path: PathBuf) -> Result<String, anyhow::Error> {
-    // No spawn, no fork, no crash.
-    let hash_result = task::spawn_blocking(move || {
-        let mut file = File::open(&path).context(format!("Failed to open file: {:?}", path))?;
-        let mut hasher = Sha3_256::new();
-        let mut buffer = [0; 1024 * 128]; 
 
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 { break; }
-            hasher.update(&buffer[..count]);
-        }
-        
-        Ok::<String, anyhow::Error>(hex::encode(hasher.finalize()))
-    }).await;
-
-    hash_result.context("Hashing task panicked")?
-}
 
 
 
