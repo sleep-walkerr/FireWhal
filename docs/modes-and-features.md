@@ -108,7 +108,7 @@ whichever is active when the mode changes, rather than branching on a flag.
 |---|---|---|
 | **Two-gate default-deny model** | eBPF + loader | App gate (process trust) and network gate (rules); deny at every layer. See [Overview](./overview.md). |
 | **Process lineage verification** | loader event loop | Walks up to 10 ancestors via `/proc/<pid>/exe` + `PPid`; each level is hash-checked, so a trusted interpreter does not auto-trust an arbitrary script. |
-| **SHA3-256 integrity checking** | `firewhal-hashing`, loader, daemon | Trust is `(path, hash)`; the running binary is re-hashed and compared. A tampered binary is a different hash → untrusted. |
+| **SHA3-256 integrity checking** | shared `firewhal_core` helper, loader, daemon | Trust is `(path, hash)`; the running binary is re-hashed in-process and compared. A tampered binary is a different hash → untrusted. |
 | **Stateful return traffic** | `CONNECTION_MAP` | An allowed egress tuple admits its reversed (return) traffic without re-checking. |
 | **Per-connection trust states** | `PENDING` / `TRUSTED` maps | Connections are promoted as they are verified; stale trust is pruned. |
 | **Socket-cookie trust (server)** | `TRUSTED_COOKIES` + `sock_ops` | An established server connection is trusted by cookie and fast-pathed. (Cleanup-on-close is a known gap — see [Data Paths](./data-paths.md#path-s4--server-fast-path-egress-tc-via-trusted_cookies--cleanup).) |

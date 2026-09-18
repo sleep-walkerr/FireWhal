@@ -15,7 +15,7 @@ Line numbers reference the files in-tree at the time of writing.
 | Document | What it covers |
 |---|---|
 | [Overview](./overview.md) | What FireWhal is, the problem it solves, the high-level architecture, and the security model. |
-| [Components](./components.md) | The nine crates, what each one does, how they relate to each other, the IPC topology, and the startup/shutdown sequence. |
+| [Components](./components.md) | The eight crates, what each one does, how they relate to each other, the IPC topology, and the startup/shutdown sequence. |
 | [Data Paths](./data-paths.md) | The eBPF programs and maps, then each client and server path — slow and fast — in step-by-step detail. |
 | [Modes & Features](./modes-and-features.md) | Strict and permissive modes, the permissive-mode workflow, and planned/future work (with ticket references). |
 
@@ -34,5 +34,4 @@ Line numbers reference the files in-tree at the time of writing.
 - `firewhal-ipc/` — the ZeroMQ ROUTER (message broker).
 - `firewhal-daemon/` — the supervisor / process manager / config authority.
 - `firewhal-tui/` — the terminal user interface.
-- `firewhal-hashing/` — standalone SHA3-256 file hasher.
 - `firewhal-discord-bot/` — Discord notification sink.

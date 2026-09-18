@@ -63,7 +63,7 @@ layer. Return traffic for an allowed connection is then permitted statefully.
 
 ## Components
 
-Nine crates in a cargo workspace (six runtime binaries, two shared libraries, one
+Eight crates in a cargo workspace (five runtime binaries, two shared libraries, one
 eBPF object):
 
 | Crate | Role |
@@ -73,7 +73,6 @@ eBPF object):
 | `firewhal-ipc` | ZeroMQ ROUTER — the message broker (drops to `nobody`). |
 | `firewhal-daemon` | Supervisor + config authority; starts and monitors everything. |
 | `firewhal-tui` | The terminal user interface. |
-| `firewhal-hashing` | Standalone SHA3-256 file hasher. |
 | `firewhal-discord-bot` | Discord notification sink. |
 | `firewhal-core` | Shared userspace types + the IPC message enum + the ZMQ client. |
 | `firewhal-kernel-common` | Shared `no_std` structs + packet parsers (kernel & userspace). |
@@ -136,7 +135,7 @@ mutagen sync create --name=firewhal-dir-syncing --sync-mode=one-way-replica \
 
 - [**Documentation index**](./docs/README.md)
 - [Overview](./docs/overview.md) — the problem, the security model, the architecture
-- [Components & Relationships](./docs/components.md) — the nine crates, the IPC routing table, startup/shutdown
+- [Components & Relationships](./docs/components.md) — the eight crates, the IPC routing table, startup/shutdown
 - [Data Paths](./docs/data-paths.md) — every client/server path (slow & fast), step by step
 - [Modes & Features](./docs/modes-and-features.md) — strict & permissive modes, permissive future work
 - [VM Enforcement Testing](./docs/vm-enforcement-testing.md) — findings from the end-to-end test in the `fw-test` KVM VM

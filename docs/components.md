@@ -1,10 +1,10 @@
 # Components & Relationships
 
-FireWhal is a cargo workspace of **nine crates**. Six of them produce runtime
+FireWhal is a cargo workspace of **eight crates**. Five of them produce runtime
 binaries; two are shared libraries; one compiles to an eBPF object. The runtime
 topology is a small client/server mesh over a single local ZeroMQ ROUTER socket.
 
-## The nine crates
+## The eight crates
 
 | Crate | Artifact | Role | Runs as | Privileges |
 |---|---|---|---|---|
@@ -15,7 +15,6 @@ topology is a small client/server mesh over a single local ZeroMQ ROUTER socket.
 | `firewhal-ipc` | `firewhal-ipc` binary ("**IPC**") | ZeroMQ **ROUTER** — the message broker. Binds the socket, routes messages by type, tracks registered clients, drops privileges. | `nobody` | drops to `nobody` after bind |
 | `firewhal-daemon` | `firewhal-daemon` binary ("**Daemon**") | Supervisor + **config authority**. Starts as root, launches the privileged children, drops to `nobody`, monitors/restarts children, owns the three TOML config files, and pushes config into the kernel. | `nobody` (root during startup) | root → `nobody` |
 | `firewhal-tui` | `firewhal-tui` binary ("**TUI**") | Terminal UI (ratatui). Seven screens for status, rules, apps, interfaces, permissive mode, and debug. The user-facing front end. | user | unprivileged |
-| `firewhal-hashing` | `firewhal-hashing` binary | Standalone SHA3-256 file hasher. Takes a path, streams the file, prints the hex digest. Invoked as a subprocess by the loader/daemon to hash binaries. | (child of caller) | caller-controlled |
 | `firewhal-discord-bot` | `firewhal-discord-bot` binary ("**DiscordBot**") | Discord notification sink. Receives block events over IPC and DMs the configured user via serenity. | `nobody` | unprivileged |
 
 > The eBPF object (`firewhal-kernel-ebpf`) is intentionally **not** a workspace
