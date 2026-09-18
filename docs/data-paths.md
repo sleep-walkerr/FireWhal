@@ -112,9 +112,9 @@ which call `app_tracking()`.
      `ProcessLineageTuple`, send `FireWhalMessage::PermissiveModeTuple` to the TUI,
      and decide **Allow** with a placeholder hash `"PERMISSIVE_ALLOW"`.
    - **Permissive OFF** → walk the lineage (root first); for each path in the
-     allowlist, hash the on-disk binary with `firewhal-hashing` and compare to the
-     stored hash. Path match + hash match → **Allow**; mismatch or no path match →
-     **Deny**.
+    allowlist, hash the on-disk binary (in-process) and compare to the
+    stored hash. Path match + hash match → **Allow**; mismatch or no path match →
+    **Deny**.
 4. Record the decision: `TRUSTED_PIDS[tgid] = PidTrustInfo{action, last_seen_ns: 0}`
    and insert into the userspace cache.
 

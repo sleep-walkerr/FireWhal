@@ -73,7 +73,7 @@ message routing table.
   process cannot connect to a non-allowlisted destination; unmatched traffic is
   dropped at the TC layer.
 - **Integrity via SHA3-256.** Trust is `(path, hash)`. The hash of the *running*
-  binary is recomputed (via the `firewhal-hashing` helper) and compared. Lineage
+  binary is recomputed in-process and compared. Lineage
   walking means a trusted interpreter does not automatically trust an arbitrary
   script it runs — each level is checked.
 - **Per-connection tracking.** Connections move through `PENDING → TRUSTED` state

@@ -4,7 +4,6 @@ members = [
     "firewhal-core",
     "firewhal-daemon",
     "firewhal-discord-bot",
-    "firewhal-hashing",
     "firewhal-ipc",
     "firewhal-kernel",
     "firewhal-kernel-common",
@@ -19,8 +18,7 @@ default-members = [
     "firewhal-ipc",
     "firewhal-kernel",
     "firewhal-kernel-common",
-    "firewhal-tui",
-    "firewhal-hashing"
+    "firewhal-tui"
     ]
 
 [workspace.package]

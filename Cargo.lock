@@ -874,13 +874,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firewhal-hashing"
-version = "0.1.0"
-dependencies = [
- "sha3",
-]
-
-[[package]]
 name = "firewhal-ipc"
 version = "0.1.0"
 dependencies = [
