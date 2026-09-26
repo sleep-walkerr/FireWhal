@@ -102,13 +102,15 @@ done
 say "SSH up after $((up * 15))s — waiting for full provisioning (runcmd)"
 
 done_flag=""
-for i in $(seq 1 96); do        # up to 24 min for apt + rustup
+for i in $(seq 1 180); do       # up to 45 min for apt + rustup (slow
+                                 # connections observed: 12 min on a good
+                                 # link, >24 min on a slow one)
     if sshcmd 'grep -q PROVISION_DONE /var/log/provision.log 2>/dev/null'; then
         done_flag=$i; break
     fi
     sleep 15
 done
-[ -n "$done_flag" ] || fail "PROVISION_DONE not seen within 24 min; last log lines: $(sshcmd 'tail -15 /var/log/provision.log' 2>/dev/null | tr '\n' ' ')"
+[ -n "$done_flag" ] || fail "PROVISION_DONE not seen within 45 min; last log lines: $(sshcmd 'tail -15 /var/log/provision.log' 2>/dev/null | tr '\n' ' ')"
 
 # ---- 4. verify the provisioning actually happened -------------------------
 say "verifying provisioning (markers + packages)"
