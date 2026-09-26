@@ -21,9 +21,11 @@ The rig directory defaults to `/home/torch/fw-vm`.
 | 3. deploy | guest | tarball → `/opt/firewhal/bin`; writes the three TOML configs there (the daemon reads from `bin/`, not `config/`); curl hash computed **in the guest** so it cannot go stale |
 | 4. ready | guest | 3 processes; all FireWhal BPF programs present — including **both TC `sched_cls` classifiers** (the original fail-open bug failed to load them) — and all three config pushes in the daemon log (guards the silent zero-rules start) |
 | 5. probes | guest | `ipc_smoke` router round-trip; then the three enforcement differentials |
+| 6. cleanup | host | power the VM off (state stays in the overlay; the next run recreates the overlay and boots in phase 1) |
 
-After a run the stack is left running on the VM; the next run tears down
-whatever it finds first (pidfile-lock friendly).
+After a run the VM is powered off. The next run always starts from a
+pristine overlay (phase 1). To inspect a run's state afterwards, boot it
+yourself first (`fw-vm boot`) — the next `run-e2e.sh` will wipe the overlay.
 
 ## The enforcement probes
 
