@@ -103,6 +103,12 @@ fw-test.pid / fw-test-serial.log / *.sock / console*.py   local runtime artifact
   sat at 0% CPU in `dpkg` configure for 30+ min). The seed sets the env
   var; keep it if you edit the apt line (any package with an interactive
   `.config` hangs the same way).
+- **`fw-vm stop` is a hard kill.** It SIGTERMs qemu without an ACPI
+  shutdown, so guest files still in the page cache (recent `/tmp` contents:
+  daemon logs, pcaps, shipped test scripts) do not reach the overlay and are
+  gone after the next boot (found 2026-09-26: a failed gate run's evidence
+  in guest `/tmp` was unrecoverable). To post-mortem a run, inspect while the
+  VM is still up, or add a graceful shutdown path to `fw-vm`.
 
 ## Usage
 
@@ -118,9 +124,10 @@ fw-vm stop           # stop
 - `enp0s2` (MAC `52:54:00:12:34:56`) — slirp mgmt NIC, hostfwd `2222→22`.
   Always up. **Not** the interface under test.
 - `enp0s3` (MAC `52:54:00:12:34:57`) — isolated slirp test NIC. The interface
-  FireWhal guards in tests. It has no reachable peers: enforcement outcomes
-  are asserted from the kernel's verdict log lines, not from traffic (see
-  `tests/e2e/README.md`).
+  FireWhal guards in tests. Phases 4–5 assert enforcement from the kernel's
+  verdict log lines; phase 6 (D1) asserts wire outcomes — guest→`10.0.2.2`
+  reaches the host loopback, so a host listener plus a guest `tcpdump`/
+  `tshark` capture measure delivery (see `tests/e2e/README.md`).
 
 ## Seed `user-data` gotchas (cloud-init 26.1)
 
