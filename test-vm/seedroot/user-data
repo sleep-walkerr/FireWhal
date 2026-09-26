@@ -25,7 +25,7 @@ write_files:
       ubuntu ALL=(ALL) NOPASSWD: ALL
 runcmd:
   - sh -c 'exec >> /var/log/provision.log 2>&1; echo "=== runcmd start ==="; echo "ubuntu:fwvm123" | chpasswd && echo PW_OK || echo PW_FAIL; growpart /dev/vda 1; resize2fs /dev/vda1; df -h / | tail -1; echo DISK_DONE'
-  - sh -c 'exec >> /var/log/provision.log 2>&1; apt-get update -qq; apt-get install -y -qq build-essential pkg-config libssl-dev curl wget iproute2 iptables libbpf-dev tcpdump tshark >/dev/null && echo APT_OK || echo APT_FAIL'
+  - sh -c 'exec >> /var/log/provision.log 2>&1; DEBIAN_FRONTEND=noninteractive apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libssl-dev curl wget iproute2 iptables libbpf-dev tcpdump tshark >/dev/null && echo APT_OK || echo APT_FAIL'
   - sh -c 'exec >> /var/log/provision.log 2>&1; curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh && sh /tmp/rustup-init.sh -y --profile minimal >/dev/null && echo RUST_OK || echo RUST_FAIL'
   - sh -c 'exec >> /var/log/provision.log 2>&1; groupadd -f firewhal-admin; mkdir -p /opt/firewhal/bin /opt/firewhal/config; echo FWDIR_OK'
   - sh -c 'exec >> /var/log/provision.log 2>&1; netplan apply && sleep 5 && ip -br addr && echo NET_OK || echo NET_FAIL'
