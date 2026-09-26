@@ -21,11 +21,12 @@ fw-test.pid / fw-test-serial.log / *.sock / console*.py   local runtime artifact
 - `qemu-system-x86_64` with `/dev/kvm` access (run as a normal user; no root)
 - `ssh-keygen` key at `~/.ssh/id_ed25519_fwvm` (the one referenced by `fw-vm ssh`)
 - `xorriso` to build the seed ISO
-- Rust: `stable` (host build) + a `nightly` toolchain (the eBPF crate is
-  built with `cargo +nightly -Z build-std=core`) + **`bpf-linker`** on PATH
+- Rust: `stable` (host build) + the dated `nightly` toolchain pinned in
+  `firewhal-kernel/build.rs` (the eBPF crate is built with
+  `cargo <pinned nightly> -Z build-std=core`) + **`bpf-linker`** on PATH
   (aya's BPF object linker, found via `which bpf-linker`)
 
-### The two toolchain gotchas (learned on the 2026-09-26 rebuild)
+### Toolchain gotchas (learned on the 2026-09-26 rebuild)
 
 1. **bpf-linker must match the system LLVM *and* be built with the matching
    `llvm-NN` feature.** The eBPF build emits LLVM bitcode whose major version
@@ -38,17 +39,22 @@ fw-test.pid / fw-test-serial.log / *.sock / console*.py   local runtime artifact
    cargo install bpf-linker --version 0.11.1 --no-default-features \
      --features llvm-22 --root $HOME/.local     # -> ~/.local/bin/bpf-linker
    ```
-2. **Pin `nightly` to a toolchain that emits the matching bitcode version.**
-   The build script calls plain `cargo +nightly`. After installing a dated
-   toolchain that works (e.g. `rustup toolchain install nightly-2026-07-15
-   --component rust-src`, which emits LLVM-22 bitcode on that host), make
-   `nightly` resolve to it:
+2. **The eBPF toolchain is pinned in-repo** (`firewhal-kernel/build.rs` uses
+   `aya_build::Toolchain::Custom("nightly-2026-07-15")`). The dated nightly
+   must simply be *installed* on the build host:
    ```
-   rustup toolchain uninstall nightly
-   ln -s ~/.rustup/toolchains/nightly-2026-07-15-x86_64-unknown-linux-gnu \
-         ~/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu
+   rustup toolchain install nightly-2026-07-15 --component rust-src
    ```
-   (`rustup toolchain link` rejects the reserved name `nightly`.)
+   (The pin is a date because the nightly's emitted LLVM bitcode version must
+   be readable by bpf-linker's libLLVM — see gotcha 1. Before this pin, the
+   workaround was symlinking `~/.rustup/.../nightly-*` over the `nightly`
+   name; that hack is no longer needed.)
+3. **When the distro ships a newer LLVM (e.g. 23 on rolling-release):**
+   `sudo pacman -Suu` → rebuild bpf-linker with the matching feature
+   (default `llvm-23`) → update the pin in `build.rs` to a dated nightly
+   whose bitcode the new libLLVM parses → re-run the e2e gate. As of
+   2026-09-26 the working pair on this host is LLVM 22 +
+   `nightly-2026-07-15` (newer nightlies emit LLVM-23 bitcode).
 
 ## Building the rig from scratch
 
