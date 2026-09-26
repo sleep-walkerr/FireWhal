@@ -15,7 +15,10 @@ classifiers, all three config pushes) plus the enforcement differentials
 (allow / rule-block / app-block / ipv6-block, asserted from kernel verdict
 log lines). See
 `tests/e2e/README.md` for the probe table and `test-vm/README.md` for rig
-setup. The findings below document what the first manual runs found and what
+setup. A report-only dependency-freshness preflight (`tests/e2e/dep_freshness.py`)
+runs before phase 1: it compares the locked core crate set against crates.io
+and prints drift — warning-level only, it never fails the gate (ticket #106).
+The findings below document what the first manual runs found and what
 each probe guards against.
 
 ## Findings (first manual run, 2026-09-18)
