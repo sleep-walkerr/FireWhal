@@ -27,6 +27,10 @@ LOG=/tmp/firewhal-daemon.err
 IFACE=enp0s3
 PEER=10.0.2.2
 PORT=9999
+# block leg: no rule matches :8080 (and nothing listens there on the host)
+if [ "$LEG" = block ]; then
+    PORT=8080
+fi
 MARK="FW-D1-$(printf '%s' "$LEG" | tr a-z A-Z)"
 CAP=/tmp/d1-${LEG}.pcap
 PASS=0
@@ -44,19 +48,47 @@ check() { # $1=name  $2=haystack  $3=ERE pattern
     fi
 }
 frames() { # $1=dst port -> TCP frames to that port in the capture
-    sudo tshark -r "$CAP" -Y "tcp and tcp.dstport==$1" 2>/dev/null | wc -l
+    local n
+    n=$(sudo tshark -r "$CAP" -Y "tcp and tcp.dstport==$1" 2>/dev/null | wc -l)
+    if [ "$n" -eq 0 ]; then
+        say "diag: 0 frames for dst port $1" >&2
+        say "diag: $(ls -la "$CAP" 2>&1 | tail -1)" >&2
+        if [ -s "${CAP}.err" ]; then
+            say "diag: tcpdump stderr:" >&2
+            sed 's/^/diag: | /' "${CAP}.err" >&2
+        fi
+        if sudo pgrep -a tcpdump >/dev/null 2>&1; then
+            say "diag: a tcpdump process is still running (stray): $(sudo pgrep -a tcpdump | tr '\n' ' ')" >&2
+        fi
+    fi
+    echo "$n"
 }
 start_capture() {
-    rm -f "$CAP"
-    sudo tcpdump -i "$IFACE" -w "$CAP" >/dev/null 2>&1 &
+    # sudo rm: the previous leg's capture is tcpdump-owned in the sticky
+    # /tmp, a plain rm -f gets "Operation not permitted"
+    sudo rm -f "$CAP" "${CAP}.err"
+    sudo tcpdump -i "$IFACE" -w "$CAP" 2>"$CAP.err" &
     TCPPID=$!
-    sleep 1
+    # Wait for the real "listening on" line, not a fixed sleep: under load
+    # (right after a redeploy) startup can exceed 1 s and the fixed sleep
+    # raced the probe, whose whole exchange is <100 ms.
+    local _i
+    for _i in $(seq 1 25); do
+        if grep -q "listening on" "$CAP.err" 2>/dev/null; then return 0; fi
+        sleep 0.2
+    done
+    say "FAIL: tcpdump did not reach 'listening on' within 5s (see ${CAP}.err)"
+    return 0
 }
 stop_capture() {
     sleep 1
     kill "$TCPPID" 2>/dev/null
     wait "$TCPPID" 2>/dev/null
-    [ -s "$CAP" ] || { say "FAIL: capture file missing/empty (tcpdump did not run)"; FAIL=$((FAIL + 1)); }
+    if [ ! -s "$CAP" ]; then
+        say "FAIL: capture file missing/empty (tcpdump did not run)"
+        sed 's/^/        | /' "$CAP.err" 2>/dev/null || true
+        FAIL=$((FAIL + 1))
+    fi
 }
 
 # ---------- leg: baseline (stack down; the raw path must deliver) ----------
