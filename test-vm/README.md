@@ -96,6 +96,13 @@ fw-test.pid / fw-test-serial.log / *.sock / console*.py   local runtime artifact
 - Keep `noble.img` pristine: it is the provisioner's base, and any cloud-init
   state baked into it contaminates the next rebuild. Re-download the cloud
   image (and verify it) before rebuilding if the base is in doubt.
+- **Apt in runcmd must be non-interactive.** `tshark` (via
+  `wireshark-common`) asks a debconf question at install time; without
+  `DEBIAN_FRONTEND=noninteractive` the apt item blocks forever waiting on a
+  terminal that does not exist (stalled a rebuild on 2026-09-26 — the item
+  sat at 0% CPU in `dpkg` configure for 30+ min). The seed sets the env
+  var; keep it if you edit the apt line (any package with an interactive
+  `.config` hangs the same way).
 
 ## Usage
 
