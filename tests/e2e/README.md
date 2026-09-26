@@ -16,6 +16,7 @@ The rig directory defaults to `/home/torch/fw-vm`.
 
 | Phase | Where | What |
 |---|---|---|
+| preflight | host | dependency freshness: Cargo.lock core set vs latest stable on crates.io (report-only, never fails the gate — #106) |
 | 1. rig | host | VM reachable, or recreate the overlay from the golden image and boot (waits up to 180 s for SSH) |
 | 2. build | host | `cargo build --release` + the `ipc_smoke` sample |
 | 3. deploy | guest | tarball → `/opt/firewhal/bin`; writes the three TOML configs there (the daemon reads from `bin/`, not `config/`); curl hash computed **in the guest** so it cannot go stale |
@@ -47,7 +48,8 @@ network gate (rule match).
 
 ## Files
 
-- `run-e2e.sh` — host-side orchestrator (phases 1–3, then runs the guest scripts)
+- `run-e2e.sh` — host-side orchestrator (preflight + phases 1–3, then runs the guest scripts)
+- `dep_freshness.py` — preflight: core-set drift report (Cargo.lock vs crates.io, ticket #106)
 - `vm_deploy.sh` — guest-side: teardown, install, config generation, launch, readiness wait
 - `vm_probes.sh` — guest-side: the checks above; exits non-zero on any failure
 

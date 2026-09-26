@@ -6,6 +6,8 @@
 #                 (default: /home/torch/fw-vm; see test-vm/README.md)
 #
 # Phases:
+#   preflight  dependency freshness: Cargo.lock core set vs crates.io
+#              (report-only; never fails the gate — ticket #106)
 #   1. rig      VM reachable — if it is down, recreate the overlay and boot
 #   2. build    cargo build --release + the ipc_smoke sample (host)
 #   3. deploy   tarball -> guest /opt/firewhal/bin, generated test config
@@ -33,6 +35,12 @@ say() { printf '[e2e] %s\n' "$*"; }
 die() { say "FATAL: $*"; exit 1; }
 
 [ -x "$FW_VM" ] || die "fw-vm not found at $FW_VM (set FW_VM_DIR to your rig directory)"
+
+# ---------- preflight: dependency freshness (host, report-only) ----------
+say "preflight: dependency freshness (report-only, never fails the gate)"
+if ! python3 "$E2E_DIR/dep_freshness.py" "$REPO_ROOT/Cargo.lock"; then
+    say "warning: dep-freshness check errored (continuing; it is report-only)"
+fi
 
 # ---------- 1. rig ----------
 if "$FW_VM" ssh true 2>/dev/null; then
