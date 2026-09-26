@@ -24,6 +24,7 @@ Line numbers reference the files in-tree at the time of writing.
 | Document | What it covers |
 |---|---|
 | [VM Enforcement Testing](./vm-enforcement-testing.md) | Findings from the end-to-end enforcement test in the disposable `fw-test` KVM VM. |
+| [Comprehensive Test Design](./comprehensive-test-design.md) | The design of the full test mechanism on top of the e2e gate (ticket #106): wire-level measurement, data-level / SSH-block / collateral phases, CI. |
 
 ## Where things live
 
