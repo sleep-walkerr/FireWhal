@@ -1,7 +1,7 @@
 use aya::{
-    Ebpf, include_bytes_aligned, maps::{Array as AyaArray, AsyncPerfEventArray, HashMap as AyaHashMap, MapData, perf::AsyncPerfEventArrayBuffer
+    Ebpf, include_bytes_aligned, maps::{Array as AyaArray, HashMap as AyaHashMap, MapData, perf::{PerfEvent, PerfEventArray}
     }, programs::{
-            CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, XdpFlags, tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}, SockOps}, util::online_cpus
+            CgroupAttachMode, CgroupSockAddr, SchedClassifier, TcAttachType, Xdp, tc::SchedClassifierLinkId, xdp::{XdpLink, XdpLinkId}, SockOps}, util::online_cpus
 };
 use anyhow::{bail, Context, Result};
 use aya_log::EbpfLogger;
@@ -16,14 +16,15 @@ use std::{
     io::{self, BufRead, BufReader, Read}, 
     mem::{self, MaybeUninit}, 
     net::{IpAddr, Ipv4Addr}, 
+    os::fd::AsRawFd,
     path::{Path, PathBuf}, 
     sync::{atomic::{AtomicBool, Ordering}, Arc}, 
     thread::yield_now, 
     time::Duration,
 };
 
-use bytes::BytesMut;
 use tokio::{
+    io::unix::AsyncFd,
     signal,
     sync::{broadcast, mpsc, Mutex},
     task::{self}, time::{self, timeout},
@@ -211,19 +212,27 @@ async fn attach_cgroup_programs(bpf: Arc<tokio::sync::Mutex<Ebpf>>, cgroup_file:
     // CGROUP
     info!("[Kernel] Applying CGROUP programs...");
     let egress_connect4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_connect4").unwrap().try_into().unwrap();
-    let _ = egress_connect4_program.load();
+    if let Err(e) = egress_connect4_program.load() {
+        warn!("[Kernel] Failed to load egress_connect4 program: {}", e);
+    }
     _ = egress_connect4_program.attach(&cgroup_file, CgroupAttachMode::Single);
     //
     let firewhal_egress_sendmsg4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_sendmsg4").unwrap().try_into().unwrap();
-    let _ = firewhal_egress_sendmsg4_program.load();
+    if let Err(e) = firewhal_egress_sendmsg4_program.load() {
+        warn!("[Kernel] Failed to load egress_sendmsg4 program: {}", e);
+    }
     _ = firewhal_egress_sendmsg4_program.attach(&cgroup_file, CgroupAttachMode::Single);
     //
     let firewhal_egress_bind4_program: &mut CgroupSockAddr = bpf.program_mut("firewhal_egress_bind4").unwrap().try_into().unwrap();
-    let _ = firewhal_egress_bind4_program.load();
+    if let Err(e) = firewhal_egress_bind4_program.load() {
+        warn!("[Kernel] Failed to load egress_bind4 program: {}", e);
+    }
     _ = firewhal_egress_bind4_program.attach(&cgroup_file, CgroupAttachMode::Single);
 
     let firewhal_sock_ops: &mut SockOps = bpf.program_mut("firewhal_sock_ops").unwrap().try_into()?;
-    let _ = firewhal_sock_ops.load();
+    if let Err(e) = firewhal_sock_ops.load() {
+        warn!("[Kernel] Failed to load sock_ops program: {}", e);
+    }
     _ = firewhal_sock_ops.attach(&cgroup_file, CgroupAttachMode::default())?;
     
     info!("[Kernel] CGROUP programs applied.");
@@ -594,8 +603,30 @@ async fn main() -> Result<(), anyhow::Error> {
     
     
 
-    // Initialize event logger
-    if let Err(e) = EbpfLogger::init(&mut bpf) { warn!("[Kernel] Failed to initialize eBPF logger: {}", e); }
+    // Initialize event logger.
+    // The logger owns the AYA_LOGS map (aya-log takes it out of the object),
+    // so it must stay alive for the whole process. Dropping it closes the
+    // map's fd, which aya 0.14's lazy program loading still needs: the map
+    // fd is baked into program instructions at Ebpf::load time and the kernel
+    // validates it at BPF_PROG_LOAD time.
+    //
+    // aya-log 0.3 is pull-based (0.2's init spawned its own per-CPU reader
+    // task), so drain the ring on an interval — this is what delivers the
+    // aya_log_ebpf verdict lines to the log crate.
+    match EbpfLogger::init(&mut bpf) {
+        Ok(logger) => {
+            tokio::spawn(async move {
+                let mut logger = logger;
+                loop {
+                    logger.flush();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            });
+        }
+        Err(e) => {
+            warn!("[Kernel] Failed to initialize eBPF logger: {}", e);
+        }
+    }
 
     // 2. Take ownership of the EVENTS map and move it to the event handler task.
     let events_map = bpf.take_map("EVENTS").ok_or_else(|| anyhow::anyhow!("Failed to find EVENTS map"))?;
@@ -639,12 +670,15 @@ async fn main() -> Result<(), anyhow::Error> {
 
     tokio::spawn(async move {
         info!("[Events] Started listening for block events from the kernel.");
-        let mut perf_array = AsyncPerfEventArray::try_from(events_map)?;
-        
-        
+        let mut perf_array = PerfEventArray::try_from(events_map)?;
 
         for cpu_id in online_cpus().unwrap() {
             let mut buf = perf_array.open(cpu_id, None).unwrap();
+            // aya 0.14 perf buffers are synchronous; bridge readiness into
+            // tokio with an AsyncFd on the buffer's fd (events themselves are
+            // read from the mmap'd ring buffer, never via the fd).
+            let ready = AsyncFd::new(buf.as_raw_fd())
+                .with_context(|| format!("wrapping perf buffer {cpu_id} in AsyncFd"))?;
             let task_zmq_tx = zmq_tx_clone.clone();
             // Clone the Arc for each inner task
             let trusted_pids_for_task = Arc::clone(&trusted_pids_shared);
@@ -653,250 +687,269 @@ async fn main() -> Result<(), anyhow::Error> {
             let trusted_connections_for_task = Arc::clone(&trusted_connections_shared);
             let permissive_mode_for_task = Arc::clone(&permissive_mode_for_cpu);
             let cache_for_task = Arc::clone(&active_process_cache_for_event_processing);
-            
 
             tokio::spawn(async move {
-                let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
                 loop {
-                    let events = buf.read_events(&mut buffers).await.unwrap();
-                    for i in 0..events.read {
-                        if let Ok(kernel_event) = read_from_buffer::<KernelEvent>(&buffers[i]) {
-                            
-                            let pid = kernel_event.tgid;
+                    // Wait until the kernel has queued an event on this CPU.
+                    let mut guard = ready.readable().await.unwrap();
+                    buf.for_each(|event| match event {
+                        PerfEvent::Lost { count } => {
+                            warn!("[Events] Lost {count} kernel event(s) on CPU {cpu_id} (perf ring overflow).");
+                        }
+                        PerfEvent::Sample { head, tail } => {
+                            // A sample straddling the ring boundary arrives as two slices.
+                            let mut sample = Vec::with_capacity(head.len() + tail.len());
+                            sample.extend_from_slice(head);
+                            sample.extend_from_slice(tail);
+                            if let Ok(kernel_event) = read_from_buffer::<KernelEvent>(&sample) {
+                                // for_each's closure is synchronous but event handling
+                                // is async — hand each event its own task.
+                                let task_zmq_tx = task_zmq_tx.clone();
+                                let trusted_pids_for_task = Arc::clone(&trusted_pids_for_task);
+                                let app_ids_for_task = Arc::clone(&app_ids_for_task);
+                                let pending_connections_for_task = Arc::clone(&pending_connections_for_task);
+                                let trusted_connections_for_task = Arc::clone(&trusted_connections_for_task);
+                                let permissive_mode_for_task = Arc::clone(&permissive_mode_for_task);
+                                let cache_for_task = Arc::clone(&cache_for_task);
+                                tokio::spawn(async move {
+                                    let pid = kernel_event.tgid;
 
-                            // --- 1. Top-Level Cache Check (This is the only one we need) ---
-                            { // Scoped lock
-                                let cache_guard = cache_for_task.lock().await;
-                                if cache_guard.contains_key(&pid) {
-                                    // info!("[Events] CACHE_HIT: TGID {} already processed.", pid);
-                                    continue; // Skip to the next event
-                                }
-                            } // Lock released
-                            info!("[Events] CACHE_MISS: New TGID {} detected. Verifying...", pid);
-
-                            // --- 2. Gather Process Info (This is now only run on a cache miss) ---
-                            let (comm_slice, comm_str) = {
-                                let null_pos = kernel_event.comm.iter().position(|&c| c == 0).unwrap_or(kernel_event.comm.len());
-                                let slice = &kernel_event.comm[0..null_pos];
-                                (slice, String::from_utf8_lossy(slice))
-                            };
-
-                            let mut lineage_info = Vec::new();
-                            let mut lineage_paths = Vec::<PathBuf>::new();
-                            let mut current_pid = pid;
-                            let mut visited_pids = HashSet::new();
-
-                            for _ in 0..10 { 
-                                if current_pid == 0 || current_pid == 1 || visited_pids.contains(&current_pid) {
-                                    break;
-                                }
-                                visited_pids.insert(current_pid);
-
-                                if let Some((ppid, proc_name, full_exe_path)) = get_process_info(current_pid) {
-                                    let display_name = if !full_exe_path.is_empty() {
-                                        full_exe_path
-                                    } else {
-                                        proc_name
-                                    };
-                                    lineage_paths.push(display_name.clone().into());
-                                    lineage_info.push(format!("{} (PID: {})", display_name, current_pid));
-                                    current_pid = ppid;
-                                } else {
-                                    lineage_info.push(format!("Unknown Process (PID: {})", current_pid));
-                                    break;
-                                }
-                            }
-
-                            lineage_info.reverse();
-                            let lineage_string = if lineage_info.is_empty() {
-                                format!("No lineage info for PID {}", pid)
-                            } else {
-                                lineage_info.join(" -> ")
-                            };
-
-                            // --- 3. Match on Event Type (Now that we have all info) ---
-                            match kernel_event.event_type {
-                                EventType::ConnectionAttempt => {
-                                    let connection_key: ConnectionKey = unsafe { kernel_event.payload.connection_attempt.key };
-                                    
-                                    info!(
-                                        "[Events] CONN_ATTEMPT: PID={}, TGID={}, Comm={}, Src={}:{}, Dest={}:{}, Proto={:?} \n  Process Lineage: {}",
-                                        kernel_event.pid,
-                                        kernel_event.tgid,
-                                        comm_str,
-                                        Ipv4Addr::from(u32::from_le(connection_key.saddr)), // Use from_le for logging
-                                        u16::from_le(connection_key.sport),             // Use from_le for logging
-                                        Ipv4Addr::from(u32::from_le(connection_key.daddr)), // Use from_le for logging
-                                        u16::from_le(connection_key.dport),             // Use from_le for logging
-                                        connection_key.protocol,
-                                        lineage_string
-                                    );
-                                    
-                                    // --- THE REDUNDANT CACHE CHECK HAS BEEN REMOVED FROM HERE ---
-
-                                    // --- Check Permissive Mode Flag ---
-                                    let permissive_flag = match get_permissive_mode_value(Arc::clone(&permissive_mode_for_task)).await {
-                                        Ok(flag) => flag,
-                                        Err(e) => {
-                                            warn!("[Events] Failed to get permissive mode flag: {}. Defaulting to OFF.", e);
-                                            0
+                                    // --- 1. Top-Level Cache Check (This is the only one we need) ---
+                                    { // Scoped lock
+                                        let cache_guard = cache_for_task.lock().await;
+                                        if cache_guard.contains_key(&pid) {
+                                            // info!("[Events] CACHE_HIT: TGID {} already processed.", pid);
+                                            return; // Skip the rest of the processing for this event
                                         }
+                                    } // Lock released
+                                    info!("[Events] CACHE_MISS: New TGID {} detected. Verifying...", pid);
+
+                                    // --- 2. Gather Process Info (This is now only run on a cache miss) ---
+                                    let (comm_slice, comm_str) = {
+                                        let null_pos = kernel_event.comm.iter().position(|&c| c == 0).unwrap_or(kernel_event.comm.len());
+                                        let slice = &kernel_event.comm[0..null_pos];
+                                        (slice, String::from_utf8_lossy(slice))
                                     };
 
-                                    // --- 4. Make Decision (Permissive or Strict) ---
-                                    let (decision, proc_info) = if permissive_flag == 1 {
-                                        // --- 4a. PERMISSIVE MODE IS ON ---
-                                        info!("[Events] PERMISSIVE_MODE: Allowing new TGID {}", pid);
-                                        lineage_paths.reverse();
-                                        let mut permissive_app_ids_defined = Vec::<(String, String)>::new();
-                                        let mut final_path = PathBuf::new();
+                                    let mut lineage_info = Vec::new();
+                                    let mut lineage_paths = Vec::<PathBuf>::new();
+                                    let mut current_pid = pid;
+                                    let mut visited_pids = HashSet::new();
 
-                                        for app_path in &lineage_paths {
-                                            if let Ok(current_hash) = calculate_file_hash(app_path.clone()).await {
-                                                permissive_app_ids_defined.push((
-                                                    app_path.to_string_lossy().into_owned(),
-                                                    current_hash.clone()
-                                                ));
-                                                if final_path.as_os_str().is_empty() {
-                                                    final_path = app_path.clone();
+                                    for _ in 0..10 { 
+                                        if current_pid == 0 || current_pid == 1 || visited_pids.contains(&current_pid) {
+                                            break;
+                                        }
+                                        visited_pids.insert(current_pid);
+
+                                        if let Some((ppid, proc_name, full_exe_path)) = get_process_info(current_pid) {
+                                            let display_name = if !full_exe_path.is_empty() {
+                                                full_exe_path
+                                            } else {
+                                                proc_name
+                                            };
+                                            lineage_paths.push(display_name.clone().into());
+                                            lineage_info.push(format!("{} (PID: {})", display_name, current_pid));
+                                            current_pid = ppid;
+                                        } else {
+                                            lineage_info.push(format!("Unknown Process (PID: {})", current_pid));
+                                            break;
+                                        }
+                                    }
+
+                                    lineage_info.reverse();
+                                    let lineage_string = if lineage_info.is_empty() {
+                                        format!("No lineage info for PID {}", pid)
+                                    } else {
+                                        lineage_info.join(" -> ")
+                                    };
+
+                                    // --- 3. Match on Event Type (Now that we have all info) ---
+                                    match kernel_event.event_type {
+                                        EventType::ConnectionAttempt => {
+                                            let connection_key: ConnectionKey = unsafe { kernel_event.payload.connection_attempt.key };
+                                    
+                                            info!(
+                                                "[Events] CONN_ATTEMPT: PID={}, TGID={}, Comm={}, Src={}:{}, Dest={}:{}, Proto={:?} \n  Process Lineage: {}",
+                                                kernel_event.pid,
+                                                kernel_event.tgid,
+                                                comm_str,
+                                                Ipv4Addr::from(u32::from_le(connection_key.saddr)), // Use from_le for logging
+                                                u16::from_le(connection_key.sport),             // Use from_le for logging
+                                                Ipv4Addr::from(u32::from_le(connection_key.daddr)), // Use from_le for logging
+                                                u16::from_le(connection_key.dport),             // Use from_le for logging
+                                                connection_key.protocol,
+                                                lineage_string
+                                            );
+                                    
+                                            // --- THE REDUNDANT CACHE CHECK HAS BEEN REMOVED FROM HERE ---
+
+                                            // --- Check Permissive Mode Flag ---
+                                            let permissive_flag = match get_permissive_mode_value(Arc::clone(&permissive_mode_for_task)).await {
+                                                Ok(flag) => flag,
+                                                Err(e) => {
+                                                    warn!("[Events] Failed to get permissive mode flag: {}. Defaulting to OFF.", e);
+                                                    0
                                                 }
-                                            }
-                                        }
-                                        
-                                        let path_tuple_to_send = ProcessLineageTuple {
-                                            component: "Firewall".to_string(),
-                                            lineage_tuple: permissive_app_ids_defined,
-                                        };
-                                        if let Err(e) = task_zmq_tx.send(FireWhalMessage::PermissiveModeTuple(path_tuple_to_send)).await {
-                                            warn!("[Events] Failed to send permissive mode tuple: {}", e);
-                                        }
+                                            };
 
-                                        (Action::Allow, ProcessInfo {
-                                            path: final_path,
-                                            hash: "PERMISSIVE_ALLOW".to_string(),
-                                            action: firewhal_core::Action::Allow,
-                                        })
-                                    } else {
-                                        // --- 4b. PERMISSIVE MODE IS OFF ---
-                                        info!("[Events] Verifying TGID {} against allowlist...", pid);
-                                        lineage_paths.reverse(); 
-                                        
-                                        let mut decision = Action::Deny;
-                                        let mut matched_path = PathBuf::new();
-                                        let mut matched_hash = String::new();
+                                            // --- 4. Make Decision (Permissive or Strict) ---
+                                            let (decision, proc_info) = if permissive_flag == 1 {
+                                                // --- 4a. PERMISSIVE MODE IS ON ---
+                                                info!("[Events] PERMISSIVE_MODE: Allowing new TGID {}", pid);
+                                                lineage_paths.reverse();
+                                                let mut permissive_app_ids_defined = Vec::<(String, String)>::new();
+                                                let mut final_path = PathBuf::new();
 
-                                        
-                                        for app_path in &lineage_paths {
-                                            let expected_hash = {
-                                                let app_ids_guard = app_ids_for_task.lock().await;
-                                                app_ids_guard.get(app_path).cloned() // Clone the hash string
-                                            }; // 2. Lock is immediately released here
-
-                                            // 3. Now we check the hash
-                                            if let Some(expected_hash) = expected_hash {
-                                                // Path is in the allowlist. Now check the hash.
-                                                info!("[Verify] Path match for TGID {}: {}. Checking hash.", pid, app_path.display());
-                                                
-                                                match calculate_file_hash(app_path.clone()).await {
-                                                    Ok(actual_hash) => {
-                                                        if expected_hash == actual_hash {
-                                                            info!("[Verify] Hash MATCH for {}. Allowing.", app_path.display());
-                                                            decision = Action::Allow;
-                                                            matched_path = app_path.clone();
-                                                            matched_hash = actual_hash;
-                                                        } else {
-                                                            info!("[Verify] HASH MISMATCH for {}. Blocking.", app_path.display());
-                                                            decision = Action::Deny;
+                                                for app_path in &lineage_paths {
+                                                    if let Ok(current_hash) = calculate_file_hash(app_path.clone()).await {
+                                                        permissive_app_ids_defined.push((
+                                                            app_path.to_string_lossy().into_owned(),
+                                                            current_hash.clone()
+                                                        ));
+                                                        if final_path.as_os_str().is_empty() {
+                                                            final_path = app_path.clone();
                                                         }
                                                     }
-                                                    Err(e) => {
-                                                        info!("[Verify] Failed to hash {}: {}. Blocking.", app_path.display(), e);
-                                                        decision = Action::Deny;
+                                                }
+                                        
+                                                let path_tuple_to_send = ProcessLineageTuple {
+                                                    component: "Firewall".to_string(),
+                                                    lineage_tuple: permissive_app_ids_defined,
+                                                };
+                                                if let Err(e) = task_zmq_tx.send(FireWhalMessage::PermissiveModeTuple(path_tuple_to_send)).await {
+                                                    warn!("[Events] Failed to send permissive mode tuple: {}", e);
+                                                }
+
+                                                (Action::Allow, ProcessInfo {
+                                                    path: final_path,
+                                                    hash: "PERMISSIVE_ALLOW".to_string(),
+                                                    action: firewhal_core::Action::Allow,
+                                                })
+                                            } else {
+                                                // --- 4b. PERMISSIVE MODE IS OFF ---
+                                                info!("[Events] Verifying TGID {} against allowlist...", pid);
+                                                lineage_paths.reverse(); 
+                                        
+                                                let mut decision = Action::Deny;
+                                                let mut matched_path = PathBuf::new();
+                                                let mut matched_hash = String::new();
+
+                                        
+                                                for app_path in &lineage_paths {
+                                                    let expected_hash = {
+                                                        let app_ids_guard = app_ids_for_task.lock().await;
+                                                        app_ids_guard.get(app_path).cloned() // Clone the hash string
+                                                    }; // 2. Lock is immediately released here
+
+                                                    // 3. Now we check the hash
+                                                    if let Some(expected_hash) = expected_hash {
+                                                        // Path is in the allowlist. Now check the hash.
+                                                        info!("[Verify] Path match for TGID {}: {}. Checking hash.", pid, app_path.display());
+                                                
+                                                        match calculate_file_hash(app_path.clone()).await {
+                                                            Ok(actual_hash) => {
+                                                                if expected_hash == actual_hash {
+                                                                    info!("[Verify] Hash MATCH for {}. Allowing.", app_path.display());
+                                                                    decision = Action::Allow;
+                                                                    matched_path = app_path.clone();
+                                                                    matched_hash = actual_hash;
+                                                                } else {
+                                                                    info!("[Verify] HASH MISMATCH for {}. Blocking.", app_path.display());
+                                                                    decision = Action::Deny;
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                info!("[Verify] Failed to hash {}: {}. Blocking.", app_path.display(), e);
+                                                                decision = Action::Deny;
+                                                            }
+                                                        }
+                                                        break; 
                                                     }
                                                 }
-                                                break; 
+                                        
+                                                let core_action = match decision {
+                                                    Action::Allow => firewhal_core::Action::Allow,
+                                                    Action::Deny => firewhal_core::Action::Deny,
+                                                };
+
+                                                (decision, ProcessInfo {
+                                                    path: matched_path,
+                                                    hash: matched_hash,
+                                                    action: core_action
+                                                })
+                                            };
+
+                                            // --- 5. Update Caches and Kernel Maps ---
+                                            let trust_info = PidTrustInfo {
+                                                action: decision,
+                                                last_seen_ns: 0,
+                                            };
+                                    
+                                            { // Scoped block for locks
+                                                let mut cache_guard = cache_for_task.lock().await;
+                                                let mut trusted_pids_guard = trusted_pids_for_task.lock().await;
+
+                                                cache_guard.insert(pid, proc_info);
+                                        
+                                                if let Err(e) = trusted_pids_guard.insert(&pid, trust_info, 0) {
+                                                    warn!("[Kernel] Failed to insert trust for PID {}: {}", pid, e);
+                                                } else {
+                                                    info!("[Kernel] Inserted trust for PID {}: {:?}", pid, trust_info.action);
+                                                }
+                                            }
+
+                                            // if decision == Action::Allow {
+                                            //     let mut trusted_connections = trusted_connections_for_task.lock().await;
+                                            //     let mut pending_connections = pending_connections_for_task.lock().await;
+                                            //     let _ = trusted_connections.insert(&connection_key, pid, 0);
+                                            //     let _ = pending_connections.remove(&connection_key);
+                                            // }
+                                        }
+                                        EventType::BlockEvent => {
+                                            let payload = unsafe { kernel_event.payload.block_event };
+                                            let connection_key = payload.key;
+                                            let formatted_event = format!(
+                                                "BLOCKED: Reason={:?}, PID={}, TGID={}, Comm={}, Dest={}:{}, Proto={:?} \n  Process Lineage: {}",
+                                                payload.reason,
+                                                kernel_event.pid,
+                                                kernel_event.tgid,
+                                                comm_str,
+                                                Ipv4Addr::from(u32::from_be(connection_key.daddr)),
+                                                connection_key.dport,
+                                                connection_key.protocol,
+                                                lineage_string
+                                            );
+                                            info!("[Events] {}", formatted_event);
+                                    
+                                            // Send event to ZMQ
+                                            let debug_message = DebugMessage {
+                                                source: "Firewall".to_string(),
+                                                content: formatted_event.clone(),
+                                            };
+                                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::Debug(debug_message)).await {
+                                                warn!("[Events] Failed to send block event: {}", e);
+                                            }
+
+                                            let discord_block_message = DiscordBlockNotification {
+                                                component: "Firewall".to_string(),
+                                                content: formatted_event.clone(),
+                                            };
+                                            if let Err(e) = task_zmq_tx.send(FireWhalMessage::DiscordBlockNotify(discord_block_message)).await {
+                                                warn!("[Events] Failed to send block event to Discord: {}", e);
                                             }
                                         }
-                                        
-                                        let core_action = match decision {
-                                            Action::Allow => firewhal_core::Action::Allow,
-                                            Action::Deny => firewhal_core::Action::Deny,
-                                        };
-
-                                        (decision, ProcessInfo {
-                                            path: matched_path,
-                                            hash: matched_hash,
-                                            action: core_action
-                                        })
-                                    };
-
-                                    // --- 5. Update Caches and Kernel Maps ---
-                                    let trust_info = PidTrustInfo {
-                                        action: decision,
-                                        last_seen_ns: 0,
-                                    };
-                                    
-                                    { // Scoped block for locks
-                                        let mut cache_guard = cache_for_task.lock().await;
-                                        let mut trusted_pids_guard = trusted_pids_for_task.lock().await;
-
-                                        cache_guard.insert(pid, proc_info);
-                                        
-                                        if let Err(e) = trusted_pids_guard.insert(&pid, trust_info, 0) {
-                                            warn!("[Kernel] Failed to insert trust for PID {}: {}", pid, e);
-                                        } else {
-                                            info!("[Kernel] Inserted trust for PID {}: {:?}", pid, trust_info.action);
+                                        EventType::DebugMessage => {
+                                            let debug_content_bytes = &kernel_event.comm;
+                                            let debug_content_str = String::from_utf8_lossy(debug_content_bytes);
+                                            info!("[Events] EBPF_DEBUG: PID={}, TGID={}, Msg={}", kernel_event.pid, kernel_event.tgid, debug_content_str);
                                         }
                                     }
-
-                                    // if decision == Action::Allow {
-                                    //     let mut trusted_connections = trusted_connections_for_task.lock().await;
-                                    //     let mut pending_connections = pending_connections_for_task.lock().await;
-                                    //     let _ = trusted_connections.insert(&connection_key, pid, 0);
-                                    //     let _ = pending_connections.remove(&connection_key);
-                                    // }
-                                }
-                                EventType::BlockEvent => {
-                                    let payload = unsafe { kernel_event.payload.block_event };
-                                    let connection_key = payload.key;
-                                    let formatted_event = format!(
-                                        "BLOCKED: Reason={:?}, PID={}, TGID={}, Comm={}, Dest={}:{}, Proto={:?} \n  Process Lineage: {}",
-                                        payload.reason,
-                                        kernel_event.pid,
-                                        kernel_event.tgid,
-                                        comm_str,
-                                        Ipv4Addr::from(u32::from_be(connection_key.daddr)),
-                                        connection_key.dport,
-                                        connection_key.protocol,
-                                        lineage_string
-                                    );
-                                    info!("[Events] {}", formatted_event);
-                                    
-                                    // Send event to ZMQ
-                                    let debug_message = DebugMessage {
-                                        source: "Firewall".to_string(),
-                                        content: formatted_event.clone(),
-                                    };
-                                    if let Err(e) = task_zmq_tx.send(FireWhalMessage::Debug(debug_message)).await {
-                                        warn!("[Events] Failed to send block event: {}", e);
-                                    }
-
-                                    let discord_block_message = DiscordBlockNotification {
-                                        component: "Firewall".to_string(),
-                                        content: formatted_event.clone(),
-                                    };
-                                    if let Err(e) = task_zmq_tx.send(FireWhalMessage::DiscordBlockNotify(discord_block_message)).await {
-                                        warn!("[Events] Failed to send block event to Discord: {}", e);
-                                    }
-                                }
-                                EventType::DebugMessage => {
-                                    let debug_content_bytes = &kernel_event.comm;
-                                    let debug_content_str = String::from_utf8_lossy(debug_content_bytes);
-                                    info!("[Events] EBPF_DEBUG: PID={}, TGID={}, Msg={}", kernel_event.pid, kernel_event.tgid, debug_content_str);
-                                }
+                                });
                             }
                         }
-                    }
+                    });
+                    guard.clear_ready();
                 }
             });
         }

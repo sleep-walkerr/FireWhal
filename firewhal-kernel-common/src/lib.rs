@@ -9,7 +9,7 @@ use network_types::eth::{self, EthHdr, EtherType};
 use network_types::ip::{IpProto, Ipv4Hdr};
 use network_types::tcp::TcpHdr;
 use network_types::udp::UdpHdr;
-use network_types::icmp::IcmpHdr;
+use network_types::icmp::Icmpv4Hdr;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -95,16 +95,16 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, PacketPars
     let daddr_net = u32::from_le_bytes(ipv4_hdr.dst_addr);
 
     let (sport, dport) = match ipv4_hdr.proto {
-        IpProto::Tcp => {
+        proto if proto == IpProto::Tcp.into() => {
             let tcp_hdr: TcpHdr = ctx.load(l4_hdr_offset).map_err(|_| PacketParseError::Other)?; // Use dynamic offset
             (u16::from_be_bytes(tcp_hdr.source), u16::from_be_bytes(tcp_hdr.dest))
         }
-        IpProto::Udp => {
+        proto if proto == IpProto::Udp.into() => {
             let udp_hdr: UdpHdr = ctx.load(l4_hdr_offset).map_err(|_| PacketParseError::Other)?; // Use dynamic offset
             (u16::from_be_bytes(udp_hdr.src), u16::from_be_bytes(udp_hdr.dst))
         }
-        IpProto::Icmp => {
-            let icmp_hdr: IcmpHdr = ctx.load(l4_hdr_offset).map_err(|_| PacketParseError::Other)?;
+        proto if proto == IpProto::Icmp.into() => {
+            let icmp_hdr: Icmpv4Hdr = ctx.load(l4_hdr_offset).map_err(|_| PacketParseError::Other)?;
             // For ICMP, we can use type and code as pseudo-ports for more specific tracking.
             (icmp_hdr.type_.into(), icmp_hdr.code.into())
         }
@@ -119,7 +119,7 @@ pub fn parse_packet_tuple(ctx: &TcContext) -> Result<ConnectionTuple, PacketPars
         daddr: daddr_net,     // u32 in network byte order
         sport: sport,     // u16 in network byte order
         dport: dport,     // u16 in network byte order
-        protocol: ipv4_hdr.proto as u8,
+        protocol: ipv4_hdr.proto,
         _pad: [0; 3],
     })
 }
@@ -146,7 +146,7 @@ pub fn parse_tcp_header(ctx: &TcContext) -> Result<TcpHdr, ()> {
     let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
     let l4_hdr_offset = EthHdr::LEN + Ipv4Hdr::LEN;
 
-    if ipv4_hdr.proto == IpProto::Tcp {
+    if ipv4_hdr.proto == IpProto::Tcp.into() {
         let tcp_hdr: TcpHdr = ctx.load(l4_hdr_offset).map_err(|_| ())?; // Use dynamic offset
 
         // Get Ports this way: (u16::from_be_bytes(tcp_hdr.source), u16::from_be_bytes(tcp_hdr.dest))

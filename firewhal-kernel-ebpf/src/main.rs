@@ -651,7 +651,7 @@ fn try_firewhal_egress_tc(ctx: TcContext) -> Result<i32, ()> {
                                     // Delete entry from PENDING_LISTENING_PORTS
                                     unsafe { PENDING_LISTENING_PORTS.remove(&u32::from(reversed_tuple.dport)) }.map_err(|_| ())?;
                                     // Add entry to TRUSTED_LISTENING_PORTS
-                                    unsafe { TRUSTED_LISTENING_PORTS.insert(&u32::from(reversed_tuple.dport), &tgid, 0) }.map_err(|_| ())?;
+                                    unsafe { TRUSTED_LISTENING_PORTS.insert(&u32::from(reversed_tuple.dport), tgid, 0) }.map_err(|_| ())?;
                                     return Ok(TC_ACT_OK); // Explicitly allow the SYN-ACK
                                 } else if pid_info.action == Action::Deny {
                                     // Delete entry from PENDING_LISTENING_PORTS
