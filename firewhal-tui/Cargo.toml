@@ -7,7 +7,7 @@ edition = "2021"
 firewhal-core = { path = "../firewhal-core" } # Depends on the shared library
 color-eyre = "0.6.4"
 crossterm = "0.29.0"
-ratatui = "0.29.0"
+ratatui = "0.30.2"
 zeromq = { workspace = true }
 tokio = { workspace=true }
 

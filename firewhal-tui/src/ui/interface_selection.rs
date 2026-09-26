@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use color_eyre::owo_colors::OwoColorize;
-use ratatui::{prelude::*, widgets::*, widgets::block::Title};
+use ratatui::{prelude::*, widgets::*};
 use crossterm::event::KeyCode;
 use tokio::sync::mpsc;
 use firewhal_core::{FireWhalMessage, UpdateInterfaces};
@@ -126,19 +126,19 @@ pub fn handle_key_event(key_code: KeyCode, app: &mut App) {
 }
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
-    // Create a Title with its own style, independent of the border
-    let title = Title::from(Line::from(vec![
+    // Create a styled title, independent of the border
+    let title = Line::from(vec![
         Span::styled(" Select Interfaces", Style::default().fg(Color::LightCyan)),
         Span::raw(" ("),
         Span::styled("Space", Style::default().fg(Color::Rgb(255, 165, 0))),
         Span::raw(" to toggle, "),
         Span::styled("Enter", Style::default().fg(Color::Rgb(255, 165, 0))),
         Span::raw(" to apply) "),
-    ]));  // Set the default style for unstyled parts
+    ]);  // Set the default style for unstyled parts
 
     let outer_block = Block::default()
         .borders(Borders::ALL)
-        .title(title) // Pass the explicitly styled Title
+        .title(title)
         // Style the border to be blue
         .border_style(Style::default().fg(Color::Blue));
     let inner_area = outer_block.inner(area);
