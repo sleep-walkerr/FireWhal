@@ -21,6 +21,26 @@ and prints drift — warning-level only, it never fails the gate (ticket #106).
 The findings below document what the first manual runs found and what
 each probe guards against.
 
+## D1 data-level phase (gate phase 6, since 2026-09-26)
+
+Phase 6 is the first **wire-outcome** phase (ticket #106, design doc
+`docs/comprehensive-test-design.md` §2.1). The host runs a listener on
+`127.0.0.1:9999` (slirp maps guest `10.0.2.2` to the host loopback); the
+guest captures `enp0s3` with `tcpdump`/`tshark` per leg. Three legs in one
+run, so a broken allow path and a broken block path are told apart:
+
+1. **baseline** — stack down (the phase tears it down and verifies no
+   residual FireWhal BPF). `curl` POST → `10.0.2.2:9999` must deliver the
+   payload to the listener, and probe frames must appear on the wire. If
+   this leg fails, the network path itself is broken — not the firewall.
+2. **allow** — full redeploy (the generated config includes an allow rule
+   for `:9999`). Payload arrives, frames present, verdict
+   `Rule N ALLOWED connection to 10.0.2.2:9999`.
+3. **block** — `curl` → `10.0.2.2:8080` (no rule matches). Connect fails and
+   **no** probe frames appear on the wire — cut at the boundary, not lost
+   downstream — with verdict `No rule matched. Blocking connection to
+   10.0.2.2:8080`.
+
 ## Findings (first manual run, 2026-09-18)
 
 ## Rig layout
@@ -131,6 +151,9 @@ no raw sockets needed).
       e2e rig's readiness phase.
 - [x] Wire the procedure into a permanent, repo-integrated test rig —
       `tests/e2e/` + `test-vm/` (one command: `tests/e2e/run-e2e.sh`).
-- [ ] Design the comprehensive test mechanism: data-level transfer probes,
-      mgmt-NIC isolation, resilience (kill/re-attach), baseline-vs-enforced,
-      and a KVM-capable CI runner (tracked in its own ticket).
+- [x] Design the comprehensive test mechanism (ticket #106; design doc
+      `docs/comprehensive-test-design.md`); D1 data-level phase landed as
+      gate phase 6 on 2026-09-26.
+- [ ] Remaining #106 sequence: S1 SSH-block + mgmt-NIC collateral guard,
+      C1 config-path fail-loud, R resilience (ticket #114), CI on a KVM
+      runner. Host-side TAP/netns wire visibility: ticket #115.

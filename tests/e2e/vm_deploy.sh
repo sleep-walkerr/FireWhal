@@ -68,6 +68,12 @@ action = "Allow"
 protocol = "Tcp"
 dest_port = 80
 description = "e2e: allow probe (HTTP)"
+
+[[outgoing_rules]]
+action = "Allow"
+protocol = "Tcp"
+dest_port = 9999
+description = "e2e: data-level probe (D1; host listener on 127.0.0.1:9999)"
 EOF
 
 sudo chmod 755 /opt/firewhal/bin/*
