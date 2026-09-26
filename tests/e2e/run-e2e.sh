@@ -14,9 +14,10 @@
 #               classifiers (the fail-open regression guard), and all three
 #               config pushes in the daemon log (no silent zero-rules start)
 #   5. probes   ipc_smoke router round-trip + allow / rule-block / app-block
+#   6. cleanup  power the VM off (state stays in the overlay; the next run
+#               recreates the overlay and boots from scratch in phase 1)
 #
-# After a run the VM is left running with the stack up; the next run tears
-# down whatever it finds. Exit code: 0 iff every check passed.
+# Exit code: 0 iff every check passed.
 
 set -euo pipefail
 
@@ -35,12 +36,12 @@ die() { say "FATAL: $*"; exit 1; }
 
 # ---------- 1. rig ----------
 if "$FW_VM" ssh true 2>/dev/null; then
-    say "phase 1/5 rig: VM reachable"
+    say "phase 1/6 rig: VM reachable"
 else
     if [ -f "$FW_VM_DIR/fw-test.pid" ] && kill -0 "$(cat "$FW_VM_DIR/fw-test.pid")" 2>/dev/null; then
         die "VM process is alive but SSH is unreachable — stop the VM, check $FW_VM_DIR/fw-test-serial.log, retry"
     fi
-    say "phase 1/5 rig: VM down — recreating overlay and booting"
+    say "phase 1/6 rig: VM down — recreating overlay and booting"
     "$FW_VM" reset
     "$FW_VM" boot
     up=""
@@ -53,7 +54,7 @@ else
 fi
 
 # ---------- 2. build ----------
-say "phase 2/5 build: cargo build --release"
+say "phase 2/6 build: cargo build --release"
 (cd "$REPO_ROOT" && cargo build --release 2>&1 | tail -n 1)
 (cd "$REPO_ROOT" && cargo build --release --example ipc_smoke -p firewhal-core 2>&1 | tail -n 1)
 
@@ -66,22 +67,29 @@ tar -czf "$STAGE/deploy.tar.gz" -C "$STAGE" bin
 say "packaged: $(ls "$STAGE/bin" | tr '\n' ' ')"
 
 # ---------- 3. deploy ----------
-say "phase 3/5 deploy: shipping tarball + guest scripts"
+say "phase 3/6 deploy: shipping tarball + guest scripts"
 "$FW_VM" ssh 'cat > /tmp/fw-e2e-deploy.tar.gz' < "$STAGE/deploy.tar.gz"
 "$FW_VM" ssh 'cat > /tmp/fw-e2e-vm_deploy.sh' < "$E2E_DIR/vm_deploy.sh"
 "$FW_VM" ssh 'cat > /tmp/fw-e2e-vm_probes.sh' < "$E2E_DIR/vm_probes.sh"
 "$FW_VM" ssh 'bash /tmp/fw-e2e-vm_deploy.sh'
 
 # ---------- 4+5. ready + probes (inside the guest) ----------
-say "phase 4/5 ready + phase 5/5 probes: running in guest"
+say "phase 4/6 ready + phase 5/6 probes: running in guest"
 set +e
 "$FW_VM" ssh 'bash /tmp/fw-e2e-vm_probes.sh'
 rc=$?
 set -e
 
+# ---------- 6. cleanup: power the VM off ----------
+say "phase 6/6 cleanup: shutting the VM down"
+if ! "$FW_VM" stop >/dev/null 2>&1; then
+    say "warning: VM did not stop (check $FW_VM_DIR/fw-test.pid)"
+fi
+
 if [ "$rc" -eq 0 ]; then
-    say "RESULT: ALL CHECKS PASSED — stack left running on the VM"
+    say "RESULT: ALL CHECKS PASSED — VM shut down"
 else
-    say "RESULT: FAILURES (see output above); stack left running for inspection"
+    say "RESULT: FAILURES (see output above); VM shut down"
+    say "to inspect the failed state: $FW_VM boot  (next run recreates the overlay)"
 fi
 exit "$rc"
