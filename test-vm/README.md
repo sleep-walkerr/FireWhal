@@ -67,25 +67,35 @@ fw-test.pid / fw-test-serial.log / *.sock / console*.py   local runtime artifact
    The stock image is ~3.5G; provisioning (apt + rustup) needs the headroom or
    the guest fails with "No space left on device". The guest grows its root
    partition automatically on first boot.
-2. Build the seed ISO from the committed seed:
+2. Build the seed ISO and provision a fresh golden in one step:
    ```
-   xorriso -as mkisofs -V cidata -o seed.iso seedroot
+   test-vm/rebuild-golden.sh
    ```
-3. First boot: `fw-vm reset && fw-vm boot`. The seed's `user-data`
-   provisions the guest (toolchain, sudoers for `ubuntu`, the `firewhal-admin`
-   group, `/opt/firewhal`, netplan for the test NIC). Watch
-   `fw-test-serial.log` for `=== PROVISION_DONE ===` in `/var/log/provision.log`.
-4. Once provisioned, stop the VM and promote the overlay to the golden image.
-   Do **not** convert directly onto `golden.qcow2` — the overlay's backing file
-   *is* `golden.qcow2`, so qemu refuses with "Failed to get write lock":
-   ```
-   qemu-img convert -f qcow2 -O qcow2 run.qcow2 golden-new.qcow2
-   mv golden-new.qcow2 golden.qcow2
-   ```
-   (The existing `golden.qcow2` in the rig directory was produced this way;
-   keep it as the pristine provisioned state — never modify it in place.)
-5. From then on every run is: `fw-vm reset && fw-vm boot` → fresh overlay,
+   The script stages a copy of `seedroot/` with a **unique instance-id**
+   (so cloud-init always treats the boot as a clean seed), builds the seed
+   ISO, boots a throwaway overlay over `noble.img`, waits for **full**
+   provisioning, and verifies it — all `runcmd` markers present, packages
+   actually installed, promoted image size sane — *before* promoting to
+   `golden.qcow2`. On any failure it refuses to promote and leaves the VM +
+   overlay in place for inspection. Provisioning takes ~12 min (apt +
+   rustup); the whole run ~20 min.
+3. From then on every run is: `fw-vm reset && fw-vm boot` → fresh overlay,
    same provisioned state, zero drift between runs.
+
+### Rebuild gotchas (learned the hard way, 2026-09-26)
+
+- **Never promote on a single log marker.** A base image or overlay can
+  carry cloud-init instance state from an earlier boot; with a *known*
+  instance-id, cloud-init skips the once-per-instance modules and `runcmd`,
+  so provisioning silently never runs — and a naive "wait for
+  PROVISION_DONE" check can match a stale line in `/var/log/provision.log`
+  and promote an unprovisioned image (this destroyed a good golden on
+  2026-09-26: 1.9 GB instead of ~3 GB, no SSH). `rebuild-golden.sh`
+  therefore (a) uses a unique instance-id per rebuild and (b) verifies the
+  full marker set + installed packages before touching `golden.qcow2`.
+- Keep `noble.img` pristine: it is the provisioner's base, and any cloud-init
+  state baked into it contaminates the next rebuild. Re-download the cloud
+  image (and verify it) before rebuilding if the base is in doubt.
 
 ## Usage
 
