@@ -25,21 +25,21 @@ each probe guards against.
 
 Phase 6 is the first **wire-outcome** phase (ticket #106, design doc
 `docs/comprehensive-test-design.md` §2.1). The host runs a listener on
-`127.0.0.1:9999` (slirp maps guest `10.0.2.2` to the host loopback); the
+`127.0.0.1:9999` (slirp maps guest `10.0.3.2` to the host loopback); the
 guest captures `enp0s3` with `tcpdump`/`tshark` per leg. Three legs in one
 run, so a broken allow path and a broken block path are told apart:
 
 1. **baseline** — stack down (the phase tears it down and verifies no
-   residual FireWhal BPF). `curl` POST → `10.0.2.2:9999` must deliver the
+   residual FireWhal BPF). `curl` POST → `10.0.3.2:9999` must deliver the
    payload to the listener, and probe frames must appear on the wire. If
    this leg fails, the network path itself is broken — not the firewall.
 2. **allow** — full redeploy (the generated config includes an allow rule
    for `:9999`). Payload arrives, frames present, verdict
-   `Rule N ALLOWED connection to 10.0.2.2:9999`.
-3. **block** — `curl` → `10.0.2.2:8080` (no rule matches). Connect fails and
+   `Rule N ALLOWED connection to 10.0.3.2:9999`.
+3. **block** — `curl` → `10.0.3.2:8080` (no rule matches). Connect fails and
    **no** probe frames appear on the wire — cut at the boundary, not lost
    downstream — with verdict `No rule matched. Blocking connection to
-   10.0.2.2:8080`.
+   10.0.3.2:8080`.
 
 ## Findings (first manual run, 2026-09-18)
 
@@ -48,10 +48,17 @@ run, so a broken allow path and a broken block path are told apart:
 - Raw qemu (no libvirt), manager script `fw-vm {reset|boot|stop|ssh}`.
 - Disk chain: `noble.img` (pristine) -> `golden.qcow2` (provisioned state) ->
   `run.qcow2` (throwaway overlay; `fw-vm reset` recreates it).
-- Networking: `enp0s2` = slirp mgmt NIC (SSH hostfwd `127.0.0.1:2222`);
-  `enp0s3` = isolated slirp test NIC (the interface under test).
-- Both slirp NICs get the same guest IP (10.0.2.15); force egress through the
-  test NIC with `SO_BINDTODEVICE`.
+- Networking: `enp0s2` = slirp mgmt NIC (`10.0.2.0/24`, SSH hostfwd
+  `127.0.0.1:2222`); `enp0s3` = isolated slirp test NIC in its own subnet
+  (`10.0.3.0/24`; gateway `10.0.3.2`) — the interface under test. The own
+  subnet is deliberate: sharing `10.0.2.0/24` makes both slirp instances
+  present the same gateway `10.0.2.2`, and the guest's FIB then routes
+  replies to `10.0.2.2` via whichever interface won the boot-order tie —
+  the other slirp RSTs them (a per-boot coin flip that silently kills one
+  path).
+- Probes still pin egress to the test NIC with `SO_BINDTODEVICE`
+  (`--interface enp0s3`), so the enforced path is exercised regardless of
+  routing.
 - Deploy: `cargo build --release` on the host, tarball into
   `/opt/firewhal/{bin,config}` in the guest.
 

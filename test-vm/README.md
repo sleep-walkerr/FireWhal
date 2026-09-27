@@ -123,11 +123,17 @@ fw-vm stop           # stop
 
 - `enp0s2` (MAC `52:54:00:12:34:56`) — slirp mgmt NIC, hostfwd `2222→22`.
   Always up. **Not** the interface under test.
-- `enp0s3` (MAC `52:54:00:12:34:57`) — isolated slirp test NIC. The interface
-  FireWhal guards in tests. Phases 4–5 assert enforcement from the kernel's
-  verdict log lines; phase 6 (D1) asserts wire outcomes — guest→`10.0.2.2`
-  reaches the host loopback, so a host listener plus a guest `tcpdump`/
-  `tshark` capture measure delivery (see `tests/e2e/README.md`).
+- `enp0s3` (MAC `52:54:00:12:34:57`) — isolated slirp test NIC in its own
+  subnet (`10.0.3.0/24`; guest `10.0.3.15`, gateway `10.0.3.2`). The
+  interface FireWhal guards in tests. Its own subnet (not `10.0.2.0/24`
+  again) is deliberate: sharing a subnet with the mgmt slirp makes both
+  instances present the same gateway `10.0.2.2`, and the guest's FIB then
+  routes replies via whichever interface won the boot-order tie — the other
+  slirp RSTs them (a per-boot coin flip that silently kills one path).
+  Phases 4–5 assert enforcement from the kernel's verdict log lines; phase 6
+  (D1) asserts wire outcomes — guest→`10.0.3.2` reaches the host loopback,
+  so a host listener plus a guest `tcpdump`/`tshark` capture measure
+  delivery (see `tests/e2e/README.md`).
 
 ## Seed `user-data` gotchas (cloud-init 26.1)
 

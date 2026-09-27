@@ -45,11 +45,11 @@ the golden image rebuild.
 
 ### 2.1 Phase D1 — data-level enforcement (baseline → allow → block, one run)
 
-**Peer:** the host, over slirp. The guest reaches the host at `10.0.2.2`
-(slirp routes guest→`10.0.2.2` to host loopback; no rig change needed). The
+**Peer:** the host, over slirp. The guest reaches the host at `10.0.3.2`
+(slirp routes guest→`10.0.3.2` to host loopback; no rig change needed). The
 host runs a small listener (`nc` or a python socket) on `127.0.0.1:PORT`;
 the guest probe opens TCP through the enforced interface and sends a known
-byte string. (The existing allow probe already curls `10.0.2.2:80` — nothing
+byte string. (The existing allow probe already curls `10.0.3.2:80` — nothing
 was listening; D1 adds the listener and the wire assertions.)
 
 **One run, three legs** — this also settles the ticket's "baseline vs
@@ -153,7 +153,7 @@ fallback is the ticket's "or documented manual runner" branch — status quo.
 1. ✅ Wire tools in seed + seed pipefail fix (PR #116) + golden rebuild
 2. ✅ Dependency-freshness preflight in the gate (PR #117)
 3. ✅ This design doc
-4. D1 data-level — first run the ~5-minute check that guest→`10.0.2.2`
+4. D1 data-level — first run the ~5-minute check that guest→`10.0.3.2`
    delivery actually works on this rig; it decides listener placement
 5. S1 + M1 — needs the `2223` hostfwd rig change (`fw-vm`)
 6. C1 — needs the daemon-fail-loudly decision (daemon-side PR if we do the
@@ -164,7 +164,7 @@ fallback is the ticket's "or documented manual runner" branch — status quo.
 
 ## 5. Open items (honest remainder)
 
-- **D1 direction:** guest→host (`10.0.2.2`) is the default; if the delivery
+- **D1 direction:** guest→host (`10.0.3.2`) is the default; if the delivery
   check shows it flaky on this rig, flip to host→guest (needs the hostfwd).
 - **C1 scope:** guard-only test now vs. daemon-side fail-loudly fix — decide
   at implementation time (the guard test lands either way).
@@ -182,7 +182,7 @@ them.
 | # | Question | Decision |
 |---|---|---|
 | 1 | Wire-monitor placement | guest-side `tcpdump`/`tshark` on the enforced interface; host-side via TAP+netns later (#115) |
-| 2 | Data-level peer | the host, over slirp (`10.0.2.2` / hostfwd) — no second VM |
+| 2 | Data-level peer | the host, over slirp (`10.0.3.2` / hostfwd) — no second VM |
 | 3 | Baseline vs enforced | one run, three legs: baseline → allow → block |
 | 4 | SSH blocking | deliberate feature test: self-expiry + slirp OOB + wire-verified; "mgmt isolation" = the collateral guard, not a prohibition |
 | 5 | Config path | daemon must fail loudly on misconfig — never a silent zero-rules start |
