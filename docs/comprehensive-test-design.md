@@ -75,9 +75,10 @@ Mechanism (the hard part: if the block works, we cannot reach the VM to
 remove the rule):
 
 1. **Create** a block rule: enp0s2 (mgmt path), tcp/22.
-2. **Self-expiry:** at creation, the harness installs a VM-local one-shot
-   (systemd timer) that removes the rule after N seconds via the normal IPC
-   path — independent of SSH state. The VM owns its own unlock.
+2. **Self-expiry:** at creation, the harness installs a VM-local self-expiry
+   (implemented as a detached guest process — see the inversion note below
+   for why not a systemd timer) that removes the rule after N seconds via the
+   normal IPC path — independent of SSH state. The VM owns its own unlock.
 3. **Probe:** from the host, loop `ssh -o ConnectTimeout=3` to the mgmt IP
    during the window; expect 100% failure. Wire-verified: no SSH frames on
    enp0s2 during the window (tshark).
@@ -90,10 +91,43 @@ remove the rule):
    failed attempts, rule-down, SSH-OK, verdict). After the window, the gate
    reconnects and asserts the record.
 
-**Safety:** the only path to losing SSH is the *passing* path, and the timer
-restores it. If the block regresses (no cut), SSH stays up and the harness
-cleans up normally and fails the run — the test can never lock us out of
-itself.
+**Safety:** the only path to losing SSH is the *passing* path, and the
+self-expiry restores it. If the block regresses (no cut), SSH stays up and
+the harness cleans up normally and fails the run — the test can never lock
+us out of itself.
+
+**Inversion for this rig (as implemented, 2026-09-27).** FireWhal enforces
+only on `enforced_interfaces` (enp0s3 here), so step 1's "enp0s2 (mgmt
+path)" would be a no-op — there are no hooks on the mgmt NIC. The implemented
+phase therefore blocks incoming `tcp/22` on the *enforced* path (enp0s3,
+i.e. the 2223 hostfwd) — proving the firewall *can* cut SSH when told to —
+while the unenforced mgmt path (2222) stays up; that is exactly the M1
+collateral guard (§2.3) asserted live in the same window, and 2222 doubles
+as the OOB backstop (step 4), since the gate drives every guest step over
+it. The wire assertion is direction-specific: the ingress AF_PACKET tap sits
+**upstream** of the TC ingress drop on this rig, so blocked SYNs are visible
+in the guest capture; the ingress oracle is "the guest never replies" (no
+frame with the ACK flag), while the egress oracle stays "frame absent" (D1).
+The self-expiry is a VM-local sleeper — a detached `setsid` guest process
+that sleeps out the window (default 120 s, `FW_S1_WINDOW` overridable) and
+then restores the config and restarts the stack as root; the mechanism is
+"config swap + restart" (the same path the deploy uses) rather than a live
+IPC rule push, since the TUI's IPC push has no headless CLI. It is
+deliberately **not** a systemd timer/service: this guest's systemd
+(255.4-1ubuntu8.17) rejects `KillMode=main` (the parse error is logged and
+the value silently dropped — reproduced with `systemd-analyze verify` on the
+intact unit), so a one-shot service under the default `control-group` kill
+mode SIGTERMs the daemon the unlock just restarted the moment the unit
+completes (first full gate run: the stack was dead for the whole verify
+window, and the "recovered" port was fail-open, not rule-restored). A
+detached guest process sidesteps the kill-mode and timer-repetition
+semantics entirely, and ssh-spawned process survival is proven in this rig
+(the deploy daemon and the per-leg captures outlive their ssh sessions).
+The self-expiry does not survive a guest reboot — same as the (never-
+enabled) timer would have been; the block is fail-closed on the throwaway
+overlay by design. Landed as gate phase 7; runbook + first-run findings
+(incl. guest real-time delays running +6..+43 s late under NTP slewing) in
+`docs/vm-enforcement-testing.md`.
 
 ### 2.3 Phase M1 — mgmt collateral guard
 
@@ -155,7 +189,8 @@ fallback is the ticket's "or documented manual runner" branch — status quo.
 3. ✅ This design doc
 4. D1 data-level — first run the ~5-minute check that guest→`10.0.3.2`
    delivery actually works on this rig; it decides listener placement
-5. S1 + M1 — needs the `2223` hostfwd rig change (`fw-vm`)
+5. ✅ S1 + M1 — gate phase 7 (2026-09-27; the `2223` hostfwd rig change
+   landed in the same arc, §2.2 documents the inversion)
 6. C1 — needs the daemon-fail-loudly decision (daemon-side PR if we do the
    fix, not just the guard test)
 7. R — after #114 (gated)
@@ -168,7 +203,9 @@ fallback is the ticket's "or documented manual runner" branch — status quo.
   check shows it flaky on this rig, flip to host→guest (needs the hostfwd).
 - **C1 scope:** guard-only test now vs. daemon-side fail-loudly fix — decide
   at implementation time (the guard test lands either way).
-- **S1 window:** default 120 s, overridable by env in the probe.
+- **S1 window:** resolved — default 120 s, overridable by env
+  (`FW_S1_WINDOW`); the gate uses the default (the observed guest real-time
+  delay lag is absorbed by the recovery deadline).
 
 ## 6. Verdict-line and probe catalog
 
