@@ -12,7 +12,24 @@
 # Networking:
 #   mgmt  52:54:00:12:34:56  slirp + hostfwd 127.0.0.1:2222->22 (this interface
 #         is NOT what FireWhal guards; keep it alive no matter what)
-#   test0 52:54:00:12:34:57  slirp, isolated; the interface under test
+#   test0 52:54:00:12:34:57  slirp in its OWN subnet (10.0.3.0/24; guest
+#         10.0.3.15, gateway 10.0.3.2); the interface under test. Separate
+#         subnet on purpose: with both slirp instances on 10.0.2.0/24 they
+#         share the gateway IP 10.0.2.2, and the guest's FIB routes replies
+#         to 10.0.2.2 via whichever interface won the boot-order tie — the
+#         other slirp then RSTs those replies (coin flip per boot). Own
+#         subnets make both paths deterministically routable.
+#         hostfwds: tcp:127.0.0.1:2223-:22 (S1 OOB/target path, see
+#         docs/comprehensive-test-design.md §2.2) and
+#         tcp:127.0.0.1:9999-:9999 (D1 data-level probe peer, see
+#         tests/e2e/vm_data_probe.sh). Note: the D1 byte-level leg wants its
+#         host listener on 127.0.0.1:9999 — the SAME port as this hostfwd.
+#         slirp's hostfwd socket sets only SO_REUSEADDR, and modern kernels
+#         require SO_REUSEPORT on BOTH sockets for co-listeners, so on such
+#         kernels the listener cannot bind and run-e2e.sh skips the
+#         byte-level leg (the wire-level D1 checks still run).
+#   Note (QEMU >= 9 option-list parsing): multiple hostfwds need a repeated
+#   `hostfwd=` prefix per entry; plain comma-joining is rejected.
 
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,7 +65,7 @@ case "${1:-}" in
       -cdrom "$D/seed.iso" \
       -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 \
       -device virtio-net-pci,netdev=n0,mac="$MAC_MGMT" \
-      -netdev user,id=n1 \
+      -netdev user,id=n1,net=10.0.3.0/24,hostfwd=tcp:127.0.0.1:2223-:22,hostfwd=tcp:127.0.0.1:9999-:9999 \
       -device virtio-net-pci,netdev=n1,mac="$MAC_TEST" \
       -serial file:"$SERIAL" \
       -daemonize -pidfile "$PIDF"

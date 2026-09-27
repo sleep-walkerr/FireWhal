@@ -48,34 +48,45 @@ say "phase: enforcement"
 
 # --- P1 allow: trusted curl (in the allowlist) -> allowed port :80
 off=$(wc -l < "$LOG")
-curl --interface "$IFACE" --max-time 5 -s -o /dev/null http://10.0.2.2:80 || true
+curl --interface "$IFACE" --max-time 5 -s -o /dev/null http://10.0.3.2:80 || true
 sleep 2
-check "allow: trusted curl -> 10.0.2.2:80 permitted by the rules" \
-    "$(newlog_since "$off")" "Rule [0-9]+ ALLOWED connection to 10.0.2.2:80"
+check "allow: trusted curl -> 10.0.3.2:80 permitted by the rules" \
+    "$(newlog_since "$off")" "Rule [0-9]+ ALLOWED connection to 10.0.3.2:80"
 
 # --- P2 rule block: trusted curl -> :8080 (no rule matches)
 off=$(wc -l < "$LOG")
-curl --interface "$IFACE" --max-time 5 -s -o /dev/null http://10.0.2.2:8080 || true
+curl --interface "$IFACE" --max-time 5 -s -o /dev/null http://10.0.3.2:8080 || true
 sleep 2
-check "rule-block: trusted curl -> 10.0.2.2:8080 blocked (no matching rule)" \
-    "$(newlog_since "$off")" "No rule matched. Blocking connection to 10.0.2.2:8080"
+check "rule-block: trusted curl -> 10.0.3.2:8080 blocked (no matching rule)" \
+    "$(newlog_since "$off")" "No rule matched. Blocking connection to 10.0.3.2:8080"
 
 # --- P3 app block: untrusted python3 (not in the allowlist) -> allowed port :443
-off=$(wc -l < "$LOG")
-sudo timeout 10 python3 - "$IFACE" <<'PYEOF' || true
-import socket, sys
+# Run OUTSIDE the ssh session's process tree: with sshd in the allowlist,
+# lineage trust (any allowlisted ancestor => trusted) makes everything under
+# the ssh session trusted. The helper forks: the parent exits immediately so
+# the child is reparented to PID 1, and the child starts a new session
+# (setsid) so it survives the ssh session teardown. The resulting lineage is
+# python3 -> systemd — no allowlisted ancestor, so the app gate denies.
+cat > /tmp/fw-appblock.py <<'PYEOF'
+import os, socket, sys, time
+if os.fork() > 0:
+    sys.exit(0)  # parent exits; the child is reparented to PID 1
+os.setsid()      # new session: survives the ssh session teardown
+time.sleep(0.3)  # let the parent's exit complete so the lineage is child -> init
 s = socket.socket()
-s.bind(("10.0.2.15", 0))
+s.bind(("10.0.3.15", 0))
 s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, sys.argv[1].encode() + b"\x00")
 s.settimeout(5)
 try:
-    s.connect(("10.0.2.2", 443))
+    s.connect(("10.0.3.2", 443))
 except Exception as e:
-    print("connect failed (expected on this dead-end net):", e)
+    pass
 PYEOF
+off=$(wc -l < "$LOG")
+sudo timeout 25 python3 /tmp/fw-appblock.py "$IFACE" >/dev/null 2>&1 || true
 sleep 2
 hay=$(newlog_since "$off")
-check "app-block: untrusted python3 -> 10.0.2.2:443 denied at the app gate" \
+check "app-block: untrusted python3 -> 10.0.3.2:443 denied at the app gate" \
     "$hay" "Inserted trust for PID [0-9]+: Deny"
 check "app-block: pending connection dropped (PID Denied)" \
     "$hay" "Pending Connection Blocked \(PID Denied\)"

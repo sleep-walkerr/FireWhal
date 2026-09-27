@@ -4,7 +4,7 @@
 # while the probe runs, the guest captures the enforced interface (tcpdump on
 # enp0s3 — the capture point sits downstream of every enforcement layer in
 # both directions), and the host listens on 127.0.0.1:9999 (slirp maps
-# guest 10.0.2.2 -> host loopback) to verify the exact bytes. tshark asserts
+# guest 10.0.3.2 -> host loopback) to verify the exact bytes. tshark asserts
 # frame presence/absence in the capture; the daemon log still carries the
 # verdict lines.
 #
@@ -25,7 +25,7 @@ set -uo pipefail
 LEG="${1:?usage: vm_data_probe.sh baseline|allow|block}"
 LOG=/tmp/firewhal-daemon.err
 IFACE=enp0s3
-PEER=10.0.2.2
+PEER=10.0.3.2
 PORT=9999
 # block leg: no rule matches :8080 (and nothing listens there on the host)
 if [ "$LEG" = block ]; then
