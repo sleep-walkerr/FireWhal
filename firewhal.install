@@ -1,0 +1,15 @@
+# Pacman scriptlets for firewhal (referenced from the PKGBUILD:
+# install=firewhal.install — copied into the package as .INSTALL).
+# Runs as root on install AND upgrade (pacman 6+ runs scriptlets without
+# chroot, so this touches the real system).
+
+# firewhal-ipc requires the 'firewhal-admin' group for the IPC socket
+# (mode 0770, setuid nobody — firewhal-ipc/src/lib.rs). The old
+# release_install.sh created it; the package must be self-contained.
+# The getent guard makes this idempotent.
+#
+# Groups are intentionally NOT removed on removal (standard pacman
+# practice — groups hold no data; e.g. systemd, wheel).
+post_install() {
+    getent group firewhal-admin >/dev/null 2>&1 || groupadd --system firewhal-admin
+}
