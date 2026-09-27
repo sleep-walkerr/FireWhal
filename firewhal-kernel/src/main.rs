@@ -121,6 +121,187 @@ fn get_process_info(pid: u32) -> Option<(u32, String, String)> {
     ppid.map(|p| (p, final_name, exe_full_path.unwrap_or_default().to_string())) // Return PPID, preferred_name, and full path
 }
 
+// ---------------------------------------------------------------------------
+// Listening-port scan
+//
+// The in-kernel bind4 hook only populates the listening-port trust maps for
+// binds it actually observes. A listener that bound before the hooks were
+// attached (service started at boot, firewall started later) — or whose bind
+// the hook misses — is invisible to the egress SYN-ACK handshake gate, and
+// every incoming connection to it dies at the app gate ("Connection Not
+// Found in Either Map"). The scan closes that gap in userspace: it finds
+// every listening TCP socket, resolves the owning tgid, verifies the owner
+// with the same lineage + path + hash check as the slow-path event handler,
+// and records the port trust in the kernel maps. It is fail-closed: an
+// unverified owner gets no port entry (handshake stays blocked).
+// ---------------------------------------------------------------------------
+
+// Map every socket inode to the tgid that owns it (/proc/<pid>/fd -> socket:[inode]).
+fn collect_socket_owners() -> HashMap<u32, u32> {
+    let mut socket_owner: HashMap<u32, u32> = HashMap::new();
+    let Ok(entries) = fs::read_dir("/proc") else { return socket_owner; };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Ok(pid) = name.parse::<u32>() else { continue };
+        let fd_dir = format!("/proc/{}/fd", pid);
+        let Ok(fds) = fs::read_dir(&fd_dir) else { continue };
+        for fd in fds.flatten() {
+            let Ok(target) = fs::read_link(fd.path()) else { continue };
+            let target = target.to_string_lossy();
+            let Some(inode_str) = target.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')) else { continue };
+            if let Ok(inode) = inode_str.parse::<u32>() {
+                socket_owner.insert(inode, pid);
+            }
+        }
+    }
+    socket_owner
+}
+
+// Collect (local port, socket inode) for every TCP socket in LISTEN state.
+fn collect_listening_sockets() -> Vec<(u32, u32)> {
+    let mut sockets: Vec<(u32, u32)> = Vec::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(data) = fs::read_to_string(table) else { continue };
+        for line in data.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            // columns: [0]sl [1]local_address [2]rem_address [3]st ... [9]inode
+            if fields.len() < 10 || fields[3] != "0A" {
+                continue;
+            }
+            let Some(port_hex) = fields[1].rsplit_once(':') else { continue };
+            let Ok(port) = u32::from_str_radix(port_hex.1, 16) else { continue };
+            let Ok(inode) = fields[9].parse::<u32>() else { continue };
+            if inode != 0 {
+                sockets.push((port, inode));
+            }
+        }
+    }
+    sockets
+}
+
+// Verify a tgid against the allowlist using the same lineage walk + path +
+// hash check the slow-path event handler uses. Returns (decision, matched
+// path, matched hash).
+async fn verify_tgid_against_allowlist(
+    tgid: u32,
+    app_ids: &Mutex<HashMap<PathBuf, String>>,
+) -> (Action, PathBuf, String) {
+    // Build the lineage (root first, matching the event handler's traversal).
+    let mut lineage_paths: Vec<PathBuf> = Vec::new();
+    let mut current_pid = tgid;
+    let mut visited = HashSet::new();
+    for _ in 0..10 {
+        if current_pid == 0 || current_pid == 1 || visited.contains(&current_pid) {
+            break;
+        }
+        visited.insert(current_pid);
+        match get_process_info(current_pid) {
+            Some((_ppid, proc_name, full_exe_path)) => {
+                let display_name = if !full_exe_path.is_empty() { full_exe_path } else { proc_name };
+                lineage_paths.push(display_name.into());
+            }
+            None => break,
+        }
+    }
+    lineage_paths.reverse();
+
+    let mut decision = Action::Deny;
+    let mut matched_path = PathBuf::new();
+    let mut matched_hash = String::new();
+    for app_path in &lineage_paths {
+        let expected_hash = app_ids.lock().await.get(app_path).cloned();
+        if let Some(expected_hash) = expected_hash {
+            match calculate_file_hash(app_path.clone()).await {
+                Ok(actual_hash) if expected_hash == actual_hash => {
+                    decision = Action::Allow;
+                    matched_path = app_path.clone();
+                    matched_hash = actual_hash;
+                }
+                _ => { /* hash mismatch or read failure: stay denied */ }
+            }
+            break;
+        }
+    }
+    (decision, matched_path, matched_hash)
+}
+
+// One pass over all listening sockets: verify owners, record port trust.
+async fn scan_listening_ports(
+    app_ids: Arc<Mutex<HashMap<PathBuf, String>>>,
+    cache: Arc<Mutex<HashMap<u32, ProcessInfo>>>,
+    trusted_pids: Arc<Mutex<AyaHashMap<MapData, u32, PidTrustInfo>>>,
+    trusted_listening: Arc<Mutex<AyaHashMap<MapData, u32, u32>>>,
+) {
+    let owners = collect_socket_owners();
+    let sockets = collect_listening_sockets();
+
+    for (port, inode) in sockets {
+        let Some(&tgid) = owners.get(&inode) else {
+            // Listener with no visible owning process — skip.
+            continue;
+        };
+
+        // Stable entry already recorded for this (port, owner) — nothing to do.
+        {
+            let listening_guard = trusted_listening.lock().await;
+            if let Ok(existing) = listening_guard.get(&port, 0) {
+                if existing == tgid {
+                    continue;
+                }
+            }
+        }
+
+        // Resolve the owner's trust (reuse an existing decision if we have one).
+        let known = cache.lock().await.get(&tgid).map(|info| info.action);
+        let (decision, matched_path, matched_hash) = match known {
+            Some(action) => {
+                let (p, h) = {
+                    let cache_guard = cache.lock().await;
+                    match cache_guard.get(&tgid) {
+                        Some(info) => (info.path.clone(), info.hash.clone()),
+                        None => (PathBuf::new(), String::new()),
+                    }
+                };
+                (action, p, h)
+            }
+            None => {
+                let (cdecision, cpath, chash) = verify_tgid_against_allowlist(tgid, &app_ids).await;
+                let core_action = match cdecision {
+                    Action::Allow => firewhal_core::Action::Allow,
+                    Action::Deny => firewhal_core::Action::Deny,
+                };
+                // Record the verdict exactly like the event path does.
+                let trust_info = PidTrustInfo { action: cdecision, last_seen_ns: 0 };
+                {
+                    let mut cache_guard = cache.lock().await;
+                    let mut trusted_pids_guard = trusted_pids.lock().await;
+                    cache_guard.insert(tgid, ProcessInfo {
+                        path: cpath.clone(),
+                        hash: chash.clone(),
+                        action: core_action,
+                    });
+                    if let Err(e) = trusted_pids_guard.insert(&tgid, trust_info, 0) {
+                        warn!("[Kernel] [PortScan] Failed to insert trust for TGID {}: {}", tgid, e);
+                    }
+                }
+                info!("[Kernel] [PortScan] TGID {} ({}) verified: {:?}", tgid, cpath.display(), cdecision);
+                (core_action, cpath, chash)
+            }
+        };
+
+        if decision == firewhal_core::Action::Allow {
+            let mut listening_guard = trusted_listening.lock().await;
+            if let Err(e) = listening_guard.insert(&port, tgid, 0) {
+                warn!("[Kernel] [PortScan] Failed to record port trust for port {}: {}", port, e);
+            } else {
+                info!("[Kernel] [PortScan] Listening port {} owned by TGID {} — trusted, port trust recorded.", port, tgid);
+            }
+        } else {
+            info!("[Kernel] [PortScan] Listening port {} owned by TGID {} — denied, no port trust recorded (fail-closed).", port, tgid);
+        }
+    }
+}
+
 async fn attach_tc_programs(
     bpf_arc: Arc<tokio::sync::Mutex<Ebpf>>,
     updated_interfaces: Vec<String>,
@@ -639,6 +820,15 @@ async fn main() -> Result<(), anyhow::Error> {
     let trusted_pids_shared = Arc::new(tokio::sync::Mutex::new(trusted_pids_aya_map));
     let trusted_pids_for_id_update = Arc::clone(&trusted_pids_shared);
 
+    // Take ownership of the trusted-listening-ports map. The eBPF side only
+    // ever PROMOTES it (PENDING -> TRUSTED on an observed bind); userspace
+    // fills it for listeners the bind hook never observed (see
+    // scan_listening_ports).
+    let trusted_listening_map_raw = bpf.take_map("TRUSTED_LISTENING_PORTS").ok_or_else(|| anyhow::anyhow!("Failed to find TRUSTED_LISTENING_PORTS map"))?;
+    let trusted_listening_aya_map = AyaHashMap::<_, u32, u32>::try_from(trusted_listening_map_raw)?;
+    let trusted_listening_shared = Arc::new(tokio::sync::Mutex::new(trusted_listening_aya_map));
+    let trusted_listening_for_scan = Arc::clone(&trusted_listening_shared);
+
 
 
     // Take ownership of PENDING AND TRUSTED CONNECTIONS MAPS
@@ -968,6 +1158,28 @@ async fn main() -> Result<(), anyhow::Error> {
     // Set Permissive Mode To False just to be safe
     update_permissive_mode_flag(Arc::clone(&permissive_mode_shared), false).await?;
 
+    // Listening-port scan: initial pass shortly after attach, then every 30s
+    // (self-healing — picks up any listener the in-kernel bind hook missed).
+    {
+        let scan_app_ids = Arc::clone(&app_ids_for_id_update);
+        let scan_cache = Arc::clone(&active_process_cache_for_id_update);
+        let scan_trusted_pids = Arc::clone(&trusted_pids_for_id_update);
+        let scan_trusted_listening = Arc::clone(&trusted_listening_shared);
+        tokio::spawn(async move {
+            info!("[Kernel] [PortScan] Listening-port scan started (initial pass in 2s, then every 30s).");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            loop {
+                scan_listening_ports(
+                    Arc::clone(&scan_app_ids),
+                    Arc::clone(&scan_cache),
+                    Arc::clone(&scan_trusted_pids),
+                    Arc::clone(&scan_trusted_listening),
+                ).await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+    }
+
 
     // --- Main Event Loop and Shutdown logic ---
     // Send Ready Status to IPC
@@ -985,6 +1197,14 @@ async fn main() -> Result<(), anyhow::Error> {
                     FireWhalMessage::LoadAppIds(incoming_app_ids_config) => {
                         info!("[Kernel] Received app IDs from TUI");
                         load_app_ids( Arc::clone(&app_ids_for_id_update), Arc::clone(&active_process_cache_for_id_update), Arc::clone(&trusted_pids_for_id_update), incoming_app_ids_config).await?;
+                        // Allowlist changed — re-verify listening-port owners now
+                        // (the periodic scan also covers this; this makes it immediate).
+                        scan_listening_ports(
+                            Arc::clone(&app_ids_for_id_update),
+                            Arc::clone(&active_process_cache_for_id_update),
+                            Arc::clone(&trusted_pids_for_id_update),
+                            Arc::clone(&trusted_listening_shared),
+                        ).await;
                     },
                     FireWhalMessage::LoadInterfaceState(interface_state_message) => {
                         // if update.source == "TUI" {
