@@ -26,6 +26,11 @@ license=("MIT OR Apache-2.0")
 source=("git+${url}.git")
 sha256sums=(SKIP)
 makedepends=(rust git)
+# Scriptlets live in a separate file — pacman's mechanism is the install=
+# directive (NOT functions in the PKGBUILD; see PKGBUILD(5)). makepkg
+# copies it into the package as .INSTALL (lint verifies it exists).
+# Creates the firewhal-admin group the IPC router requires.
+install=firewhal.install
 # bpf-linker is a source build on this host (~/.local/bin) — no distro
 # package; verified fail-loud in build() instead.
 
@@ -149,16 +154,4 @@ EOF
     # NOTE: the Discord token is deliberately NOT shipped. Create
     # /etc/firewhal/discord.env (DISCORD_TOKEN=...) for the bot to run;
     # the firewall itself does not need it.
-}
-
-# --- system group ----------------------------------------------------------
-# firewhal-ipc requires the 'firewhal-admin' group for the IPC socket
-# (mode 0770, setuid nobody — firewhal-ipc/src/lib.rs). The old
-# release_install.sh created it; the package must be self-contained.
-# post_install runs on both fresh install and upgrade; the getent guard
-# makes it idempotent. Groups are intentionally NOT removed on -R (standard
-# pacman practice — the group holds no data and removing it could break
-# anything an operator added to it).
-post_install() {
-    getent group firewhal-admin >/dev/null 2>&1 || groupadd --system firewhal-admin
 }
