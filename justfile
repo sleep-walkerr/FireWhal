@@ -4,7 +4,7 @@
 #   just install  — versioned, pacman-tracked (full cleanroom build)
 #   just dev      — inner loop: incremental build + in-place update
 
-set shell := ["bash", "-euo pipefail", "-c"]
+set shell := ["bash", "-euo", "pipefail", "-c"]
 # bpf-linker (source build) lives here on the dev host
 export PATH := "/home/torch/.local/bin:" + env_var("PATH")
 
