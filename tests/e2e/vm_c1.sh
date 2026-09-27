@@ -245,6 +245,11 @@ case "$CMD" in
       n=$(frames 9999)
       m=$(frames 8080)
       say "probe $LEG: $n frames for :9999, $m frames for :8080"
+      # Packet-level evidence in the gate log: the guest /tmp is not durable,
+      # so without this the only pcap dies with the power cycle.
+      sudo tshark -r "$CAP" -Y "tcp" -T fields \
+          -e frame.time_relative -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags \
+          2>/dev/null | sed 's/^/[c1] pkt: /' || true
       case "$LEG" in
         rules)
             check "rules: default-deny held on the wire (:9999 cut, 0 frames)" $([ "$n" -eq 0 ] && echo 0 || echo 1)
