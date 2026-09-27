@@ -19,7 +19,7 @@
 pkgname=firewhal
 pkgdesc="FireWhal — eBPF-based application + rule firewall (daemon, kernel loader, TUI, IPC router, config validator)"
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 arch=(x86_64)
 url="https://github.com/sleep-walkerr/FireWhal"
 license=("MIT OR Apache-2.0")
@@ -149,4 +149,16 @@ EOF
     # NOTE: the Discord token is deliberately NOT shipped. Create
     # /etc/firewhal/discord.env (DISCORD_TOKEN=...) for the bot to run;
     # the firewall itself does not need it.
+}
+
+# --- system group ----------------------------------------------------------
+# firewhal-ipc requires the 'firewhal-admin' group for the IPC socket
+# (mode 0770, setuid nobody — firewhal-ipc/src/lib.rs). The old
+# release_install.sh created it; the package must be self-contained.
+# post_install runs on both fresh install and upgrade; the getent guard
+# makes it idempotent. Groups are intentionally NOT removed on -R (standard
+# pacman practice — the group holds no data and removing it could break
+# anything an operator added to it).
+post_install() {
+    getent group firewhal-admin >/dev/null 2>&1 || groupadd --system firewhal-admin
 }
