@@ -132,7 +132,8 @@ they are a runtime flag, not persisted config.
 
 ## Config authority (the daemon)
 
-The daemon owns three TOML files (in the deployed layout, `/opt/firewhal/bin/`):
+The daemon owns three TOML files (in the deployed layout, `/etc/firewhal/` — the
+single shared location `firewhal_core::DEFAULT_CONFIG_DIR`; packaging #136):
 
 | File | Contents | Loaded as |
 |---|---|---|

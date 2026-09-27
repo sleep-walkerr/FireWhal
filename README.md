@@ -131,9 +131,10 @@ mutagen sync create --name=firewhal-dir-syncing --sync-mode=one-way-replica \
 ```
 
 > **Note on config location:** the daemon reads its three TOML files from
-> `/opt/firewhal/bin/` (not a separate `config/` directory). Placing them elsewhere
-> starts the firewall with zero rules and no error. See
-> [VM Enforcement Testing](./docs/vm-enforcement-testing.md).
+> `/etc/firewhal/` (the single shared location, `firewhal_core::DEFAULT_CONFIG_DIR`).
+> A missing/malformed file is no longer silent — the stack boots fail-closed and
+> announces the degraded posture (C1, design doc §2.4; check
+> `systemctl status firewhal-health`).
 
 ## Documentation
 
