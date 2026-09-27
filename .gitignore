@@ -9,4 +9,10 @@ target
 /pkg
 /FireWhal
 *.pkg.tar.zst
+# makepkg metadata files that can leak into the tree root
+.PKGINFO
+.BUILDINFO
+.MTREE
+.INSTALL
+.CHANGELOG
 firewhal-discord-bot/.env
