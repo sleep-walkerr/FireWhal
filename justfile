@@ -33,6 +33,13 @@ dev:
     sudo cp target/release/examples/ipc_smoke /usr/bin/
     sudo systemctl restart firewhal
 
+# Package contract test (#155): the scriptlet creates firewhal-admin and
+# adds the installing user to it. Runs via sudo (it needs $SUDO_USER,
+# which is also who the scriptlet adds), reinstalls the newest staged
+# package, and deletes/recreates the group — the stack must be stopped.
+pkg-test: version-check
+    sudo bash tests/package/test-ipc-group.sh
+
 # Full e2e gate: boots the VM and runs all phases (the test oracle).
 gate:
     bash tests/e2e/run-e2e.sh

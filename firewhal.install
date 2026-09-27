@@ -1,19 +1,42 @@
 # Pacman scriptlets for firewhal (referenced from the PKGBUILD:
 # install=firewhal.install — copied into the package as .INSTALL).
 # Runs as root. pacman invokes post_install on fresh installs and
-# post_upgrade on upgrades — both hooks must carry the setup, and the
-# getent guard makes each idempotent.
+# post_upgrade on upgrades — both hooks must carry the full setup, and
+# every step is guarded so each hook is idempotent.
+#
+# NOTE: the scriptlet runner extracts and executes each hook function
+# on its own, so the group setup is duplicated in both hooks rather
+# than shared through a helper (a helper defined outside the hook
+# would not be in scope when the hook runs).
 
 # firewhal-ipc requires the 'firewhal-admin' group for the IPC socket
 # (mode 0770, setuid nobody — firewhal-ipc/src/lib.rs). The old
 # release_install.sh created it; the package must be self-contained.
 #
 # Groups are intentionally NOT removed on removal (standard pacman
-# practice — groups hold no data; e.g. systemd, wheel).
+# practice — groups hold no data; e.g. systemd, wheel). Membership is
+# likewise not revoked on removal: the socket only exists while the
+# router runs, so a leftover membership after removal is harmless, and
+# a reinstall must not require re-joining.
+#
+# The installer — the user who ran `sudo pacman`, visible to the
+# scriptlet as $SUDO_USER — is added to the group so the operator can
+# reach the 0770 root:firewhal-admin socket (TUI / health client). If
+# the install runs without sudo (a root shell, a GUI frontend), there
+# is no installer to add; the operator can join manually with
+# `sudo usermod -aG firewhal-admin <user>`.
 post_install() {
     getent group firewhal-admin >/dev/null 2>&1 || groupadd --system firewhal-admin
+    if [ -n "${SUDO_USER:-}" ] && getent passwd "$SUDO_USER" >/dev/null 2>&1 \
+       && ! id -nG "$SUDO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx firewhal-admin; then
+        usermod -aG firewhal-admin "$SUDO_USER"
+    fi
 }
 
 post_upgrade() {
     getent group firewhal-admin >/dev/null 2>&1 || groupadd --system firewhal-admin
+    if [ -n "${SUDO_USER:-}" ] && getent passwd "$SUDO_USER" >/dev/null 2>&1 \
+       && ! id -nG "$SUDO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx firewhal-admin; then
+        usermod -aG firewhal-admin "$SUDO_USER"
+    fi
 }
