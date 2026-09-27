@@ -19,7 +19,7 @@
 pkgname=firewhal
 pkgdesc="FireWhal — eBPF-based application + rule firewall (daemon, kernel loader, TUI, IPC router, config validator)"
 pkgver=0.1.0
-pkgrel=4
+pkgrel=5
 arch=(x86_64)
 url="https://github.com/sleep-walkerr/FireWhal"
 license=("MIT OR Apache-2.0")
@@ -113,9 +113,14 @@ package() {
 
     # --- config templates (pacman config files: preserved on upgrade,
     #     .pacnew on conflict). Deliberately fail-closed: no rules, no
-    #     allowlist, and a placeholder interface that does not exist, so a
-    #     fresh install enforces nothing and announces its degraded
-    #     posture (C1) until the operator configures it. ---
+    #     allowlist, and a placeholder interface that does not exist.
+    #     NOTE (verified on the host): a nonexistent interface maps to
+    #     C1's fail-closed DEFAULT — TC on ALL non-loopback interfaces,
+    #     default-deny — the first time the stack is started (observed:
+    #     DNS + web blocked until `systemctl stop`). The unit ships
+    #     disabled, so a fresh install enforces nothing until the
+    #     operator deliberately starts it; the template comments state
+    #     the warning the operator reads in /etc/firewhal. ---
     install -dm755 "$pkgdir/etc/firewhal"
 
     cat > "$pkgdir/etc/firewhal/firewall_rules.toml" <<'EOF'
@@ -142,10 +147,16 @@ EOF
     cat > "$pkgdir/etc/firewhal/interface_state.toml" <<'EOF'
 # FireWhal enforced interfaces (packaged template).
 #
-# SAFETY: this template names an interface that does not exist. The loader
-# fails to attach it (loudly, in the daemon log) and nothing is enforced —
-# a fresh install must never silently enforce your real interfaces.
-# Replace "fw-none" with your real interface(s), then reload/restart.
+# NOTE: this template names an interface that does not exist. C1 maps
+# that to the fail-closed DEFAULT: starting the stack attaches TC to ALL
+# non-loopback interfaces and, with the empty rule set, DENIES ALL
+# traffic — including your management path (observed on the host: DNS
+# and web were blocked until the stack was stopped).
+#
+# The package installs the unit disabled, so nothing is enforced until
+# you deliberately start it. Before that, replace "fw-none" with your
+# real interface(s) and add the rules you need in firewall_rules.toml.
+# Recovery from an unconfigured start: sudo systemctl stop firewhal.
 enforced_interfaces = [
     "fw-none",
 ]
