@@ -75,7 +75,12 @@ build() {
     # bitcode the non-LTO final link cannot resolve (observed: undefined
     # ring_core_* symbols at the firewhal-discord-bot link). Rust flags come
     # from the Cargo.toml profiles; the C build scripts want none of these.
-    CFLAGS= CXXFLAGS= LDFLAGS= cargo build --release --locked
+    CFLAGS= CXXFLAGS= LDFLAGS= {
+        cargo build --release --locked
+        # ipc_smoke is a firewhal-core example — a plain `cargo build` does
+        # not build examples (the justfile dev recipe builds it explicitly).
+        cargo build --release --locked --example ipc_smoke -p firewhal-core
+    }
 }
 
 package() {
