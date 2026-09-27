@@ -18,6 +18,7 @@ Line numbers reference the files in-tree at the time of writing.
 | [Components](./components.md) | The eight crates, what each one does, how they relate to each other, the IPC topology, and the startup/shutdown sequence. |
 | [Data Paths](./data-paths.md) | The eBPF programs and maps, then each client and server path — slow and fast — in step-by-step detail. |
 | [Modes & Features](./modes-and-features.md) | Strict and permissive modes, the permissive-mode workflow, and planned/future work (with ticket references). |
+| [Developer Guide](./developer-guide.md) | The two development loops (`just install` / `just dev` / the gate), the toolchain contract, where state lives, and the non-obvious failure modes. |
 
 ## Reference
 

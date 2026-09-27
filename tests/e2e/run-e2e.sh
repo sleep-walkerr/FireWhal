@@ -10,7 +10,7 @@
 #              (report-only; never fails the gate — ticket #106)
 #   1. rig      VM reachable — if it is down, recreate the overlay and boot
 #   2. build    cargo build --release + the ipc_smoke sample (host)
-#   3. deploy   tarball -> guest /opt/firewhal/bin, generated test config
+#   3. deploy   tarball -> guest /opt/firewhal/bin, generated test config in /etc/firewhal
 #               (curl hash computed IN the guest), start the daemon
 #   4. ready    3 processes, all FireWhal BPF programs including both TC
 #               classifiers (the fail-open regression guard), and all three

@@ -37,7 +37,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, ConfigLoadResult, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, calculate_file_hash, ipc_client_connection, load_app_ids_config, load_interface_state_config, load_rules_config};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, ConfigLoadResult, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, calculate_file_hash, config_path, ipc_client_connection, load_app_ids_config, load_interface_state_config, load_rules_config};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -413,14 +413,14 @@ async fn evaluate_config(
     to_zmq_tx: &mpsc::Sender<FireWhalMessage>,
     prev: Option<&ConfigHealthState>,
 ) -> (ConfigHealthState, Vec<AlarmEvent>) {
-    let rules_path = path::Path::new("/opt/firewhal/bin/firewall_rules.toml");
-    let apps_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
-    let ifaces_path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
+    let rules_path = config_path("firewall_rules.toml");
+    let apps_path = config_path("app_identity.toml");
+    let ifaces_path = config_path("interface_state.toml");
 
     let mut events: Vec<AlarmEvent> = Vec::new();
 
     // --- rules: missing/malformed -> empty rule set (default-deny) ---
-    let rules_load = load_rules_config(rules_path);
+    let rules_load = load_rules_config(&rules_path);
     let (rules_config, rules_health, rules_note) = match &rules_load {
         ConfigLoadResult::Loaded(c) => (
             c.clone(),
@@ -444,7 +444,7 @@ async fn evaluate_config(
     //     An EMPTY allowlist is a degraded posture in itself (all egress
     //     denied at the app gate) — same classification the firewhal-health
     //     validator uses, so daemon and validator can never disagree. ---
-    let apps_load = load_app_ids_config(apps_path);
+    let apps_load = load_app_ids_config(&apps_path);
     let (apps_config, apps_health, apps_note) = match &apps_load {
         ConfigLoadResult::Loaded(c) if !c.apps.is_empty() => (c.clone(), FileHealth::Healthy, String::new()),
         ConfigLoadResult::Loaded(c) => (
@@ -455,7 +455,7 @@ async fn evaluate_config(
         ConfigLoadResult::Missing => {
             eprintln!("[Supervisor] App identity file not found at '{apps_path:?}'. Creating a new, empty one (C1: announcing as degraded).");
             let empty = ApplicationAllowlistConfig { apps: HashMap::new() };
-            if let Err(e) = save_app_ids(apps_path, &empty) {
+            if let Err(e) = save_app_ids(&apps_path, &empty) {
                 eprintln!("[Supervisor] C1: failed to bootstrap empty app allowlist: {e}");
             }
             (
@@ -473,7 +473,7 @@ async fn evaluate_config(
 
     // --- interfaces: missing/malformed/empty -> ALL non-loopback (the
     //     fail-closed default; the TC layer is never left unattached) ---
-    let ifaces_load = load_interface_state_config(ifaces_path);
+    let ifaces_load = load_interface_state_config(&ifaces_path);
     let default_ifaces = default_enforced_interfaces();
     let default_list = {
         let mut v: Vec<String> = default_ifaces.iter().cloned().collect();
@@ -636,23 +636,30 @@ fn main() {
         .stdout(stdout)
         .stderr(stderr)
         .privileged_action(move || {
+    // Child binaries live next to the daemon's own executable (package:
+    // /usr/bin, VM tarball: /opt/firewhal/bin) — sibling resolution keeps
+    // both layouts working without configuration (packaging, #136).
+    let bin_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/bin"));
     let root_processes = vec![
-        ("/opt/firewhal/bin/firewhal-ipc", vec![]),
-        ("/opt/firewhal/bin/firewhal-kernel", vec![]),
+        (bin_dir.join("firewhal-ipc"), vec![]),
+        (bin_dir.join("firewhal-kernel"), vec![]),
     ];
 
     let mut writer = unsafe { File::from_raw_fd(write_fd) };
 
     for (path, args_vec) in root_processes {
-        let args: Vec<&str> = args_vec.iter().map(|s| *s).collect();
-        
+        let args: Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
+
         // Call the unified function with `user: None` to run as root.
-        match launch_process(path, &args, None, None) {
+        match launch_process(path.to_str().unwrap(), &args, None, None) {
             Ok(pid) => {
                 // Write the PID to the pipe for the main logic.
                 writer.write_all(&pid.to_ne_bytes()).unwrap();
             }
-            Err(e) => eprintln!("[Privileged] Failed to launch {}: {}", path, e),
+            Err(e) => eprintln!("[Privileged] Failed to launch {}: {}", path.display(), e),
         }
     }
     drop(writer)
@@ -726,16 +733,26 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
     children_guard.insert("firewall".to_string(), firewall_pid);
     drop(reader);
 
+    // The bot binary lives next to the daemon's own executable (packaging,
+    // #136). Its token moves to /etc/firewhal/discord.env, so no workdir
+    // override is needed (the bot falls back to its CWD's .env for dev).
+    let bot_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/bin"))
+        .join("firewhal-discord-bot")
+        .to_string_lossy()
+        .into_owned();
     let apps_to_launch = vec![(
         "discord_bot",
         "nobody",
-        "/opt/firewhal/bin/firewhal-discord-bot",
+        bot_bin,
         vec![],
-        Some("/opt/firewhal"),
+        None::<&str>,
     )];
     for (name, user, path, args, workdir) in apps_to_launch {
         let name_str = name.to_string();
-        let handle = task::spawn_blocking(move || { launch_process(path, &args, Some(user), workdir) });
+        let handle = task::spawn_blocking(move || { launch_process(&path, &args, Some(user), workdir) });
         match handle.await? {
             Ok(pid) => {
                 println!("[Supervisor] Launched '{}' with PID {}.", name, pid);
@@ -840,9 +857,9 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     FireWhalMessage::AddAppIds(message) => {
                         if message.component == "TUI" {
                             println!("[Supervisor] Received AddAppIds command from TUI");
-                            let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
+                            let app_id_path = config_path("app_identity.toml");
                             // Add app ids and then overwrite current file
-                            add_app_ids(app_id_path, message.app_ids_to_add);
+                            add_app_ids(&app_id_path, message.app_ids_to_add);
                             // C1: re-evaluate all config (the add may have healed a
                             // degraded allowlist); announces on transitions.
                             apply_config_health(&to_zmq_tx, &mut config_health).await;
@@ -852,7 +869,7 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     FireWhalMessage::RulesRequest(message) => {
                         if message.component == "TUI" {
                             println!("[Supervisor] Received RuleRequest command from TUI");
-                            match load_rules(path::Path::new("/opt/firewhal/bin/firewall_rules.toml")) {
+                            match load_rules(&config_path("firewall_rules.toml")) {
                                 Ok(config) => {
                                     let msg = FireWhalMessage::RulesResponse(config);
                                     if let Err(e) = to_zmq_tx.send(msg).await {
@@ -869,8 +886,8 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     }
                     FireWhalMessage::UpdateRules(message) => {
                        println!("[Supervisor] Received UpdateRules command from TUI"); 
-                       let path = path::Path::new("/opt/firewhal/bin/firewall_rules.toml");
-                       save_rules(path, &message)?;
+                       let path = config_path("firewall_rules.toml");
+                       save_rules(&path, &message)?;
                        // C1: re-evaluate all config (the update may have healed a
                        // degraded rule file); announces on transitions.
                        apply_config_health(&to_zmq_tx, &mut config_health).await;
@@ -878,8 +895,8 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     FireWhalMessage::AppsRequest(message) => {
                         println!("[Supervisor] Received AppsRequest command from TUI"); 
                         // Load app ids and hashes and send to userspace loader
-                            let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
-                            match load_app_ids(app_id_path) {
+                            let app_id_path = config_path("app_identity.toml");
+                            match load_app_ids(&app_id_path) {
                                 Ok(config) => {
                                     let msg = FireWhalMessage::AppsResponse(config);
                                     if let Err(e) = to_zmq_tx.send(msg).await {
@@ -896,16 +913,16 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     }
                     FireWhalMessage::UpdateAppIds(message) => {
                         println!("[Supervisor] Received UpdateAppIds command from TUI");
-                        let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
-                        save_app_ids(app_id_path, &message)?;
+                        let app_id_path = config_path("app_identity.toml");
+                        save_app_ids(&app_id_path, &message)?;
                         // C1: re-evaluate all config (the update may have healed a
                         // degraded allowlist); announces on transitions.
                         apply_config_health(&to_zmq_tx, &mut config_health).await;
                     }
                     FireWhalMessage::InterfaceRequest(message) => {
                         println!("[Superivsor] Received InterfaceRequest command from TUI");
-                        let path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
-                        match load_interface_state(path) {
+                        let path = config_path("interface_state.toml");
+                        match load_interface_state(&path) {
                             Ok(interface_state) => {
                                 let msg = FireWhalMessage::InterfaceResponse(
                                     NetInterfaceResponse {
@@ -927,8 +944,8 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                     }
                     FireWhalMessage::UpdateInterfaces(message) => {
                         println!("[Supervisor] Received UpdateInterfaces command from TUI");
-                        let path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
-                        save_interface_state(path, &message.interfaces)?;
+                        let path = config_path("interface_state.toml");
+                        save_interface_state(&path, &message.interfaces)?;
                         // C1: re-evaluate all config (the update may have healed a
                         // degraded interface list); announces on transitions.
                         apply_config_health(&to_zmq_tx, &mut config_health).await;

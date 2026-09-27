@@ -40,8 +40,9 @@ say "computing sha3-256 of the guest's /usr/sbin/sshd (in-guest, so it cannot go
 SSHD_HASH=$(sudo python3 -c 'import hashlib;print(hashlib.sha3_256(open("/usr/sbin/sshd","rb").read()).hexdigest())')
 say "sshd hash: $SSHD_HASH"
 
-# The daemon loads all three tomls from /opt/firewhal/bin/ (not config/).
-sudo tee /opt/firewhal/bin/app_identity.toml >/dev/null <<EOF
+# The daemon loads all three tomls from /etc/firewhal (packaging, #136).
+sudo mkdir -p /etc/firewhal
+sudo tee /etc/firewhal/app_identity.toml >/dev/null <<EOF
 [apps.curl]
 path = "/usr/bin/curl"
 hash = "$CURL_HASH"
@@ -51,13 +52,13 @@ path = "/usr/sbin/sshd"
 hash = "$SSHD_HASH"
 EOF
 
-sudo tee /opt/firewhal/bin/interface_state.toml >/dev/null <<EOF
+sudo tee /etc/firewhal/interface_state.toml >/dev/null <<EOF
 enforced_interfaces = [
     "$IFACE",
 ]
 EOF
 
-sudo tee /opt/firewhal/bin/firewall_rules.toml >/dev/null <<EOF
+sudo tee /etc/firewhal/firewall_rules.toml >/dev/null <<EOF
 [[incoming_rules]]
 action = "Allow"
 protocol = "Tcp"

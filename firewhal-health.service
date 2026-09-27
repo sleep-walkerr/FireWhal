@@ -14,7 +14,7 @@ After=local-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/firewhal-health
+ExecStart=/usr/bin/firewhal-health
 
 [Install]
 WantedBy=multi-user.target

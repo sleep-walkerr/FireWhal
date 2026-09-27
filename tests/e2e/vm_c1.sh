@@ -62,11 +62,11 @@ check() { # $1=name  $2=condition (0/1)
     fi
 }
 
-toml_for() { # leg -> toml path under /opt/firewhal/bin
+toml_for() { # leg -> toml path under /etc/firewhal
     case "$1" in
-        rules) echo /opt/firewhal/bin/firewall_rules.toml ;;
-        interfaces) echo /opt/firewhal/bin/interface_state.toml ;;
-        apps) echo /opt/firewhal/bin/app_identity.toml ;;
+        rules) echo /etc/firewhal/firewall_rules.toml ;;
+        interfaces) echo /etc/firewhal/interface_state.toml ;;
+        apps) echo /etc/firewhal/app_identity.toml ;;
         *) say "FATAL: unknown leg '$1'"; exit 2 ;;
     esac
 }
@@ -256,7 +256,7 @@ case "$CMD" in
         apps)
             check "apps: egress denied at the app gate (:9999 cut, 0 frames)" $([ "$n" -eq 0 ] && echo 0 || echo 1)
             # the daemon must have bootstrapped the empty allowlist file
-            if sudo test -f /opt/firewhal/bin/app_identity.toml; then
+            if sudo test -f /etc/firewhal/app_identity.toml; then
                 check "apps: empty allowlist file bootstrapped by the daemon" 0
             else
                 check "apps: empty allowlist file bootstrapped by the daemon" 1

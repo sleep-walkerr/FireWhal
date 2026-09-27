@@ -33,7 +33,7 @@ There are two distinct relationships to keep straight:
 ### Process tree
 
 ```
-systemd (firewhal_systemd.service, User=root)
+systemd (firewhal.service, User=root)
 └── firewhal-daemon                       [root → daemonize → nobody]
     ├── firewhal-ipc                      [root, drops to nobody]  (launched in privileged_action)
     ├── firewhal-kernel                   [root]                    (launched in privileged_action)

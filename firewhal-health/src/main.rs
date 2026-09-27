@@ -16,7 +16,7 @@
 //! daemon stays up in the fail-closed posture and announces the degraded
 //! state (alarm bundle + TUI).
 //!
-//! Usage: firewhal-health [config-dir]   (default: /opt/firewhal/bin)
+//! Usage: firewhal-health [config-dir]   (default: /etc/firewhal)
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -29,7 +29,7 @@ fn main() -> ExitCode {
     let config_dir: std::path::PathBuf = std::env::args()
         .nth(1)
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| Path::new("/opt/firewhal/bin").to_path_buf());
+        .unwrap_or_else(|| Path::new(firewhal_core::DEFAULT_CONFIG_DIR).to_path_buf());
 
     println!("firewhal-health: validating config in {}", config_dir.display());
 

@@ -17,7 +17,7 @@ User=root
 Group=root
 
 # The full path to the firewhal daemon executable.
-ExecStart=/usr/local/sbin/firewhal-daemon
+ExecStart=/usr/bin/firewhal-daemon
 
 # Graceful shutdown command.
 ExecStop=/bin/pkill firewhal-daemon
