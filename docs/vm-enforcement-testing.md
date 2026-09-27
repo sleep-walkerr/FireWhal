@@ -41,6 +41,116 @@ run, so a broken allow path and a broken block path are told apart:
    downstream — with verdict `No rule matched. Blocking connection to
    10.0.3.2:8080`.
 
+## S1 SSH-block phase (gate phase 7, since 2026-09-27)
+
+Phase 7 is the **deliberate SSH block** (ticket #106, design doc
+`docs/comprehensive-test-design.md` §2.2) — a feature test, not a bug hunt:
+the firewall must be able to cut SSH when told to, and it must touch exactly
+what the rules say. It asserts the **M1 mgmt collateral guard** (§2.3) live,
+in the same window.
+
+**Inversion for this rig** (documented in §2.2): FireWhal enforces only on
+`enforced_interfaces` (`enp0s3` here), so a rule targeting the mgmt NIC
+(`enp0s2`) would be a no-op — there are no hooks on that interface. The block
+therefore targets the *enforced* path — incoming `tcp/22` on `enp0s3`, i.e.
+the `2223` hostfwd — and the unenforced mgmt path (`2222`) must stay up for
+the whole window.
+
+1. **Baseline** — both `2223` (OOB, via the enforced path) and `2222` (mgmt)
+   up.
+2. **Block** — the guest backs up `firewall_rules.toml`, arms a VM-local
+   self-expiry sleeper (a detached `setsid` guest process, `fw-e2e-s1-unlock`;
+   window 120 s default, `FW_S1_WINDOW` overridable; state in
+   `/var/lib/fw-e2e/`) that restores the config and restarts the stack —
+   **the VM owns its own unlock**, independent of SSH state — then drops the
+   incoming `:22` rule and restarts the stack.
+3. **Window** — from the host: `ssh -p 2223` must fail 100 % (the rule cut
+   SSH, as configured); the mgmt ping must stay 100 % healthy (M1 — no
+   collateral lockout). Wire-verified in-guest: the block log carries the
+   verdict `No ingress rule matched. Blocking connection from
+   10.0.3.2:<port>`, and the capture shows **no guest reply** (no frame with
+   the ACK flag for `:22`) — see the capture-semantics finding below.
+4. **Self-expiry & recovery** — the sleeper fires, the config is restored
+   byte-for-byte, the stack restarts, and `2223` comes back with no outside
+   intervention; a second capture proves `:22` traffic crosses the boundary
+   again.
+5. **Record & reconnect** — a guest timeline
+   (`/var/lib/fw-e2e/fw-s1-timeline`) records
+   rule-up → block → rule-down (self-expiry) → restored; the gate reconnects
+   and asserts the record, the config restore, and readiness.
+
+**Safety** (design §2.2): the only path to losing SSH is the *passing* path,
+and the self-expiry restores it. If the block regresses (no cut), `2223`
+stays up and the "must be down" checks fail; if the self-expiry fails,
+`2222` is never at risk — the test can never lock us out of itself.
+
+### S1 findings (first runs, 2026-09-27)
+
+- **Direction-dependent capture semantics:** on this rig the *ingress*
+  AF_PACKET tap sits **upstream** of the TC ingress drop — blocked SYNs are
+  visible in the guest `tcpdump` (flags `S` only, no reply), while the
+  *egress* tap is downstream (D1's block leg: 0 frames). The design doc's
+  "frame not in the capture = never crossed the boundary" oracle holds for
+  egress; for ingress the oracle is "the guest never replies" (no frame with
+  the ACK flag for the probe flow).
+- **Guest real-time delays run late:** the guest runs NTP
+  (systemd-timesyncd active; the RTC is ~37 s behind at boot), and the
+  resulting real-time slewing makes real-time delays fire +6 s..+43 s over
+  (measured on the original `OnActiveSec` timer implementation: a 10 s
+  control timer took 16 s; the 30 s dry runs took 51 s/73 s; the 120 s gate
+  window fired 17 s late). The same slewing affects the current sleeper's
+  `sleep` (it is CLOCK_REALTIME too). The block lifts *later* than the window
+  — the safe direction — and the gate's recovery deadline absorbs the
+  observed lag (`window + 120 s`).
+- **Kernel quirk (guest kernel 6.8, Ubuntu):** root `open(O_CREAT)` on a
+  **non-root-owned** file inside a **sticky** dir (`/tmp`) returns EACCES,
+  while root-owned files in the same dir are fine (reproducible, isolated by
+  an owner/dir/user matrix: owner appends and non-sticky dirs are OK). The
+  timeline file is created `root:ubuntu 662` so both the ubuntu-side appends
+  (block script, gate window line) and the root-side appends (the
+  self-expiry) work. (The timeline moved from /tmp to /var/lib/fw-e2e —
+  a non-sticky dir, where the quirk does not apply — but the ownership is
+  kept for the cross-user appends.)
+- **Self-expiry mechanism: not systemd.** The first implementation used a
+  VM-local systemd one-shot + timer. Two traps, both on this guest
+  (systemd 255.4-1ubuntu8.17):
+  - a daemonized daemon started from a `Type=oneshot` unit stays in the
+    unit's cgroup and is SIGTERMed when the unit completes (default
+    `KillMode=control-group`; observed on the first dry run: daemon log
+    mtime == unit finish, "stack not ready" afterwards);
+  - the fix `KillMode=main` is **rejected by this systemd** ("Failed to
+    parse kill mode specification, ignoring: main" — reproduced with
+    `systemd-analyze verify` on the intact unit, file byte-clean), so the
+    default kill mode applied silently and the first full gate run killed
+    the just-restored stack at unit finish: the "recovered" 2223 was
+    fail-open (no enforcement), the recovery capture was unfiltered, and
+    the verify's `stack_ready` correctly reported the dead stack for its
+    full 120 s.
+  The implementation is therefore a detached `setsid` sleeper (sleep out the
+  window, then run the unlock as root) — no kill-mode semantics, no
+  periodic-timer re-fire risk; ssh-spawned process survival is proven in
+  this rig (the deploy daemon and per-leg captures outlive their ssh
+  sessions; a logged-out session scope kept a recovery capture alive for
+  105 s). The self-expiry does not survive a guest reboot (the block
+  persists on the throwaway overlay, fail-closed by design).
+- **Guest /tmp is not durable:** every /tmp artifact of the failed run
+  (timeline, snapshots, pcaps, backup, daemon logs) was gone after the
+  forensic reboot, while /etc state survived; /tmp is disk-backed (not a
+  tmpfs) and the tmpfiles rules are stock 30 d, so the exact agent is
+  unidentified (boot-bound, 02:31-epoch). S1 state therefore lives in
+  `/var/lib/fw-e2e/` (the daemon's own logs stay in /tmp — the binary
+  hardcodes the path; the block-window snapshot protects what verify needs).
+- **Guest journal is lossy on this image:** all journal files cap at exactly
+  8 MiB and the post-rotation segment does not survive to the archive (the
+  failed run's journal stops 40 s before the guest died). For forensics,
+  the guest timeline + the host tee-log of the gate are the authoritative
+  record, not `journalctl`.
+- **Verdict-line grep hardened:** the first full gate run failed the
+  block-verdict check even though the printed haystack (byte-verified clean
+  ASCII) contained the matching line; the mechanism was not fully
+  determined, so the check now greps the snapshot file directly (no
+  `$(cat)`-into-variable, no pipe), which removes the mechanism class.
+
 ## Findings (first manual run, 2026-09-18)
 
 ## Rig layout
@@ -161,6 +271,9 @@ no raw sockets needed).
 - [x] Design the comprehensive test mechanism (ticket #106; design doc
       `docs/comprehensive-test-design.md`); D1 data-level phase landed as
       gate phase 6 on 2026-09-26.
-- [ ] Remaining #106 sequence: S1 SSH-block + mgmt-NIC collateral guard,
-      C1 config-path fail-loud, R resilience (ticket #114), CI on a KVM
-      runner. Host-side TAP/netns wire visibility: ticket #115.
+- [x] S1 SSH-block + M1 mgmt collateral guard (gate phase 7, 2026-09-27;
+      see the S1 section above for the inverted mechanism + first-run
+      findings).
+- [ ] Remaining #106 sequence: C1 config-path fail-loud, R resilience
+      (ticket #114), CI on a KVM runner. Host-side TAP/netns wire visibility:
+      ticket #115.
