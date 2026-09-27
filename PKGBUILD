@@ -19,7 +19,7 @@
 pkgname=firewhal
 pkgdesc="FireWhal — eBPF-based application + rule firewall (daemon, kernel loader, TUI, IPC router, config validator)"
 pkgver=0.1.0
-pkgrel=3
+pkgrel=4
 arch=(x86_64)
 url="https://github.com/sleep-walkerr/FireWhal"
 license=("MIT OR Apache-2.0")
