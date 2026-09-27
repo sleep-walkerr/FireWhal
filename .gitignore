@@ -3,4 +3,10 @@ primary-workspace/target
 primary-workspace/firewhal-discord-bot/.env
 firewall-rule-testing/target
 target
+# makepkg build artifacts when running `makepkg` directly (the `just`
+# recipes use a persistent BUILDDIR outside the tree instead)
+/src
+/pkg
+/FireWhal
+*.pkg.tar.zst
 firewhal-discord-bot/.env

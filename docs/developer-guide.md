@@ -14,13 +14,15 @@ prove changes are safe before/while they live on the host.
 
 | Command | What it does | When |
 |---|---|---|
-| `just install` | `makepkg -si`: full cleanroom build → pacman versioned install (binaries `/usr/bin`, units `/usr/lib/systemd/system`, config templates `/etc/firewhal`) | After a commit you want to *ship* to the host. Builds from the **committed** repo state — commit + push first. |
+| `just install` | version check, then `makepkg -si`: isolated source build (persistent cache in `~/.cache/firewhal-pkg`, incremental across runs) → pacman versioned install (binaries `/usr/bin`, units `/usr/lib/systemd/system`, config templates `/etc/firewhal`) | After a commit you want to *ship* to the host. Builds from the **committed** repo state — commit + push first. |
 | `just dev` | Incremental `cargo build --release` + in-place copy of the 7 binaries into `/usr/bin` + `systemctl restart firewhal` | **Every code change** while working. No repack, no cleanroom — fast. (`pacman -Qk firewhal` will show the overwritten binaries as modified until the next `just install`.) |
 | `just gate` | `tests/e2e/run-e2e.sh`: boots the VM, runs all 9 phases (readiness, enforcement differentials, D1 wire, S1+M1, C1, cleanup) | Before you trust a change. ~30–40 min, ends with the VM shut down. |
 
-Versioning: one line — `[workspace.package] version` in `Cargo.toml`
-(SemVer 2.0, `0.x` until the first stable; the PKGBUILD derives `pkgver`
-from it).
+Versioning: two lines that must agree — `[workspace.package] version` in
+`Cargo.toml` (drives the binaries' `--version`) and `pkgver` in the
+PKGBUILD (drives the package). Hand-bump both to the same SemVer (2.0;
+`0.x` until the first stable); `just install` runs a version-check that
+fails loud if the two drift.
 
 **First-run note:** a fresh package install is deliberately fail-closed —
 no rules, empty allowlist, and `interface_state.toml` names `fw-none`

@@ -55,13 +55,24 @@ build() {
         exit 1
     }
 
+    # Build IN the source checkout, never from $srcdir: a bare `cargo build`
+    # from $srcdir finds no manifest and walks up to the outer repo (when
+    # the build dir sits inside it), compiling into that repo's shared dev
+    # target dir — lock contention with the dev loop and stale-artifact
+    # link failures (observed: undefined ring asm symbols). The checkout's
+    # own target dir keeps the package build isolated.
+    cd "$srcdir/$pkgname" || {
+        echo "FATAL: source checkout $srcdir/$pkgname not found" >&2
+        exit 1
+    }
     cargo build --release --locked
 }
 
 package() {
-    local src bin d
-    # The git checkout lands in $pkgname-<commit>; glob it.
-    for d in "$srcdir/$pkgname"-*; do src="$d"; done
+    local src bin
+    # The git source lands in $srcdir/$pkgname (named after the source
+    # entry — no commit suffix).
+    src="$srcdir/$pkgname"
     [ -d "$src" ] || { echo "FATAL: source checkout not found" >&2; return 1; }
 
     # --- binaries (children resolve next to the daemon — sibling layout,

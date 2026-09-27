@@ -15,9 +15,11 @@ version-check:
     pv=$(sed -n 's/^pkgver=//p' PKGBUILD | head -n 1) && wv=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1) && { [ -n "$pv" ] && [ "$pv" = "$wv" ] || { echo "FATAL: version drift — PKGBUILD pkgver=${pv:-none} vs Cargo.toml ${wv:-none} — bump both to the same SemVer"; exit 1; }; }; echo "version check OK: $pv"
 
 # Full package build + versioned install. Builds from the committed repo
-# state (makepkg clones the repo), so commit + push first.
+# state (makepkg clones the repo), so commit + push first. BUILDDIR lives
+# in a persistent cache dir (outside the tree, so the working dir stays
+# clean) — first build is a full compile, repeat builds are incremental.
 install: version-check
-    makepkg -si --nodeps
+    BUILDDIR=/home/torch/.cache/firewhal-pkg makepkg -si --nodeps
 
 # Inner dev loop: incremental cargo build + in-place binary update +
 # restart. No repack; until you run `just install` again, `pacman -Qk
