@@ -60,19 +60,23 @@ build() {
     # the build dir sits inside it), compiling into that repo's shared dev
     # target dir — lock contention with the dev loop and stale-artifact
     # link failures (observed: undefined ring asm symbols). The checkout's
-    # own target dir keeps the package build isolated.
-    cd "$srcdir/$pkgname" || {
-        echo "FATAL: source checkout $srcdir/$pkgname not found" >&2
+    # own target dir keeps the package build isolated. The checkout dir is
+    # named after the source entry (FireWhal), not $pkgname (firewhal).
+    local srcname
+    srcname=$(basename "${source[0]#git+}" .git)
+    cd "$srcdir/$srcname" || {
+        echo "FATAL: source checkout $srcdir/$srcname not found" >&2
         exit 1
     }
     cargo build --release --locked
 }
 
 package() {
-    local src bin
-    # The git source lands in $srcdir/$pkgname (named after the source
-    # entry — no commit suffix).
-    src="$srcdir/$pkgname"
+    local src bin srcname
+    # The git source lands in $srcdir/<source-entry-name> (FireWhal — the
+    # repo name, NOT $pkgname), e.g. $srcdir/FireWhal.
+    srcname=$(basename "${source[0]#git+}" .git)
+    src="$srcdir/$srcname"
     [ -d "$src" ] || { echo "FATAL: source checkout not found" >&2; return 1; }
 
     # --- binaries (children resolve next to the daemon — sibling layout,
