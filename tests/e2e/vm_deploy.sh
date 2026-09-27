@@ -36,12 +36,19 @@ sudo rm -f /opt/firewhal/bin/firewhal-hashing || true
 say "computing sha3-256 of the guest's /usr/bin/curl (in-guest, so it cannot go stale)"
 CURL_HASH=$(sudo python3 -c 'import hashlib;print(hashlib.sha3_256(open("/usr/bin/curl","rb").read()).hexdigest())')
 say "curl hash: $CURL_HASH"
+say "computing sha3-256 of the guest's /usr/sbin/sshd (in-guest, so it cannot go stale)"
+SSHD_HASH=$(sudo python3 -c 'import hashlib;print(hashlib.sha3_256(open("/usr/sbin/sshd","rb").read()).hexdigest())')
+say "sshd hash: $SSHD_HASH"
 
 # The daemon loads all three tomls from /opt/firewhal/bin/ (not config/).
 sudo tee /opt/firewhal/bin/app_identity.toml >/dev/null <<EOF
 [apps.curl]
 path = "/usr/bin/curl"
 hash = "$CURL_HASH"
+
+[apps.sshd]
+path = "/usr/sbin/sshd"
+hash = "$SSHD_HASH"
 EOF
 
 sudo tee /opt/firewhal/bin/interface_state.toml >/dev/null <<EOF

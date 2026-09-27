@@ -291,6 +291,10 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
         RuleKey { protocol: 0, source_ip: tuple.saddr, source_port: 0, dest_ip: 0, dest_port: 0 },
         // Wildcard All: Source Port Only
         RuleKey { protocol: 0, source_ip: 0, source_port: tuple.sport, dest_ip: 0, dest_port: 0 },
+        // Wildcard Source: Proto + Destination Port (mirrors the egress "Proto + Port"
+        // candidate; without it, "Allow TCP :22" — the natural inbound shape — is
+        // inserted but can never match and default-deny silently takes over. #124)
+        RuleKey { protocol: tuple.protocol as u32, source_ip: 0, source_port: 0, dest_ip: 0, dest_port: tuple.dport },
         // Wildcard All: Destination Port Only
         RuleKey { protocol: 0, source_ip: 0, source_port: 0, dest_ip: 0, dest_port: tuple.dport },
     ];
@@ -303,6 +307,7 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
     else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[2]) } { matched_action = Some(action); }
     else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[3]) } { matched_action = Some(action); }
     else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[4]) } { matched_action = Some(action); }
+    else if let Some(action) = unsafe { INCOMING_RULES.get(&keys_to_check[5]) } { matched_action = Some(action); }
 
 
     // --- 4. Process the matched rule ---
