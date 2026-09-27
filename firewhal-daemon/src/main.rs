@@ -643,7 +643,7 @@ fn main() {
         .ok()
         .and_then(|p| p.parent().map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/bin"));
-    let root_processes = vec![
+    let root_processes: Vec<(std::path::PathBuf, Vec<String>)> = vec![
         (bin_dir.join("firewhal-ipc"), vec![]),
         (bin_dir.join("firewhal-kernel"), vec![]),
     ];

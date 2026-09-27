@@ -28,6 +28,13 @@ makedepends=(rust git)
 # bpf-linker is a source build on this host (~/.local/bin) — no distro
 # package; verified fail-loud in build() instead.
 
+# makepkg's cleanroom masks HOME — point rustup/cargo at the real machine
+# homes so the pinned nightly and the dependency cache are reused (local
+# packaging on this host; same convention as the justfile). Top-level so
+# it reaches every function subshell.
+export RUSTUP_HOME=/home/torch/.rustup
+export CARGO_HOME=/home/torch/.cargo
+
 prepare() {
     # The eBPF build (aya-build in firewhal-kernel/build.rs) drives a pinned
     # nightly via rustup; make it available in the cleanroom build env.

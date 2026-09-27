@@ -112,7 +112,9 @@ async fn main() {
     sleep(Duration::from_secs(1));
     // Token lives in /etc/firewhal/discord.env (packaged installs, #136);
     // the CWD .env stays as the local-dev fallback.
-    dotenvy::from_path("/etc/firewhal/discord.env").or_else(|_| dotenv()).ok();
+    if dotenvy::from_path("/etc/firewhal/discord.env").is_err() {
+        dotenv().ok();
+    }
 
     // Create the channels required by the unified IPC function.
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
