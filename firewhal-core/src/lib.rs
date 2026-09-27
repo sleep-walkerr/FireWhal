@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::fmt;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -467,4 +467,92 @@ pub struct ShutdownCommand {
 pub struct BlockAddressRule {
     pub source: String,
     pub address: String,
+}
+
+// ---------------------------------------------------------------------------
+// C1: config-path loading (design doc §2.4), shared by the daemon and
+// `firewhal-health` so both parse with exactly the same semantics.
+//
+// Each loader returns a `ConfigLoadResult` that distinguishes "loaded and
+// valid" from "missing" and "present but unreadable/malformed". The degraded
+// states are NOT fatal: the caller applies the fail-closed default posture
+// and announces it (daemon alarm bundle / `firewhal-health` exit code).
+// ---------------------------------------------------------------------------
+
+/// The outcome of loading one config toml (C1, design doc §2.4).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigLoadResult<T> {
+    /// The file is present, readable, and parsed.
+    Loaded(T),
+    /// The file does not exist.
+    Missing,
+    /// The file exists but could not be read or parsed.
+    Malformed { reason: String },
+}
+
+impl<T> ConfigLoadResult<T> {
+    /// `true` for Missing/Malformed — the degraded states that require the
+    /// fail-closed default + announcement (C1).
+    pub fn is_degraded(&self) -> bool {
+        !matches!(self, Self::Loaded(_))
+    }
+}
+
+/// Reads a toml file, classifying the failure modes the callers care about.
+enum TomlRead {
+    Content(String),
+    Missing,
+    Unreadable(String),
+}
+
+fn read_toml_file(path: &Path) -> TomlRead {
+    match std::fs::read_to_string(path) {
+        Ok(content) => TomlRead::Content(content),
+        Err(e) if path.exists() => TomlRead::Unreadable(e.to_string()),
+        Err(_) => TomlRead::Missing,
+    }
+}
+
+/// Loads `firewall_rules.toml`. No bootstrap on missing: an empty rule set
+/// is the fail-closed posture (default-deny), which the caller applies and
+/// announces.
+pub fn load_rules_config(path: &Path) -> ConfigLoadResult<FireWhalConfig> {
+    match read_toml_file(path) {
+        TomlRead::Content(content) => match toml::from_str(&content) {
+            Ok(config) => ConfigLoadResult::Loaded(config),
+            Err(e) => ConfigLoadResult::Malformed { reason: e.to_string() },
+        },
+        TomlRead::Missing => ConfigLoadResult::Missing,
+        TomlRead::Unreadable(e) => ConfigLoadResult::Malformed { reason: format!("unreadable: {e}") },
+    }
+}
+
+/// Loads `app_identity.toml` as a pure read — NO bootstrap: the daemon is
+/// the one that creates the empty file when missing (preserving the
+/// historical behavior); `firewhal-health` must not mutate state while
+/// validating.
+pub fn load_app_ids_config(path: &Path) -> ConfigLoadResult<ApplicationAllowlistConfig> {
+    match read_toml_file(path) {
+        TomlRead::Content(content) => match toml::from_str(&content) {
+            Ok(config) => ConfigLoadResult::Loaded(config),
+            Err(e) => ConfigLoadResult::Malformed { reason: e.to_string() },
+        },
+        TomlRead::Missing => ConfigLoadResult::Missing,
+        TomlRead::Unreadable(e) => ConfigLoadResult::Malformed { reason: format!("unreadable: {e}") },
+    }
+}
+
+/// Loads `interface_state.toml` as a pure read. No interface-existence
+/// pruning here (that needs the live interface list — the daemon does it);
+/// a missing/malformed/empty result makes the caller apply the fail-closed
+/// default (all non-loopback interfaces) instead.
+pub fn load_interface_state_config(path: &Path) -> ConfigLoadResult<InterfaceStateConfig> {
+    match read_toml_file(path) {
+        TomlRead::Content(content) => match toml::from_str(&content) {
+            Ok(config) => ConfigLoadResult::Loaded(config),
+            Err(e) => ConfigLoadResult::Malformed { reason: e.to_string() },
+        },
+        TomlRead::Missing => ConfigLoadResult::Missing,
+        TomlRead::Unreadable(e) => ConfigLoadResult::Malformed { reason: format!("unreadable: {e}") },
+    }
 }

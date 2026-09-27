@@ -37,17 +37,21 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, calculate_file_hash, ipc_client_connection};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, ConfigLoadResult, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, calculate_file_hash, ipc_client_connection, load_app_ids_config, load_interface_state_config, load_rules_config};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
 
 
-//Loads and deserializes firewall rules from a binary file
+// C1 (design doc §2.4): these thin wrappers keep the historical `Result`
+// behavior for the TUI request handlers; the config-health machinery below
+// uses the core loaders directly so it can tell Missing from Malformed.
 fn load_rules(path: &path::Path) -> Result<FireWhalConfig, Box<dyn std::error::Error>> {
-    let toml_content = fs::read_to_string(path)?;
-    let config: FireWhalConfig = toml::from_str(&toml_content)?;
-    Ok(config)
+    match load_rules_config(path) {
+        ConfigLoadResult::Loaded(config) => Ok(config),
+        ConfigLoadResult::Missing => Err("config file missing".into()),
+        ConfigLoadResult::Malformed { reason } => Err(reason.into()),
+    }
 }
 
 // Serializes the new set of firewall rules to a file
@@ -62,20 +66,21 @@ fn save_rules(path: &path::Path, config: &FireWhalConfig) -> Result<(), Box<dyn 
 
 // Loads and deserializes the defined applications that will be used in filtering
 fn load_app_ids(path: &path::Path) -> Result<ApplicationAllowlistConfig, Box<dyn std::error::Error>> {
-    if !path.exists() {
-        eprintln!("[Supervisor] App identity file not found at '{}'. Creating a new, empty one.", path.display());
-        // Create a default, empty config
-        let empty_config = ApplicationAllowlistConfig {
-            apps: HashMap::new(),
-        };
-        // Save it to create the file with the correct empty structure.
-        save_app_ids(path, &empty_config)?;
-        // Return the empty config
-        Ok(empty_config)
-    } else {
-        let toml_content = fs::read_to_string(path)?;
-        let config: ApplicationAllowlistConfig = toml::from_str(&toml_content)?;
-        Ok(config)
+    match load_app_ids_config(path) {
+        ConfigLoadResult::Loaded(config) => Ok(config),
+        ConfigLoadResult::Missing => {
+            eprintln!("[Supervisor] App identity file not found at '{}'. Creating a new, empty one.", path.display());
+            // Create a default, empty config (historical behavior; the C1
+            // config-health path announces this as a degraded state)
+            let empty_config = ApplicationAllowlistConfig {
+                apps: HashMap::new(),
+            };
+            // Save it to create the file with the correct empty structure.
+            save_app_ids(path, &empty_config)?;
+            // Return the empty config
+            Ok(empty_config)
+        }
+        ConfigLoadResult::Malformed { reason } => Err(reason.into()),
     }
 }
 
@@ -154,12 +159,16 @@ fn get_all_interfaces() -> HashSet<String> {
 
 // Loads enforced_interfaces.toml file that contains interfaces that the firewall is currently enforcing rules on
 fn load_interface_state(path: &path::Path) -> Result<InterfaceStateConfig, Box<dyn std::error::Error>> {
-    let toml_content = fs::read_to_string(path)?; // Use ? to return error if read fails
-    let mut interface_state: InterfaceStateConfig = toml::from_str(&toml_content)?; // Use ? to return error if parse fails
-    // Remove interfaces that no longer exist
-    let current_interfaces = get_all_interfaces();
-    interface_state.enforced_interfaces.retain(|x| current_interfaces.contains(x));
-    Ok(interface_state)
+    match load_interface_state_config(path) {
+        ConfigLoadResult::Loaded(mut interface_state) => {
+            // Remove interfaces that no longer exist
+            let current_interfaces = get_all_interfaces();
+            interface_state.enforced_interfaces.retain(|x| current_interfaces.contains(x));
+            Ok(interface_state)
+        }
+        ConfigLoadResult::Missing => Err("config file missing".into()),
+        ConfigLoadResult::Malformed { reason } => Err(reason.into()),
+    }
 }
 
 fn save_interface_state(path: &path::Path, interfaces: &HashSet<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -169,6 +178,390 @@ fn save_interface_state(path: &path::Path, interfaces: &HashSet<String>) -> Resu
     let toml_content = toml::to_string_pretty(&interface_state)?;
     fs::write(path, toml_content)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// C1: config-path health + alarm bundle (design doc §2.4).
+//
+// The daemon never exits on a config error: exiting detaches every eBPF
+// hook, and a dead firewall is not "blocked" — it is *no* firewall
+// (fail-open, the worst case). Instead the daemon applies the fail-closed
+// default for whatever is missing/malformed and announces the degraded
+// state on every channel: a persistent log line, a `wall` broadcast, and a
+// degraded `Status` to the TUI (it never reports is_healthy=true while
+// degraded). The alarm fires on state transitions only, in both directions.
+//
+// Postures (verified against the code, see the §2.4 matrix):
+//   - rules missing/malformed   -> push an empty rule set: default-deny,
+//                                  everything blocked (fail-closed)
+//   - apps missing              -> bootstrap an empty allowlist file
+//                                  (historical behavior) -> egress denied
+//                                  at the app gate (fail-closed)
+//   - interfaces missing/malformed/empty -> push ALL non-loopback interfaces
+//                                  (fail-closed default: enforcement is on,
+//                                  never left unattached)
+// ---------------------------------------------------------------------------
+
+/// Health of one config file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileHealth {
+    Healthy,
+    Degraded,
+}
+
+/// Health of the three config files, plus the announcement text for each
+/// degraded file (the fail-closed posture in plain language).
+#[derive(Debug, Clone)]
+struct ConfigHealthState {
+    rules: (FileHealth, String),
+    apps: (FileHealth, String),
+    interfaces: (FileHealth, String),
+}
+
+impl ConfigHealthState {
+    fn all_healthy(&self) -> bool {
+        self.rules.0 == FileHealth::Healthy
+            && self.apps.0 == FileHealth::Healthy
+            && self.interfaces.0 == FileHealth::Healthy
+    }
+}
+
+/// One health transition the alarm bundle must announce.
+struct AlarmEvent {
+    file: &'static str,
+    healthy: bool, // the NEW state (false = now degraded)
+    note: String,  // posture in plain language + the fix
+}
+
+/// Naive UTC timestamp (the daemon has no date library; this only feeds
+/// log lines and the wall text).
+fn utc_timestamp(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let sod = secs % 86400;
+    let (h, m, s) = (sod / 3600, (sod % 3600) / 60, sod % 60);
+    // civil-from-days (Howard Hinnant)
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{y:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", mo, d, h, m, s)
+}
+
+/// The C1 alarm bundle: one persistent log line + one `wall` broadcast per
+/// transition. The TUI is covered by the caller's `Status` message.
+///
+/// `/var/log/firewhal/` (never /tmp — S1 forensics proved /tmp non-durable
+/// on the e2e image). `wall` is best-effort: the log line and the TUI state
+/// remain authoritative if the binary is unavailable.
+fn fire_config_alarm(events: &[AlarmEvent]) {
+    let log_dir = "/var/log/firewhal";
+    let log_path = format!("{log_dir}/config-alert.log");
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    for ev in events {
+        let ts = utc_timestamp(secs);
+        let kind = if ev.healthy { "CONFIG RECOVERED" } else { "CONFIG ALERT" };
+        let line = format!("[{ts}] {kind} {}: {}", ev.file, ev.note);
+
+        // 1. persistent record
+        match (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(log_dir)?;
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)?;
+            writeln!(f, "{line}")?;
+            Ok(())
+        })() {
+            Ok(()) => {}
+            Err(e) => eprintln!("[Supervisor] C1: failed to write {log_path}: {e}"),
+        }
+
+        // 2. wall broadcast to every logged-in terminal (best effort)
+        if let Err(e) = Command::new("wall")
+            .arg(&line)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            eprintln!("[Supervisor] C1: wall broadcast failed (log line + TUI status remain): {e}");
+        }
+    }
+}
+
+/// C1: health state is persisted across daemon restarts (the state file
+/// lives next to the alarm log) so a recovery alarm still fires when the
+/// config is restored and the stack restarted — the in-memory state alone
+/// would lose the transition (a fresh process sees a healthy config and has
+/// no idea the previous one was degraded).
+const HEALTH_STATE_PATH: &str = "/var/log/firewhal/config-health.state";
+
+fn load_prev_health() -> Option<ConfigHealthState> {
+    let content = std::fs::read_to_string(HEALTH_STATE_PATH).ok()?;
+    let mut rules = FileHealth::Healthy;
+    let mut apps = FileHealth::Healthy;
+    let mut interfaces = FileHealth::Healthy;
+    for line in content.lines() {
+        let (k, v) = match line.split_once('=') {
+            Some(t) => t,
+            None => continue,
+        };
+        let h = if v == "Degraded" { FileHealth::Degraded } else { FileHealth::Healthy };
+        match k {
+            "rules" => rules = h,
+            "apps" => apps = h,
+            "interfaces" => interfaces = h,
+            _ => {}
+        }
+    }
+    Some(ConfigHealthState {
+        rules: (rules, String::new()),
+        apps: (apps, String::new()),
+        interfaces: (interfaces, String::new()),
+    })
+}
+
+fn save_health(st: &ConfigHealthState) {
+    let dir = "/var/log/firewhal";
+    let tmp = format!("{dir}/config-health.state.tmp");
+    let body = format!(
+        "rules={:?}\napps={:?}\ninterfaces={:?}\n",
+        st.rules.0, st.apps.0, st.interfaces.0
+    );
+    let _ = std::fs::create_dir_all(dir);
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, HEALTH_STATE_PATH);
+    }
+}
+
+/// C1: (re)evaluate the config after a change (startup, TUI update,
+/// reload): evaluate, fire the alarm bundle on any state transition, and
+/// send an honest daemon status (never is_healthy=true while degraded).
+async fn apply_config_health(
+    to_zmq_tx: &mpsc::Sender<FireWhalMessage>,
+    config_health: &mut Option<ConfigHealthState>,
+) {
+    // Previous state: in-memory if this process already evaluated, else the
+    // persisted state from the previous process (so recovery alarms survive
+    // restarts).
+    let mut persisted_prev: Option<ConfigHealthState> = None;
+    let prev_ref: Option<&ConfigHealthState> = match config_health.as_ref() {
+        Some(s) => Some(s),
+        None => {
+            persisted_prev = load_prev_health();
+            persisted_prev.as_ref()
+        }
+    };
+    let (new_state, events) = evaluate_config(to_zmq_tx, prev_ref).await;
+    if !events.is_empty() {
+        fire_config_alarm(&events);
+        let degraded = !new_state.all_healthy();
+        let msg = if degraded {
+            format!(
+                "DEGRADED: {}",
+                events
+                    .iter()
+                    .filter(|e| !e.healthy)
+                    .map(|e| format!("{} ({})", e.file, e.note))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        } else {
+            "Ready (config fully valid)".to_string()
+        };
+        if let Err(e) = to_zmq_tx
+            .send(FireWhalMessage::Status(StatusUpdate {
+                component: "Daemon".to_string(),
+                is_healthy: !degraded,
+                message: msg,
+            }))
+            .await
+        {
+            eprintln!("[Supervisor] C1: failed to send config status: {e}");
+        }
+    }
+    save_health(&new_state);
+    *config_health = Some(new_state);
+}
+
+/// All non-loopback interfaces (the C1 fail-closed default set). Loopback
+/// is excluded so local services on `lo` are never touched.
+fn default_enforced_interfaces() -> HashSet<String> {
+    get_all_interfaces()
+        .into_iter()
+        .filter(|name| !name.starts_with("lo"))
+        .collect()
+}
+
+/// C1: (re)load all three config tomls, apply the fail-closed defaults
+/// where needed, push the effective config to the firewall, and return the
+/// new health state plus any transitions to announce.
+///
+/// `prev` is the last evaluated state (`None` at first evaluation, which is
+/// treated as the all-healthy baseline: a broken config at startup still
+/// announces).
+async fn evaluate_config(
+    to_zmq_tx: &mpsc::Sender<FireWhalMessage>,
+    prev: Option<&ConfigHealthState>,
+) -> (ConfigHealthState, Vec<AlarmEvent>) {
+    let rules_path = path::Path::new("/opt/firewhal/bin/firewall_rules.toml");
+    let apps_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
+    let ifaces_path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
+
+    let mut events: Vec<AlarmEvent> = Vec::new();
+
+    // --- rules: missing/malformed -> empty rule set (default-deny) ---
+    let rules_load = load_rules_config(rules_path);
+    let (rules_config, rules_health, rules_note) = match &rules_load {
+        ConfigLoadResult::Loaded(c) => (
+            c.clone(),
+            FileHealth::Healthy,
+            String::new(),
+        ),
+        ConfigLoadResult::Missing => (
+            FireWhalConfig { outgoing_rules: vec![], incoming_rules: vec![] },
+            FileHealth::Degraded,
+            "missing — NO RULES loaded; all traffic is blocked (fail-closed default). Restore the file, then reload from the TUI (or restart the stack).".to_string(),
+        ),
+        ConfigLoadResult::Malformed { reason } => (
+            FireWhalConfig { outgoing_rules: vec![], incoming_rules: vec![] },
+            FileHealth::Degraded,
+            format!("malformed ({reason}) — NO RULES loaded; all traffic is blocked (fail-closed default). Fix the file, then reload from the TUI (or restart the stack)."),
+        ),
+    };
+
+    // --- apps: missing -> bootstrap empty allowlist (historical behavior);
+    //     malformed -> empty allowlist (egress denied at the app gate).
+    //     An EMPTY allowlist is a degraded posture in itself (all egress
+    //     denied at the app gate) — same classification the firewhal-health
+    //     validator uses, so daemon and validator can never disagree. ---
+    let apps_load = load_app_ids_config(apps_path);
+    let (apps_config, apps_health, apps_note) = match &apps_load {
+        ConfigLoadResult::Loaded(c) if !c.apps.is_empty() => (c.clone(), FileHealth::Healthy, String::new()),
+        ConfigLoadResult::Loaded(c) => (
+            c.clone(),
+            FileHealth::Degraded,
+            "valid but EMPTY allowlist — all egress is denied at the app gate (fail-closed). Restore the allowlist.".to_string(),
+        ),
+        ConfigLoadResult::Missing => {
+            eprintln!("[Supervisor] App identity file not found at '{apps_path:?}'. Creating a new, empty one (C1: announcing as degraded).");
+            let empty = ApplicationAllowlistConfig { apps: HashMap::new() };
+            if let Err(e) = save_app_ids(apps_path, &empty) {
+                eprintln!("[Supervisor] C1: failed to bootstrap empty app allowlist: {e}");
+            }
+            (
+                empty,
+                FileHealth::Degraded,
+                "missing — created an empty app allowlist; all egress is denied at the app gate (fail-closed). Restore the file, then reload from the TUI (or restart the stack).".to_string(),
+            )
+        }
+        ConfigLoadResult::Malformed { reason } => (
+            ApplicationAllowlistConfig { apps: HashMap::new() },
+            FileHealth::Degraded,
+            format!("malformed ({reason}) — an empty app allowlist is in effect; all egress is denied at the app gate (fail-closed). Fix the file, then reload from the TUI (or restart the stack)."),
+        ),
+    };
+
+    // --- interfaces: missing/malformed/empty -> ALL non-loopback (the
+    //     fail-closed default; the TC layer is never left unattached) ---
+    let ifaces_load = load_interface_state_config(ifaces_path);
+    let default_ifaces = default_enforced_interfaces();
+    let default_list = {
+        let mut v: Vec<String> = default_ifaces.iter().cloned().collect();
+        v.sort();
+        v.join(", ")
+    };
+    let (ifaces_config, ifaces_health, ifaces_note) = match &ifaces_load {
+        ConfigLoadResult::Loaded(c) if !c.enforced_interfaces.is_empty() => {
+            // Prune interfaces that no longer exist (historical behavior)
+            let current = get_all_interfaces();
+            let mut pruned = c.clone();
+            pruned.enforced_interfaces.retain(|x| current.contains(x));
+            if !pruned.enforced_interfaces.is_empty() {
+                (pruned, FileHealth::Healthy, String::new())
+            } else {
+                // everything in the file is gone — fall through to the default
+                (
+                    InterfaceStateConfig { enforced_interfaces: default_ifaces.clone() },
+                    FileHealth::Degraded,
+                    format!("no declared interface still exists — defaulting to all non-loopback interfaces: {default_list} (fail-closed; your management path is protected only if your rules allow it). Restore the file to control the list."),
+                )
+            }
+        }
+        other => {
+            let note = match other {
+                ConfigLoadResult::Missing => "missing".to_string(),
+                ConfigLoadResult::Malformed { reason } => format!("malformed ({reason})"),
+                ConfigLoadResult::Loaded(_) => "empty interface list".to_string(),
+                _ => unreachable!(),
+            };
+            (
+                InterfaceStateConfig { enforced_interfaces: default_ifaces.clone() },
+                FileHealth::Degraded,
+                format!("{note} — defaulting to all non-loopback interfaces: {default_list} (fail-closed; your management path is protected only if your rules allow it). Restore the file to control the list."),
+            )
+        }
+    };
+
+    // --- push the effective config (loaded, or the fail-closed default) ---
+    if let Err(e) = to_zmq_tx
+        .send(FireWhalMessage::LoadRules(rules_config))
+        .await
+    {
+        eprintln!("[Supervisor] C1: FAILED to send rules: {e}");
+    } else {
+        println!("[Supervisor] C1: rules sent ({}).", if rules_health == FileHealth::Healthy { "configured" } else { "fail-closed empty default" });
+    }
+    if let Err(e) = to_zmq_tx
+        .send(FireWhalMessage::LoadAppIds(apps_config))
+        .await
+    {
+        eprintln!("[Supervisor] C1: FAILED to send app ids: {e}");
+    } else {
+        println!("[Supervisor] C1: app ids sent ({}).", if apps_health == FileHealth::Healthy { "configured" } else { "fail-closed empty default" });
+    }
+    if let Err(e) = to_zmq_tx
+        .send(FireWhalMessage::LoadInterfaceState(ifaces_config))
+        .await
+    {
+        eprintln!("[Supervisor] C1: FAILED to send interface state: {e}");
+    } else {
+        println!("[Supervisor] C1: interface state sent ({}).", if ifaces_health == FileHealth::Healthy { "configured" } else { "fail-closed all-non-loopback default" });
+    }
+
+    let new_state = ConfigHealthState {
+        rules: (rules_health, rules_note),
+        apps: (apps_health, apps_note),
+        interfaces: (ifaces_health, ifaces_note),
+    };
+
+    // --- announce the transitions (first evaluation: all-healthy baseline) ---
+    let baseline = ConfigHealthState {
+        rules: (FileHealth::Healthy, String::new()),
+        apps: (FileHealth::Healthy, String::new()),
+        interfaces: (FileHealth::Healthy, String::new()),
+    };
+    let prev = prev.unwrap_or(&baseline);
+    if prev.rules.0 != new_state.rules.0 {
+        events.push(AlarmEvent { file: "firewall_rules.toml", healthy: new_state.rules.0 == FileHealth::Healthy, note: if new_state.rules.0 == FileHealth::Healthy { "rules restored — the configured rule set is in effect again.".to_string() } else { new_state.rules.1.clone() } });
+    }
+    if prev.apps.0 != new_state.apps.0 {
+        events.push(AlarmEvent { file: "app_identity.toml", healthy: new_state.apps.0 == FileHealth::Healthy, note: if new_state.apps.0 == FileHealth::Healthy { "app allowlist restored — the configured allowlist is in effect again.".to_string() } else { new_state.apps.1.clone() } });
+    }
+    if prev.interfaces.0 != new_state.interfaces.0 {
+        events.push(AlarmEvent { file: "interface_state.toml", healthy: new_state.interfaces.0 == FileHealth::Healthy, note: if new_state.interfaces.0 == FileHealth::Healthy { "interface list restored — the declared enforced-interface set is in effect again.".to_string() } else { new_state.interfaces.1.clone() } });
+    }
+
+    (new_state, events)
 }
 
 /// Launches a child process, optionally as a specific user.
@@ -306,6 +699,7 @@ async fn correct_hash_for_app_id(
 async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
     // ... all of your setup code remains exactly the same up to this point ...
     let children = Arc::new(Mutex::new(HashMap::new()));
+    let mut config_health: Option<ConfigHealthState> = None; // C1: §2.4 config-path health
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);
     let (from_zmq_tx, mut from_zmq_rx) = mpsc::channel::<FireWhalMessage>(32);
     let (zmq_shutdown_tx, zmq_shutdown_rx) = broadcast::channel::<()>(1);
@@ -395,50 +789,42 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                 match message {
                     FireWhalMessage::Status(status) => {
                         if status.component == "Firewall" && status.message == "Ready" { // Wait for ready status to be forwarded from the IPC socket, then send rules
-                            println!("[Supervisor] Firewall is ready. Loading and sending rules...");
-                            let rules_path = path::Path::new("/opt/firewhal/bin/firewall_rules.toml");
-                            // Load firewall rules from file, and send configuration to the userspace loader
-                            match load_rules(rules_path) {
-                                Ok(config) => {
-                                    let msg = FireWhalMessage::LoadRules(config);
-                                    if let Err(e) = to_zmq_tx.send(msg).await {
-                                        eprintln!("[Supervisor] FAILED to send rules: {}", e);
-                                    } else {
-                                        println!("[Supervisor] Rules successfully sent to firewall.");
+                            println!("[Supervisor] Firewall is ready. Loading and sending config (C1: health-evaluated)...");
+                            // C1 (design doc §2.4): load all three config files with
+                            // health tracking, apply the fail-closed defaults where
+                            // needed, push the effective config, and announce any
+                            // state transition (alarm bundle + honest TUI status).
+                            apply_config_health(&to_zmq_tx, &mut config_health).await;
+                        } else if status.component == "TUI" {
+                            // C1: the TUI (re)connected — report the CURRENT config
+                            // health so a TUI started after a degraded startup still
+                            // shows the yellow degraded banner (transition-only
+                            // announcements would miss it).
+                            if let Some(st) = config_health.as_ref() {
+                                if !st.all_healthy() {
+                                    let msg = format!(
+                                        "DEGRADED: {}",
+                                        [
+                                            (st.rules.0, st.rules.1.as_str()),
+                                            (st.apps.0, st.apps.1.as_str()),
+                                            (st.interfaces.0, st.interfaces.1.as_str()),
+                                        ]
+                                        .iter()
+                                        .filter(|(h, _)| *h == FileHealth::Degraded)
+                                        .map(|(_, note)| (*note).to_string())
+                                        .collect::<Vec<_>>()
+                                        .join("; ")
+                                    );
+                                    if let Err(e) = to_zmq_tx
+                                        .send(FireWhalMessage::Status(StatusUpdate {
+                                            component: "Daemon".to_string(),
+                                            is_healthy: false,
+                                            message: msg,
+                                        }))
+                                        .await
+                                    {
+                                        eprintln!("[Supervisor] C1: failed to send config status: {e}");
                                     }
-                                }
-                                Err(e) => {
-                                    eprintln!("[Supervisor] FAILED to load firewall rules: {}", e);
-                                }
-                            }
-                            // Load app ids and hashes and send to userspace loader
-                            let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
-                            match load_app_ids(app_id_path) {
-                                Ok(config) => {
-                                    let msg = FireWhalMessage::LoadAppIds(config);
-                                    if let Err(e) = to_zmq_tx.send(msg).await {
-                                        eprintln!("[Supervisor] FAILED to send app ids: {}", e);
-                                    } else {
-                                        println!("[Supervisor] App IDs successfully sent to firewall.");
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("[Supervisor] FAILED to load app ids: {}", e);
-                                }
-                            }
-                            // Load interface state and send to userspace loader
-                            let interface_state_path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
-                            match load_interface_state(interface_state_path) {
-                                Ok(config) => {
-                                    let msg = FireWhalMessage::LoadInterfaceState(config);
-                                    if let Err(e) = to_zmq_tx.send(msg).await {
-                                        eprintln!("[Supervisor] FAILED to send interface state: {}", e);
-                                    } else {
-                                        println!("[Supervisor] Interface state successfully sent to firewall.");
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("[Supervisor] FAILED to load interface state: {}", e);
                                 }
                             }
                         }
@@ -457,20 +843,9 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                             let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
                             // Add app ids and then overwrite current file
                             add_app_ids(app_id_path, message.app_ids_to_add);
-                            // load from overwritten file and the send, less efficient but single point of truth
-                            match load_app_ids(app_id_path) {
-                                Ok(config) => {
-                                    let msg = FireWhalMessage::LoadAppIds(config);
-                                    if let Err(e) = to_zmq_tx.send(msg).await {
-                                        eprintln!("[Supervisor] FAILED to send app ids: {}", e);
-                                    } else {
-                                        println!("[Supervisor] App IDs successfully sent to firewall.");
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("[Supervisor] FAILED to load app ids: {}", e);
-                                }
-                            }
+                            // C1: re-evaluate all config (the add may have healed a
+                            // degraded allowlist); announces on transitions.
+                            apply_config_health(&to_zmq_tx, &mut config_health).await;
                         }
 
                     }
@@ -496,19 +871,9 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                        println!("[Supervisor] Received UpdateRules command from TUI"); 
                        let path = path::Path::new("/opt/firewhal/bin/firewall_rules.toml");
                        save_rules(path, &message)?;
-                       match load_rules(path) {
-                                Ok(config) => {
-                                    let msg = FireWhalMessage::LoadRules(config);
-                                    if let Err(e) = to_zmq_tx.send(msg).await {
-                                        eprintln!("[Supervisor] FAILED to send rules: {}", e);
-                                    } else {
-                                        println!("[Supervisor] Rules successfully sent to firewall.");
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("[Supervisor] FAILED to load firewall rules: {}", e);
-                                }
-                            }
+                       // C1: re-evaluate all config (the update may have healed a
+                       // degraded rule file); announces on transitions.
+                       apply_config_health(&to_zmq_tx, &mut config_health).await;
                     }
                     FireWhalMessage::AppsRequest(message) => {
                         println!("[Supervisor] Received AppsRequest command from TUI"); 
@@ -533,20 +898,9 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                         println!("[Supervisor] Received UpdateAppIds command from TUI");
                         let app_id_path = path::Path::new("/opt/firewhal/bin/app_identity.toml");
                         save_app_ids(app_id_path, &message)?;
-                        match load_app_ids(app_id_path) {
-                            Ok(config) => {
-                                let msg = FireWhalMessage::LoadAppIds(config);
-                                if let Err(e) = to_zmq_tx.send(msg).await {
-                                    eprintln!("[Supervisor] Failed to send app id list: {}", e);
-                                } else {
-                                    println!("[Supervisor] App ID list successfully sent to TUI.");
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("[Supervisor] Failed to load app ids: {}", e);
-                            }
-
-                        }
+                        // C1: re-evaluate all config (the update may have healed a
+                        // degraded allowlist); announces on transitions.
+                        apply_config_health(&to_zmq_tx, &mut config_health).await;
                     }
                     FireWhalMessage::InterfaceRequest(message) => {
                         println!("[Superivsor] Received InterfaceRequest command from TUI");
@@ -575,19 +929,9 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                         println!("[Supervisor] Received UpdateInterfaces command from TUI");
                         let path = path::Path::new("/opt/firewhal/bin/interface_state.toml");
                         save_interface_state(path, &message.interfaces)?;
-                        match load_interface_state(path) {
-                            Ok(interface_state) => {
-                                let msg = FireWhalMessage::LoadInterfaceState(interface_state);
-                                if let Err(e) = to_zmq_tx.send(msg).await {
-                                    eprintln!("[Supervisor] Failed to send LoadInterfaceState message to Firewall.")
-                                } else {
-                                    println!("[Supervisor] Successfully sent LoadInterfaceState message to Firewall.")
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("[Supervisor] Failed to load interface list: {}", e);
-                            }
-                        }
+                        // C1: re-evaluate all config (the update may have healed a
+                        // degraded interface list); announces on transitions.
+                        apply_config_health(&to_zmq_tx, &mut config_health).await;
                     }
                     FireWhalMessage::HashRequest(message) => {
                         println!("[Supervisor] Received HashesRequest command from TUI");

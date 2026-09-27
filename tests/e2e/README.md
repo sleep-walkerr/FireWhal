@@ -24,7 +24,8 @@ The rig directory defaults to `/home/torch/fw-vm`.
 | 5. probes | guest | `ipc_smoke` router round-trip; then the three enforcement differentials (log-signal assertions) |
 | 6. data | host+guest | D1 data-level enforcement: baseline (stack down) → allow → block in one run; host listener on `127.0.0.1:9999` (byte-level) + guest-side `tcpdump`/`tshark` capture per leg (frame-level) — the first wire-outcome phase |
 | 7. ssh-block | host+guest | S1 deliberate SSH block on the enforced path (2223): baseline → block (config swap + restart) → window (2223 down 5/5; **M1:** mgmt 2222 up 5/5) → VM-local self-expiry (detached sleeper, 120 s) → recovery; verdict + wire + timeline verified (state in `/var/lib/fw-e2e/`) |
-| 8. cleanup | host | power the VM off (state stays in the overlay; the next run recreates the overlay and boots in phase 1) |
+| 8. c1 | host+guest | C1 config-path regression: three legs, each moving one config toml aside, restarting the stack (degraded starts must still come up), and asserting the fail-closed posture **on the wire** (rules: default-deny holds; interfaces: the all-non-loopback default keeps enforcement active and mgmt 2222 reachable; apps: egress denied at the app gate). Each leg restores the file and verifies `CONFIG ALERT` + `CONFIG RECOVERED` in the persistent alarm log; the `firewhal-health` validator (same parse as the daemon) must exit 1 while misplaced and 0 after restore |
+| 9. cleanup | host | power the VM off (state stays in the overlay; the next run recreates the overlay and boots in phase 1) |
 
 After a run the VM is powered off. The next run always starts from a
 pristine overlay (phase 1). To inspect a run's state afterwards, boot it
@@ -90,14 +91,46 @@ at risk).
 | self-expiry | sleeper fires | config restored byte-for-byte, stack ready, timeline records `rule-down (self-expiry)` + `rule-up restored` |
 | recovery | up, rule restored | `ssh -p 2223` succeeds again with no outside intervention; recovery capture: `:22` frames present again |
 
+## C1 config-path regression (phase 8)
+
+Ticket #106, design doc §2.4. The question: deploy with a toml missing or
+malformed — silent zero-rules start, or loudly degraded? The contract: the
+stack stays **up** (a dead firewall detaches every eBPF hook — that is
+fail-open, the worst case) in the fail-closed default for whatever is
+missing, and announces the degraded state on every channel (persistent
+alarm log, `wall`, TUI banner, and the `firewhal-health` oneshot validator —
+never green on a broken config).
+
+Each leg moves one toml aside, restarts the stack (the degraded start must
+still come up — no happy-path readiness gate), and asserts the resulting
+posture on the wire (D1-style `tcpdump`/`tshark` capture on `enp0s3`):
+
+| Leg | Degraded posture (fail-closed) | Wire assertion | Also asserted |
+|---|---|---|---|
+| rules | `firewall_rules.toml` missing → empty rule set: default-deny, everything blocked | probe `:9999` (allowed under normal config) cut — **0 frames** | validator rc=1 → 0 across the restore |
+| interfaces | `interface_state.toml` missing → hooks on **all non-loopback** interfaces (the TC layer is never left unattached) | enforcement still active: `:8080` cut (0 frames) **and** `:9999` delivered (frames present) | **M1 under the default:** mgmt 2222 reachable 3/3 (the rules allow `tcp/22`) |
+| apps | `app_identity.toml` missing → daemon bootstraps an **empty** allowlist | egress denied at the app gate: `:9999` cut — **0 frames** (the rule allows it; the allowlist does not) | the empty allowlist file exists after the start |
+
+After each leg the file is restored, the stack restarts healthy, and the
+verify step asserts the alarm log recorded both `CONFIG ALERT` and
+`CONFIG RECOVERED` for that file (the recovery alarm survives the restart
+because the daemon persists its health state in
+`/var/log/firewhal/config-health.state`) and that all three config pushes
+came back as `(configured)`.
+
+The alarm log (`/var/log/firewhal/config-alert.log`) is persistent (never
+`/tmp` — S1 forensics proved it non-durable on this image) and is the
+e2e's ground truth for the wall/TUI channels (the rig is headless).
+
 ## Files
 
-- `run-e2e.sh` — host-side orchestrator (preflight + phases 1–3, 6–8, then runs the guest scripts)
+- `run-e2e.sh` — host-side orchestrator (preflight + phases 1–3, 6–9, then runs the guest scripts)
 - `dep_freshness.py` — preflight: core-set drift report (Cargo.lock vs crates.io, ticket #106)
 - `vm_deploy.sh` — guest-side: teardown, install, config generation (incl. the D1 `:9999` rule), launch, readiness wait
 - `vm_probes.sh` — guest-side: the phase 5 checks; exits non-zero on any failure
 - `vm_data_probe.sh` — guest-side D1: per-leg `tcpdump` capture, `tshark` frame assertions, verdict lines
 - `vm_s1.sh` — guest-side S1: self-expiry arming (detached sleeper), config swap + restart, per-leg `tcpdump` captures, `verify` (config restore, readiness, verdict, wire, timeline); state in `/var/lib/fw-e2e/`
+- `vm_c1.sh` — guest-side C1: `move`/`start` (detached — the new enforcement may sever the in-flight ssh session, by design)/`c1-status` (non-blocking status read; the gate polls it from the host with fresh short probes)/`wait-start` (manual poll)/`probe`/`restore`/`verify`; backups in `/var/lib/fw-e2e/c1-backup/`
 
 ## Adding a probe
 

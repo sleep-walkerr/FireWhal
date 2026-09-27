@@ -60,6 +60,12 @@ sudo cp target/debug/firewhal-discord-bot /opt/firewhal/bin
 echo "Installing daemon to /usr/local/sbin (the daemon will be started from a systemd unit file and located in /opt/firewhal/bin in the future)"
 sudo cp target/debug/firewhal-daemon /usr/local/sbin
 
+echo "Installing firewhal-health to /usr/local/sbin (C1 boot-time config validator, design doc §2.4)"
+sudo cp target/debug/firewhal-health /usr/local/sbin
+sudo cp firewhal-health.service /etc/systemd/system
+sudo systemctl daemon-reload
+sudo systemctl enable firewhal-health.service
+
 echo "Installing Discord token and user ID"
 sudo cp firewhal-discord-bot/.env /opt/firewhal
 

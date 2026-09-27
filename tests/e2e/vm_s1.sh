@@ -64,9 +64,9 @@ stack_ready() {
         cg=$(printf '%s\n' "$bpf" | grep -c 'cgroup_sock_addr.*firewhal' || true)
         so=$(printf '%s\n' "$bpf" | grep -c 'sock_ops.*firewhal' || true)
         if [ "${procs:-0}" -ge 3 ] && [ "${tc:-0}" -ge 2 ] && [ "${cg:-0}" -ge 1 ] && [ "${so:-0}" -ge 1 ] \
-            && sudo grep -q 'Rules successfully sent to firewall' "$LOG_OUT" \
-            && sudo grep -q 'App IDs successfully sent to firewall' "$LOG_OUT" \
-            && sudo grep -q 'Interface state successfully sent to firewall' "$LOG_OUT"; then
+            && sudo grep -q 'C1: rules sent' "$LOG_OUT" \
+            && sudo grep -q 'C1: app ids sent' "$LOG_OUT" \
+            && sudo grep -q 'C1: interface state sent' "$LOG_OUT"; then
             return 0
         fi
     done
@@ -186,9 +186,9 @@ for i in $(seq 1 24); do
     cg=$(printf '%s\n' "$bpf" | grep -c 'cgroup_sock_addr.*firewhal' || true)
     so=$(printf '%s\n' "$bpf" | grep -c 'sock_ops.*firewhal' || true)
     if [ "${procs:-0}" -ge 3 ] && [ "${tc:-0}" -ge 2 ] && [ "${cg:-0}" -ge 1 ] && [ "${so:-0}" -ge 1 ] \
-        && grep -q 'Rules successfully sent to firewall' "$LOG_OUT" \
-        && grep -q 'App IDs successfully sent to firewall' "$LOG_OUT" \
-        && grep -q 'Interface state successfully sent to firewall' "$LOG_OUT"; then
+        && grep -q 'C1: rules sent' "$LOG_OUT" \
+        && grep -q 'C1: app ids sent' "$LOG_OUT" \
+        && grep -q 'C1: interface state sent' "$LOG_OUT"; then
         echo "[$(ts)] rule-up restored; stack ready (self-expiry recovery complete)" >> "$TIMELINE"
         exit 0
     fi

@@ -25,7 +25,17 @@
 #               VM-local self-expiry sleeper (detached guest process, default
 #               120 s, FW_S1_WINDOW overridable) restores the rule;
 #               wire-verified
-#   8. cleanup  power the VM off (state stays in the overlay; the next run
+#   8. c1       C1 config-path regression (design doc §2.4): three legs,
+#               each moving one config toml aside, restarting the stack
+#               (degraded starts must still come up), and asserting the
+#               fail-closed posture ON THE WIRE — rules: default-deny holds;
+#               interfaces: the all-non-loopback default keeps enforcement
+#               active (and mgmt 2222 still reachable); apps: egress denied
+#               at the app gate. Each leg restores the file and verifies the
+#               CONFIG ALERT + CONFIG RECOVERED lines in the persistent
+#               alarm log; the firewhal-health validator (same parse as the
+#               daemon) must exit 1 while misplaced and 0 after restore
+#   9. cleanup  power the VM off (state stays in the overlay; the next run
 #               recreates the overlay and boots from scratch in phase 1)
 #
 # Exit code: 0 iff every check passed.
@@ -53,12 +63,12 @@ fi
 
 # ---------- 1. rig ----------
 if "$FW_VM" ssh true 2>/dev/null; then
-    say "phase 1/8 rig: VM reachable"
+    say "phase 1/9 rig: VM reachable"
 else
     if [ -f "$FW_VM_DIR/fw-test.pid" ] && kill -0 "$(cat "$FW_VM_DIR/fw-test.pid")" 2>/dev/null; then
         die "VM process is alive but SSH is unreachable — stop the VM, check $FW_VM_DIR/fw-test-serial.log, retry"
     fi
-    say "phase 1/8 rig: VM down — recreating overlay and booting"
+    say "phase 1/9 rig: VM down — recreating overlay and booting"
     "$FW_VM" reset
     "$FW_VM" boot
     up=""
@@ -71,12 +81,12 @@ else
 fi
 
 # ---------- 2. build ----------
-say "phase 2/8 build: cargo build --release"
+say "phase 2/9 build: cargo build --release"
 (cd "$REPO_ROOT" && cargo build --release 2>&1 | tail -n 1)
 (cd "$REPO_ROOT" && cargo build --release --example ipc_smoke -p firewhal-core 2>&1 | tail -n 1)
 
 mkdir -p "$STAGE/bin"
-for b in firewhal-daemon firewhal-ipc firewhal-kernel firewhal-tui firewhal-discord-bot; do
+for b in firewhal-daemon firewhal-ipc firewhal-kernel firewhal-tui firewhal-discord-bot firewhal-health; do
     cp "$REPO_ROOT/target/release/$b" "$STAGE/bin/"
 done
 cp "$REPO_ROOT/target/release/examples/ipc_smoke" "$STAGE/bin/"
@@ -84,23 +94,24 @@ tar -czf "$STAGE/deploy.tar.gz" -C "$STAGE" bin
 say "packaged: $(ls "$STAGE/bin" | tr '\n' ' ')"
 
 # ---------- 3. deploy ----------
-say "phase 3/8 deploy: shipping tarball + guest scripts"
+say "phase 3/9 deploy: shipping tarball + guest scripts"
 "$FW_VM" ssh 'cat > /tmp/fw-e2e-deploy.tar.gz' < "$STAGE/deploy.tar.gz"
 "$FW_VM" ssh 'cat > /tmp/fw-e2e-vm_deploy.sh' < "$E2E_DIR/vm_deploy.sh"
 "$FW_VM" ssh 'cat > /tmp/fw-e2e-vm_probes.sh' < "$E2E_DIR/vm_probes.sh"
 "$FW_VM" ssh 'cat > /tmp/fw-e2e-vm_data_probe.sh' < "$E2E_DIR/vm_data_probe.sh"
 "$FW_VM" ssh 'cat > /tmp/fw-e2e-vm_s1.sh' < "$E2E_DIR/vm_s1.sh"
+"$FW_VM" ssh 'cat > /tmp/fw-e2e-vm_c1.sh' < "$E2E_DIR/vm_c1.sh"
 "$FW_VM" ssh 'bash /tmp/fw-e2e-vm_deploy.sh'
 
 # ---------- 4+5. ready + probes (inside the guest) ----------
-say "phase 4/8 ready + phase 5/8 probes: running in guest"
+say "phase 4/9 ready + phase 5/9 probes: running in guest"
 set +e
 "$FW_VM" ssh 'bash /tmp/fw-e2e-vm_probes.sh'
 rc=$?
 set -e
 
 # ---------- 6. data-level (D1): baseline -> allow -> block, wire-verified ----------
-say "phase 6/8 data: data-level enforcement (host listener + guest wire capture)"
+say "phase 6/9 data: data-level enforcement (host listener + guest wire capture)"
 D1_OUT="$STAGE/d1-listener.out"
 rm -f "$D1_OUT"
 # Preflight: the byte-level leg needs the host listener to co-bind
@@ -180,7 +191,7 @@ rc=$((rc + D1_TOTAL))
 # restarts the stack after the window. If the block regresses (no cut), 2223
 # stays up and the "must be down" checks fail — the test can never lock us
 # out of itself (2222 is never at risk).
-say "phase 7/8 ssh-block (S1): block the enforced-path SSH, keep mgmt up, self-expiry recovery"
+say "phase 7/9 ssh-block (S1): block the enforced-path SSH, keep mgmt up, self-expiry recovery"
 SSH_KEY="$HOME/.ssh/id_ed25519_fwvm"
 ssh_2223() {
     ssh -i "$SSH_KEY" -p 2223 -o StrictHostKeyChecking=no \
@@ -276,8 +287,96 @@ if [ "$S1_TOTAL" -eq 0 ]; then
 fi
 rc=$((rc + S1_TOTAL))
 
-# ---------- 8. cleanup: power the VM off ----------
-say "phase 8/8 cleanup: shutting the VM down"
+# ---------- 8. C1: config-path regression (design doc §2.4) ----------
+# A missing/malformed config toml must leave the stack UP in the fail-closed
+# default (a dead firewall is fail-open — the worst case) and loudly
+# announced (alarm bundle + TUI + the oneshot validator). Each leg asserts
+# the posture ON THE WIRE (D1-style capture) and verifies the alarm log
+# records both the degradation and the recovery.
+say "phase 8/9 c1: config-path regression (3 legs + validator)"
+C1_TOTAL=0
+health_rc() { # the firewhal-health validator's exit code (0 healthy, 1 degraded)
+    "$FW_VM" ssh "bash -c '/opt/firewhal/bin/firewhal-health >/tmp/fw-c1-health.out 2>&1; echo RC=\$?'" \
+        | grep -o 'RC=[0-9]*' | cut -d= -f2
+}
+# Fresh short mgmt ssh with liveness probes: a probe whose channel is
+# severed at the attach moment (interfaces leg, by design) self-terminates
+# in ~20 s instead of hanging forever.
+c1_ssh_probe() {
+    ssh -i "$SSH_KEY" -p 2222 -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 \
+        -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+        ubuntu@127.0.0.1 "$@" 2>/dev/null
+}
+for LEG in rules interfaces apps; do
+    say "c1 leg $LEG: moving the toml aside"
+    if "$FW_VM" ssh "bash /tmp/fw-e2e-vm_c1.sh move $LEG"; then
+        say "PASS: c1 $LEG: toml moved aside"
+    else
+        say "FAIL: c1 $LEG: moving the toml aside failed"
+        C1_TOTAL=$((C1_TOTAL + 1))
+    fi
+    HR=$(health_rc || true)
+    if [ "${HR:-x}" = 1 ]; then
+        say "PASS: c1 $LEG: firewhal-health rc=1 while misplaced (never green on a broken config)"
+    else
+        say "FAIL: c1 $LEG: firewhal-health rc=${HR:-?} while misplaced (expected 1)"
+        C1_TOTAL=$((C1_TOTAL + 1))
+    fi
+    # degraded start: the stack must still come up (fail-closed, not dead).
+    # `start` is dispatched detached (the in-flight ssh session may be
+    # severed by the attach — by design). Poll the outcome from the HOST
+    # with fresh short probes: the interfaces leg's attach goes to the mgmt
+    # path, so a probe spanning the attach moment is severed (its channel
+    # dies mid-poll); ServerAliveInterval bounds such a probe to ~20 s and
+    # the loop converges once the window has passed.
+    "$FW_VM" ssh "bash /tmp/fw-e2e-vm_c1.sh start" || C1_TOTAL=$((C1_TOTAL + 1))
+    start_reported=""
+    for attempt in $(seq 1 30); do
+        st=$(c1_ssh_probe "bash /tmp/fw-e2e-vm_c1.sh c1-status" | head -n 1)
+        case "$st" in
+            READY|FAILED) start_reported="$st"; break ;;
+        esac
+        sleep 5
+    done
+    if [ "$start_reported" = READY ]; then
+        say "PASS: c1 $LEG: detached start reported READY"
+    else
+        say "FAIL: c1 $LEG: detached start reported ${start_reported:-nothing within ~5 min}"
+        C1_TOTAL=$((C1_TOTAL + 1))
+    fi
+    # wire assertion for this leg's posture
+    "$FW_VM" ssh "bash /tmp/fw-e2e-vm_c1.sh probe $LEG" || C1_TOTAL=$((C1_TOTAL + 1))
+    if [ "$LEG" = interfaces ]; then
+        # M1-under-the-default: the mgmt path (2222) is now enforced too —
+        # it must stay reachable because the test rules allow tcp/22
+        mgmt_up=0
+        for i in 1 2 3; do
+            if "$FW_VM" ssh true 2>/dev/null; then mgmt_up=$((mgmt_up + 1)); fi
+            sleep 2
+        done
+        if [ "$mgmt_up" -eq 3 ]; then
+            say "PASS: c1 interfaces: mgmt 2222 reachable 3/3 under the all-non-loopback default"
+        else
+            say "FAIL: c1 interfaces (M1): mgmt 2222 reachable ${mgmt_up}/3 under the default — management locked out"
+            C1_TOTAL=$((C1_TOTAL + 1))
+        fi
+    fi
+    # restore the file (restarts the stack healthy) and verify the alarms
+    "$FW_VM" ssh "bash /tmp/fw-e2e-vm_c1.sh restore $LEG" || C1_TOTAL=$((C1_TOTAL + 1))
+    HR=$(health_rc || true)
+    if [ "${HR:-x}" = 0 ]; then
+        say "PASS: c1 $LEG: firewhal-health rc=0 after restore"
+    else
+        say "FAIL: c1 $LEG: firewhal-health rc=${HR:-?} after restore (expected 0)"
+        C1_TOTAL=$((C1_TOTAL + 1))
+    fi
+    "$FW_VM" ssh "bash /tmp/fw-e2e-vm_c1.sh verify $LEG" || C1_TOTAL=$((C1_TOTAL + 1))
+done
+rc=$((rc + C1_TOTAL))
+
+# ---------- 9. cleanup: power the VM off ----------
+say "phase 9/9 cleanup: shutting the VM down"
 if ! "$FW_VM" stop >/dev/null 2>&1; then
     say "warning: VM did not stop (check $FW_VM_DIR/fw-test.pid)"
 fi

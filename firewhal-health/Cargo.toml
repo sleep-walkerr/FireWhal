@@ -1,0 +1,7 @@
+[package]
+name = "firewhal-health"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+firewhal-core = { path = "../firewhal-core" }
