@@ -9,15 +9,16 @@
 #   - rustup toolchain nightly-2026-07-15 — the pinned eBPF toolchain
 #     (firewhal-kernel/build.rs); installed by prepare() if absent
 #
-# Versioning: pkgver is derived from the [workspace.package] version in
-# Cargo.toml (single source of truth). Hand-bump it there, commit, push,
-# then `just install`.
+# Versioning: static pkgver, on purpose. A dynamic pkgver() function is
+# not usable on this distro's makepkg — it lints the pkgver variable
+# before the function can run and rejects the empty one ("pkgver is not
+# allowed to be empty"; reproduced with a minimal probe PKGBUILD).
+# Hand-bump this AND [workspace.package].version in Cargo.toml together;
+# `just install` runs a version-check that fails loud if the two drift.
 
 pkgname=firewhal
 pkgdesc="FireWhal — eBPF-based application + rule firewall (daemon, kernel loader, TUI, IPC router, config validator)"
-pkgver() {
-    sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1
-}
+pkgver=0.1.0
 pkgrel=1
 arch=(x86_64)
 url="https://github.com/sleep-walkerr/FireWhal"

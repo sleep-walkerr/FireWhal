@@ -8,9 +8,15 @@ set shell := ["bash", "-euo pipefail", "-c"]
 # bpf-linker (source build) lives here on the dev host
 export PATH := "/home/torch/.local/bin:" + env_var("PATH")
 
+# Version gate: PKGBUILD's pkgver must equal the workspace Cargo.toml
+# version (hand-bump both together — see the PKGBUILD header on why
+# pkgver() is not used here).
+version-check:
+    pv=$(sed -n 's/^pkgver=//p' PKGBUILD | head -n 1) && wv=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1) && { [ -n "$pv" ] && [ "$pv" = "$wv" ] || { echo "FATAL: version drift — PKGBUILD pkgver=${pv:-none} vs Cargo.toml ${wv:-none} — bump both to the same SemVer"; exit 1; }; }; echo "version check OK: $pv"
+
 # Full package build + versioned install. Builds from the committed repo
 # state (makepkg clones the repo), so commit + push first.
-install:
+install: version-check
     makepkg -si --nodeps
 
 # Inner dev loop: incremental cargo build + in-place binary update +
