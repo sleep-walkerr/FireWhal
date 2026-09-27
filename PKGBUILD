@@ -19,13 +19,27 @@
 pkgname=firewhal
 pkgdesc="FireWhal — eBPF-based application + rule firewall (daemon, kernel loader, TUI, IPC router, config validator)"
 pkgver=0.1.0
-pkgrel=6
+pkgrel=7
 arch=(x86_64)
 url="https://github.com/sleep-walkerr/FireWhal"
 license=("MIT OR Apache-2.0")
 source=("git+${url}.git")
 sha256sums=(SKIP)
 makedepends=(rust git)
+# Config-file registration (pacman "backup" semantics — PKGBUILD(5),
+# pacman(8) "Handling Config Files"): makepkg does NOT auto-mark files
+# under /etc — the backup array is the only mechanism (verified on the
+# host: system packages ship /etc files with empty or partial backup
+# lists, e.g. gawk marks none, openssl only openssl.cnf; only explicit
+# entries get config semantics). Without these entries pacman treats the
+# templates as plain files and silently overwrites user edits on
+# upgrade/removal (no .pacnew, no .pacsave, no warning — the observed
+# behavior of every 0.1.0-1..-6 transaction on this host).
+backup=(
+    'etc/firewhal/app_identity.toml'
+    'etc/firewhal/firewall_rules.toml'
+    'etc/firewhal/interface_state.toml'
+)
 # Scriptlets live in a separate file — pacman's mechanism is the install=
 # directive (NOT functions in the PKGBUILD; see PKGBUILD(5)). makepkg
 # copies it into the package as .INSTALL (lint verifies it exists).
