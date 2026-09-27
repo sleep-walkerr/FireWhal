@@ -470,6 +470,21 @@ pub struct BlockAddressRule {
 }
 
 // ---------------------------------------------------------------------------
+// Config location (packaging, #136 "Option B"): the daemon, the
+// `firewhal-health` validator, and everything else assume the config tomls
+// live in one directory. The package installs templates there and pacman
+// treats /etc files as config (preserved on upgrade, .pacnew on conflict).
+// ---------------------------------------------------------------------------
+
+/// The directory the daemon and `firewhal-health` read the config tomls from.
+pub const DEFAULT_CONFIG_DIR: &str = "/etc/firewhal";
+
+/// Path of one config toml under [`DEFAULT_CONFIG_DIR`].
+pub fn config_path(file_name: &str) -> PathBuf {
+    PathBuf::from(DEFAULT_CONFIG_DIR).join(file_name)
+}
+
+// ---------------------------------------------------------------------------
 // C1: config-path loading (design doc §2.4), shared by the daemon and
 // `firewhal-health` so both parse with exactly the same semantics.
 //

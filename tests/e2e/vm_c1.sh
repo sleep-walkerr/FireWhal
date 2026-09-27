@@ -62,11 +62,11 @@ check() { # $1=name  $2=condition (0/1)
     fi
 }
 
-toml_for() { # leg -> toml path under /opt/firewhal/bin
+toml_for() { # leg -> toml path under /etc/firewhal
     case "$1" in
-        rules) echo /opt/firewhal/bin/firewall_rules.toml ;;
-        interfaces) echo /opt/firewhal/bin/interface_state.toml ;;
-        apps) echo /opt/firewhal/bin/app_identity.toml ;;
+        rules) echo /etc/firewhal/firewall_rules.toml ;;
+        interfaces) echo /etc/firewhal/interface_state.toml ;;
+        apps) echo /etc/firewhal/app_identity.toml ;;
         *) say "FATAL: unknown leg '$1'"; exit 2 ;;
     esac
 }
@@ -245,6 +245,11 @@ case "$CMD" in
       n=$(frames 9999)
       m=$(frames 8080)
       say "probe $LEG: $n frames for :9999, $m frames for :8080"
+      # Packet-level evidence in the gate log: the guest /tmp is not durable,
+      # so without this the only pcap dies with the power cycle.
+      sudo tshark -r "$CAP" -Y "tcp" -T fields \
+          -e frame.time_relative -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags \
+          2>/dev/null | sed 's/^/[c1] pkt: /' || true
       case "$LEG" in
         rules)
             check "rules: default-deny held on the wire (:9999 cut, 0 frames)" $([ "$n" -eq 0 ] && echo 0 || echo 1)
@@ -256,7 +261,7 @@ case "$CMD" in
         apps)
             check "apps: egress denied at the app gate (:9999 cut, 0 frames)" $([ "$n" -eq 0 ] && echo 0 || echo 1)
             # the daemon must have bootstrapped the empty allowlist file
-            if sudo test -f /opt/firewhal/bin/app_identity.toml; then
+            if sudo test -f /etc/firewhal/app_identity.toml; then
                 check "apps: empty allowlist file bootstrapped by the daemon" 0
             else
                 check "apps: empty allowlist file bootstrapped by the daemon" 1

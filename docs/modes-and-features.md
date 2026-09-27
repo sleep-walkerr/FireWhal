@@ -136,6 +136,7 @@ These are documented, open issues rather than design goals:
   are never dropped. The root cause (non-whitelisted `SCHED_CLS` helper calls) and
   the fix are covered in [VM Enforcement Testing](./vm-enforcement-testing.md) and
   PR #97.
-- **Config path sensitivity** — the daemon reads its three TOML files from
-  `/opt/firewhal/bin/`, not `/opt/firewhal/config/`; a deploy that puts them in the
-  "obvious" location starts the firewall with zero rules and no error.
+- ~~**Config path sensitivity**~~ — resolved (2026-09-27, packaging #136): the
+  config tomls live in `/etc/firewhal/`, the single location the daemon,
+  `firewhal-health`, and the package all use (shared constant
+  `firewhal_core::DEFAULT_CONFIG_DIR`).

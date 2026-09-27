@@ -110,7 +110,11 @@ impl EventHandler for Handler {
 async fn main() {
     // Add 5 second sleep to give firewhal time to set up. Connection failure occurrs otherwise.
     sleep(Duration::from_secs(1));
-    dotenv().ok();
+    // Token lives in /etc/firewhal/discord.env (packaged installs, #136);
+    // the CWD .env stays as the local-dev fallback.
+    if dotenvy::from_path("/etc/firewhal/discord.env").is_err() {
+        dotenv().ok();
+    }
 
     // Create the channels required by the unified IPC function.
     let (to_zmq_tx, to_zmq_rx) = mpsc::channel::<FireWhalMessage>(128);

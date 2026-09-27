@@ -24,6 +24,10 @@ default-members = [
     ]
 
 [workspace.package]
+# Single source of truth for the version: every crate inherits this, and
+# the PKGBUILD derives pkgver from it (packaging, #136). Hand-bump here —
+# SemVer 2.0, 0.x = "expect changes" until 1.0.0.
+version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]

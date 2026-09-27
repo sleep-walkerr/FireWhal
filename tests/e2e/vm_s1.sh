@@ -37,7 +37,7 @@ CMD="${1:?usage: vm_s1.sh block|start-recover-capture|stop-capture <block|recove
 LOG=/tmp/firewhal-daemon.err
 LOG_OUT=/tmp/firewhal-daemon.out
 IFACE=enp0s3
-RULES=/opt/firewhal/bin/firewall_rules.toml
+RULES=/etc/firewhal/firewall_rules.toml
 STATE=/var/lib/fw-e2e
 BACKUP="$STATE/fw-e2e-rules.bak"
 TIMELINE="$STATE/fw-s1-timeline"
@@ -165,7 +165,7 @@ set -uo pipefail
 LOG=/tmp/firewhal-daemon.err
 LOG_OUT=/tmp/firewhal-daemon.out
 STATE=/var/lib/fw-e2e
-RULES=/opt/firewhal/bin/firewall_rules.toml
+RULES=/etc/firewhal/firewall_rules.toml
 BACKUP="$STATE/fw-e2e-rules.bak"
 TIMELINE="$STATE/fw-s1-timeline"
 ts() { date '+%H:%M:%S'; }

@@ -88,21 +88,25 @@ eBPF object):
 
 ## Building & installing
 
-Install scripts live in the repo root. `release_install.sh` builds the workspace in
-release mode and installs the binaries; `debug_install.sh` does the same for debug
-builds. Both:
-
-- create the `firewhal-admin` group (and offer to add your user to it),
-- copy the three config files (`app_identity.toml`, `firewall_rules.toml`,
-  `interface_state.toml`) into `/opt/firewhal/bin`,
-- install the binaries (daemon to `/usr/local/sbin`, the rest to `/opt/firewhal/bin`,
-  the TUI to `/usr/local/bin`), and
-- `chmod 755` the install directory.
-
-The firewall runs as a systemd service (`firewhal_systemd.service`); start it with:
+The stack is packaged for pacman hosts (ticket #136) — see the
+[Developer Guide](./docs/developer-guide.md) for the full workflow:
 
 ```sh
-sudo systemctl enable --now firewhal_systemd
+just install   # build + versioned pacman install (commit + push first)
+just dev       # inner loop: build + in-place update + restart
+just gate      # the full e2e test (boots the VM)
+```
+
+The package installs binaries to `/usr/bin`, the units to
+`/usr/lib/systemd/system`, and **config templates** to `/etc/firewhal`
+(pacman config files — your edits survive upgrades). A fresh install is
+deliberately fail-closed: no rules, empty allowlist, and a placeholder
+interface that enforces nothing until you configure `/etc/firewhal/`.
+
+The firewall runs as a systemd service (`firewhal.service`); start it with:
+
+```sh
+sudo systemctl enable --now firewhal
 ```
 
 Run the TUI with:
@@ -127,9 +131,10 @@ mutagen sync create --name=firewhal-dir-syncing --sync-mode=one-way-replica \
 ```
 
 > **Note on config location:** the daemon reads its three TOML files from
-> `/opt/firewhal/bin/` (not a separate `config/` directory). Placing them elsewhere
-> starts the firewall with zero rules and no error. See
-> [VM Enforcement Testing](./docs/vm-enforcement-testing.md).
+> `/etc/firewhal/` (the single shared location, `firewhal_core::DEFAULT_CONFIG_DIR`).
+> A missing/malformed file is no longer silent — the stack boots fail-closed and
+> announces the degraded posture (C1, design doc §2.4; check
+> `systemctl status firewhal-health`).
 
 ## Documentation
 

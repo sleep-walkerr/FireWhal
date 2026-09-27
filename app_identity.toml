@@ -16,7 +16,9 @@ hash = "b7f853744bc0b5fa84f764dc61a6d0f214efdcfff08b4fc31a8138e81f5435b6"
 
 
 [apps.firewhal-daemon]
-path = "/usr/local/sbin/firewhal-daemon"
+path = "/usr/bin/firewhal-daemon"
+# NOTE: sample file (packaging #136 moved installs to /usr/bin) — re-hash
+# from the TUI (Hash request) to refresh the digest for your build.
 hash = "3e3d14e8aea2fa9accfaf7bda9e2601ae1e3617c889c29a6c395e974437a540b"
 
 [apps.brave]
