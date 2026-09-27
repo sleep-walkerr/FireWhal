@@ -280,21 +280,24 @@ fallback is the ticket's "or documented manual runner" branch — status quo.
 1. ✅ Wire tools in seed + seed pipefail fix (PR #116) + golden rebuild
 2. ✅ Dependency-freshness preflight in the gate (PR #117)
 3. ✅ This design doc
-4. D1 data-level — first run the ~5-minute check that guest→`10.0.3.2`
-   delivery actually works on this rig; it decides listener placement
+4. ✅ D1 data-level — the first run confirmed guest→`10.0.3.2` delivery
+   on this rig (host listener `127.0.0.1:9999`); direction settled
+   guest→host, no flip needed (PR #122, merged `bf2d845`)
 5. ✅ S1 + M1 — gate phase 7 (2026-09-27; the `2223` hostfwd rig change
    landed in the same arc, §2.2 documents the inversion)
-6. C1 — config-path regression (decision refined in §2.4: degraded-and-
-   announced, not dead; three wire-verified legs + the `firewhal-health`
-   validator; daemon-side config-health + alarm bundle + oneshot unit)
-7. R — after #114 (gated)
-8. CI — after the Proxmox runner VM exists
-9. #115 (host-side wire visibility) — whenever
+6. ✅ C1 — config-path regression (PR #133, merged `7f45773`, 2026-09-27;
+   decision refined in §2.4: degraded-and-announced, not dead; three
+   wire-verified legs + the `firewhal-health` validator; daemon-side
+   config-health + alarm bundle + oneshot unit)
+7. ⏸ R — parked (2026-09-27; was: after #114, owner-gated)
+8. ⏸ CI — parked (2026-09-27; was: after the Proxmox runner VM exists)
+9. ⏸ #115 (host-side wire visibility) — parked with the ticket (2026-09-27)
 
-## 5. Open items (honest remainder)
+## 5. Open items (all resolved as of 2026-09-27)
 
-- **D1 direction:** guest→host (`10.0.3.2`) is the default; if the delivery
-  check shows it flaky on this rig, flip to host→guest (needs the hostfwd).
+- **D1 direction:** resolved — the delivery check confirmed
+  guest→`10.0.3.2` works on this rig; the guest→host default held, no
+  flip needed.
 - **C1 scope:** resolved (2026-09-27) — full daemon-side implementation:
   config-health state + alarm bundle (`/var/log/firewhal/` + `wall` + TUI)
   + `firewhal-health` oneshot validator + three wire-verified legs; see §2.4.
