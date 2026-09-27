@@ -140,14 +140,107 @@ channel is this guard in action, live.)
 ### 2.4 Phase C1 — config-path regression
 
 Ticket question: deploy with the tomls in the wrong place — silent zero-rule
-start, or daemon fails loudly? **Decision: the daemon must fail loudly** — a
-config error is a startup failure, never a silent zero-rules start.
+start, or daemon fails loudly?
 
-Test: deploy with a deliberately misplaced toml; assert the daemon does **not**
-start with zero rules. The readiness phase already guards the *symptom*
-(silent zero-rules start) on the happy path; C1 exercises the misconfig path.
-If/when the daemon fix lands (separate PR, daemon side), C1 asserts the new
-loud failure instead.
+**Decision (refined 2026-09-27): "loud" means *visibly degraded on every
+channel* — not dead.** A config error must never be a silent zero-rules
+start, but the fix is not a non-zero exit: when the daemon exits, the kernel
+component detaches all eBPF programs, and a dead firewall is not "blocked" —
+it is *no* firewall (fail-open). The stack stays up, holds the safe posture,
+and enters an explicit **degraded** state that is honest on every channel.
+
+Model: UFW (verified against the 0.36.2 source): policy must be *explicit* —
+it validates config and never guesses (missing/corrupt file → hard
+`UFWError` before the kernel is touched; a failed `enable` reverts the
+`ENABLED` flag it just set); status is first-class and never implicitly green
+(`Status: active|inactive`, no in-between); and the boot unit fails loudly
+(`ufw.service`, oneshot, `Before=network-pre.target`) so a broken config is
+visible at three levels — CLI, boot unit, status command. UFW also attaches
+to *all* interfaces by default — its escape path is an allow rule, not an
+unenforced interface (the `ufw enable` ssh-prompt is the acknowledgment of
+that trade-off). We adopt all of it: the three loudness levels, the
+all-interfaces default (below), and a `wall` broadcast (UFW has no live
+process to watch).
+
+**The posture matrix** (the three tomls fail differently — verified in code;
+the alarm must name the file *and the actual resulting posture*):
+
+| Misplaced file | Posture today | Posture after C1 |
+|---|---|---|
+| `firewall_rules.toml` | hooks attached, zero rules → default-deny — everything blocked (fail-closed) | unchanged — already fail-closed; now announced |
+| `interface_state.toml` | **no TC hooks attach at all** (attachment happens only from the `LoadInterfaceState` message) → the rule layer is unenforced (**fail-open** — the "corrupt a text file and the floodgates are open" case) | **fail-closed by default: hooks attach to all non-loopback interfaces** (mechanism item 2) |
+| `app_identity.toml` | silently bootstraps an **empty allowlist** file → app gate denies all egress (fail-closed, but the self-created file masks the problem) | unchanged — already fail-closed; now announced (the bootstrap stays) |
+
+After C1, every misconfiguration lands in a deny posture — the system is
+uniformly fail-closed. "Degraded" then means *safe but not as intended*,
+which is exactly what the alarm bundle and `firewhal-health` exist to say.
+
+**Mechanism:**
+
+1. **Config-health state (daemon):** per-toml `Ok | Missing | Malformed`,
+   computed at startup and on every load/reload. While degraded, the daemon
+   never reports `is_healthy: true` — the `Status` message carries the
+   degraded state + reason (UFW's honest-status contract).
+2. **Fail-closed interface default.** Today a missing/malformed/empty
+   `interface_state.toml` leaves the TC layer *unattached* — open. C1
+   changes the semantics: the daemon attaches TC hooks to **all non-loopback
+   interfaces** (enumerated from `/sys/class/net` at load time — same
+   fixed-at-load semantics as today's declared list). The operator's escape
+   path stops being "the interface I didn't list" (that information lived in
+   the missing file) and becomes "the interface my rules allow" — UFW's
+   model. Consequence the alarm must state: the daemon cannot know which
+   interface is the operator's escape, so it names every interface the
+   default newly covers and says their traffic is now subject to the rules.
+   The remaining edge — no rules *and* no interface declaration → the
+   management path is blocked too — is correct deny-all behavior (the UFW
+   equivalent is `enable` with deny-incoming and no SSH rule); in the rig it
+   is recoverable from the host side (serial/VNC), and the alarm fires first.
+3. **Alarm bundle** (fires on state transitions — healthy→degraded *and*
+   degraded→healthy — so no spam):
+   - persistent record: timestamped line in `/var/log/firewhal/config-alert.log`
+     (never `/tmp` — S1 forensics proved it non-durable on this image);
+   - `wall` broadcast (the daemon is root; the message names the file, the
+     live posture in plain language, and the fix);
+   - TUI: the main menu already tracks per-component status — extended to a
+     degraded state with red/yellow marking + reason.
+4. **`firewhal-health`** (new small binary + `firewhal-health.service`
+   oneshot unit): boot-time validator for the three tomls using the same
+   parse as the daemon (the three load helpers move to `firewhal-core` so
+   both share them). Missing/malformed → non-zero exit →
+   `systemctl status firewhal-health` shows **failed**, never green (UFW's
+   `ufw.service` loudness); its message states what is missing *and which
+   safe default is in effect* (e.g. "defaulting to all non-loopback
+   interfaces — fail-closed, not as configured"). `Type=oneshot`,
+   `RemainAfterExit=yes` (last state stays visible, as in ufw). In the e2e
+   rig the stack is not systemd-managed, so the gate invokes the binary
+   directly — the same validation the unit would run.
+5. **Revert on failed swap:** any config swap (S1, C1 legs, TUI updates)
+   follows backup → write → verify → restore-on-failure; no half-swapped
+   state (UFW reverts `ENABLED` on a failed start for exactly this reason;
+   S1's backup/restore already follows it).
+
+**Test (gate phase 8, wire-verified, three legs + validator).** Each leg
+moves one toml aside, starts the stack without the happy-path readiness gate,
+and asserts the posture *on the wire* (D1-style probe):
+
+- **leg 1 (rules):** processes up; wire shows default-deny (probe frames
+  absent — cut at the rule layer); alarm line present, stating "blocked".
+- **leg 2 (interfaces):** processes up; hooks attached to **all
+  non-loopback interfaces** under the new default (`sched_cls` count =
+  2 × non-loopback count, not 0); enforcement active under the default —
+  the D1 block port (8080) is still cut on the wire and the allowed port
+  (80) still delivered; mgmt 2222 still reachable (the test rules allow
+  :22 — M1 holds under the default too); alarm naming the newly covered
+  interfaces.
+- **leg 3 (app IDs):** processes up; wire shows egress denied at the app
+  gate; the empty bootstrap file was created; alarm present.
+- **validator:** `firewhal-health` exits non-zero with a clear message
+  against the misplaced config, 0 after restore.
+- each leg restores → recovery alarm + wire back to baseline.
+
+The `wall`/TUI channels are asserted via the daemon's alarm record in e2e
+(headless rig: no tty to observe; the wall text is visible in the serial
+log); the TUI rendering itself is a manual check.
 
 ### 2.5 Phase F1 — fail-open as a first-class test
 
@@ -191,8 +284,9 @@ fallback is the ticket's "or documented manual runner" branch — status quo.
    delivery actually works on this rig; it decides listener placement
 5. ✅ S1 + M1 — gate phase 7 (2026-09-27; the `2223` hostfwd rig change
    landed in the same arc, §2.2 documents the inversion)
-6. C1 — needs the daemon-fail-loudly decision (daemon-side PR if we do the
-   fix, not just the guard test)
+6. C1 — config-path regression (decision refined in §2.4: degraded-and-
+   announced, not dead; three wire-verified legs + the `firewhal-health`
+   validator; daemon-side config-health + alarm bundle + oneshot unit)
 7. R — after #114 (gated)
 8. CI — after the Proxmox runner VM exists
 9. #115 (host-side wire visibility) — whenever
@@ -201,8 +295,9 @@ fallback is the ticket's "or documented manual runner" branch — status quo.
 
 - **D1 direction:** guest→host (`10.0.3.2`) is the default; if the delivery
   check shows it flaky on this rig, flip to host→guest (needs the hostfwd).
-- **C1 scope:** guard-only test now vs. daemon-side fail-loudly fix — decide
-  at implementation time (the guard test lands either way).
+- **C1 scope:** resolved (2026-09-27) — full daemon-side implementation:
+  config-health state + alarm bundle (`/var/log/firewhal/` + `wall` + TUI)
+  + `firewhal-health` oneshot validator + three wire-verified legs; see §2.4.
 - **S1 window:** resolved — default 120 s, overridable by env
   (`FW_S1_WINDOW`); the gate uses the default (the observed guest real-time
   delay lag is absorbed by the recovery deadline).

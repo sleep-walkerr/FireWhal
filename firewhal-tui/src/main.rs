@@ -141,6 +141,25 @@ async fn main() -> Result<(), io::Error> {
                     
                     }
                 }
+                // C1 (design doc §2.4): the daemon reports its config health
+                // here — never is_healthy=true while any config file is
+                // missing/malformed. The main menu shows the degraded state
+                // (yellow banner + "Degraded" row) instead of green.
+                FireWhalMessage::Status(status) => {
+                    if status.component == "Daemon" {
+                        app_guard.main_menu.set_daemon_status(true);
+                        app_guard
+                            .main_menu
+                            .set_degraded(if status.is_healthy {
+                                None
+                            } else {
+                                Some(status.message.clone())
+                            });
+                        app_guard
+                            .debug_print
+                            .add_message(format!("[Daemon]: Status: {}", status.message));
+                    }
+                }
                 FireWhalMessage::PermissiveModeTuple(tuple_message) =>
                 {
                     if tuple_message.component == "Firewall" {

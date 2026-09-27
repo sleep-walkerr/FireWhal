@@ -151,6 +151,85 @@ stays up and the "must be down" checks fail; if the self-expiry fails,
   determined, so the check now greps the snapshot file directly (no
   `$(cat)`-into-variable, no pipe), which removes the mechanism class.
 
+## C1 config-path phase (gate phase 8, since 2026-09-27)
+
+Phase 8 is the **config-path regression** (ticket #106, design doc
+`docs/comprehensive-test-design.md` §2.4): deploy with a toml missing or
+malformed must leave the stack **up in the fail-closed default** (a dead
+firewall detaches every eBPF hook — fail-open) and **announced on every
+channel**. Three wire-verified legs + the `firewhal-health` validator:
+
+| Leg | Posture asserted on the wire |
+|---|---|
+| rules | `firewall_rules.toml` moved aside → empty rule set (default-deny): probe `:9999` (allowed under normal config) cut — 0 frames |
+| interfaces | `interface_state.toml` moved aside → hooks on **all non-loopback** interfaces: enforcement still active (`:8080` cut, `:9999` delivered) and **M1 under the default** — mgmt 2222 reachable 3/3 from the host |
+| apps | `app_identity.toml` moved aside → daemon bootstraps an empty allowlist: egress denied at the app gate (`:9999` cut — the rule allows it, the allowlist does not) |
+
+Each leg: move → validator rc=1 → detached `start` + `wait-start` → probe →
+(leg 2: mgmt 2222 ×3) → `restore` (stack restarts healthy) → validator rc=0
+→ `verify` (alarm log has `CONFIG ALERT` + `CONFIG RECOVERED` for the file,
+all three pushes back at `(configured)`).
+
+**New daemon log lines** (readiness greps the `C1: … sent` prefixes; the
+alarm log at `/var/log/firewhal/config-alert.log` is the e2e ground truth
+for the wall/TUI channels on the headless rig):
+
+```
+[Supervisor] C1: rules sent (configured | fail-closed empty default).
+[Supervisor] C1: app ids sent (configured | fail-closed empty default).
+[Supervisor] C1: interface state sent (configured | fail-closed all-non-loopback default).
+[<ts>Z] CONFIG ALERT <file>: <posture in plain language + the fix>
+[<ts>Z] CONFIG RECOVERED <file>: <…in effect again>
+```
+
+### C1 findings (first dry runs, 2026-09-27)
+
+- **TCX mode on kernel 6.8 (aya ≥ 0.14, kernel ≥ 6.6):** enforcement
+  attaches via the TCX interface (`bpf` link), **not** legacy TC filters —
+  `tc qdisc show` / `tc filter show` show nothing on an enforced interface.
+  The authoritative view is `bpftool link show type tcx` (2 links per
+  enforced interface: tcx_ingress + tcx_egress). The readiness check counts
+  `sched_cls` in `bpftool prog show` — that counts *loaded programs*, not
+  attachments, so a degraded start (which still loads + attaches) passes the
+  same readiness check as a healthy one. The C1 readiness variant relies on
+  exactly that.
+- **The kernel registers its IPC client twice** (the router logs
+  `Registered client 'Firewall'` twice per stack), so the daemon receives
+  the `Firewall: Ready` status twice and evaluates the config twice.
+  Pre-existing (the old code re-pushed on every Ready too — invisible
+  because the readiness grep was `-q`). The C1 machinery is transition-based
+  (alarms only on state changes), so the duplicate evaluation is idempotent
+  and spam-free.
+- **Pre-existing connections are re-evaluated at attach:** when enforcement
+  starts on an interface carrying an active connection, the session's return
+  packets fall under the new BPF instance (which has no listener-port /
+  cookie registration for the pre-existing socket yet) and are dropped — the
+  in-flight ssh session hangs while **fresh** connections matching the rules
+  work. Observed live on the interfaces leg (mgmt 2222 cut mid-session at
+  the attach moment; every subsequent fresh connection up). The gate
+  therefore dispatches `start` detached (`setsid`) and polls `c1-status`
+  from the HOST with fresh short probes (raw ssh with
+  `ServerAliveInterval`/`ConnectTimeout`): a probe that spans the attach
+  moment is severed and self-terminates in ~20 s; the loop converges once
+  the window has passed.
+- **The `wait-start` race (gate-side, fixed in the first official run):**
+  the first official run stalled ~6 min on the interfaces leg: the
+  gate's single long-lived `wait-start` ssh session connected just before
+  the attach and was severed by it (the guest-side poll kept running, the
+  host-side client hung on the dead channel — the guest session does not
+  RST, and the FIN is itself dropped by the new enforcement). Un-stuck by
+  killing the host ssh client; the run otherwise passed 49/49 checks. The
+  fix is the host-side fresh-probe poll above (the guest `wait-start`
+  remains for manual use).
+- **Empty allowlist is a degraded posture:** the daemon bootstraps the empty
+  `app_identity.toml` on a missing file; the duplicate-Ready's second
+  evaluation then saw the self-created file as "present and valid" and fired
+  a spurious `CONFIG RECOVERED` with the state file lying green during the
+  degraded window. Fix: an empty allowlist is degraded by definition (all
+  egress denied at the app gate) — the same classification the
+  `firewhal-health` validator uses, so daemon and validator can never
+  disagree.
+
 ## Findings (first manual run, 2026-09-18)
 
 ## Rig layout

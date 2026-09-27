@@ -14,7 +14,12 @@ pub struct MainMenuState {
     ipc_status: bool,
     daemon_status: bool,
     firewall_status: bool,
-    discord_bot_status: bool
+    discord_bot_status: bool,
+    // C1 (design doc §2.4): config-degraded state. The daemon never reports
+    // healthy while any config file is missing/malformed — the main menu
+    // shows a yellow banner + a "Degraded" daemon row instead of green.
+    daemon_degraded: bool,
+    degraded_reason: String,
 }
 
 impl Default for MainMenuState {
@@ -23,7 +28,9 @@ impl Default for MainMenuState {
             ipc_status: false,
             daemon_status: false,
             firewall_status: false,
-            discord_bot_status: false
+            discord_bot_status: false,
+            daemon_degraded: false,
+            degraded_reason: String::new(),
         }
     }
 }
@@ -41,11 +48,27 @@ impl MainMenuState {
     pub fn set_discord_bot_status(&mut self, status: bool) {
         self.discord_bot_status = status
     }
+    /// C1: `Some(reason)` => degraded banner + "Degraded" daemon row;
+    /// `None` => cleared (healthy).
+    pub fn set_degraded(&mut self, reason: Option<String>) {
+        match reason {
+            Some(r) => {
+                self.daemon_degraded = true;
+                self.degraded_reason = r;
+            }
+            None => {
+                self.daemon_degraded = false;
+                self.degraded_reason = String::new();
+            }
+        }
+    }
     pub fn reset_status_values(&mut self) {
         self.ipc_status = false;
         self.daemon_status = false;
         self.firewall_status = false;
         self.discord_bot_status = false;
+        self.daemon_degraded = false;
+        self.degraded_reason = String::new();
     }
 }
 
@@ -63,6 +86,32 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     
     let inner_area = status_box_block.inner(main_vertical_content_layout[0]); // Get inner area before rendering block
 
+    // C1 (design doc §2.4): degraded-config banner (yellow) when the daemon
+    // reports a missing/malformed config file — "safe but not as intended"
+    // must be visible without hunting through logs.
+    let (banner_area, rows_area) = if app.main_menu.daemon_degraded {
+        let l = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(inner_area);
+        (Some(l[0]), l[1])
+    } else {
+        (None, inner_area)
+    };
+    if let Some(ba) = banner_area {
+        let banner_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Yellow));
+        let ba_inner = banner_block.inner(ba);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("⚠ CONFIG DEGRADED: {}", app.main_menu.degraded_reason),
+                Style::default().fg(Color::Yellow),
+            )))
+            .wrap(Wrap { trim: true }),
+            ba_inner,
+        );
+        f.render_widget(banner_block, ba);
+    }
+
     // Create a vertical layout for each status row
     let rows_layout = Layout::vertical([
         Constraint::Length(3), // Firewall
@@ -70,18 +119,18 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(3), // Daemon
         Constraint::Length(3), // Discord Bot
         Constraint::Min(0),    // Spacer
-    ]).split(inner_area);
+    ]).split(rows_area);
 
-    // Define the statuses and their styles
+    // Define the statuses and their styles (name, active, degraded, color)
     let statuses = [
-        ("Firewall:", app.main_menu.firewall_status, Color::Rgb(255, 165, 0)),
-        ("IPC:", app.main_menu.ipc_status, Color::Magenta),
-        ("Daemon:", app.main_menu.daemon_status, Color::Cyan),
-        ("Discord Bot:", app.main_menu.discord_bot_status, Color::Blue),
+        ("Firewall:", app.main_menu.firewall_status, false, Color::Rgb(255, 165, 0)),
+        ("IPC:", app.main_menu.ipc_status, false, Color::Magenta),
+        ("Daemon:", app.main_menu.daemon_status, app.main_menu.daemon_degraded, Color::Cyan),
+        ("Discord Bot:", app.main_menu.discord_bot_status, false, Color::Blue),
     ];
 
     // Render each status row
-    for (i, (name, is_active, color)) in statuses.iter().enumerate() {
+    for (i, (name, is_active, is_degraded, color)) in statuses.iter().enumerate() {
         let row_area = rows_layout[i];
 
         // Create a centered area that is 50% of the row's width
@@ -91,8 +140,11 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Percentage(25),
         ]).split(row_area)[1];
 
-        // Determine styles based on active status
-        let (status_text, status_style, border_style) = if *is_active {
+        // Determine styles based on active/degraded status
+        let (status_text, status_style, border_style) = if *is_degraded {
+            // C1: the component is up but not fully healthy — yellow, not green
+            ("Degraded", Style::default().fg(Color::Yellow), Style::default().fg(Color::Yellow))
+        } else if *is_active {
             // If active: status text is green, border is the component's color
             ("Active", Style::default().fg(Color::Green), Style::default().fg(*color))
         } else {

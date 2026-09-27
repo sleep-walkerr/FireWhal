@@ -1,0 +1,20 @@
+[Unit]
+Description=Firewhal config health check (C1: design doc §2.4 — fail loud on misconfig)
+# Validate the config before the network/firewall come up, exactly like
+# ufw.service (oneshot, Before=network-pre.target): a missing/malformed
+# toml fails this unit — `systemctl status firewhal-health` is never green
+# on a broken config. The daemon itself stays up in the fail-closed posture
+# and announces the degraded state (alarm bundle + TUI); this unit is the
+# systemd-level loudness.
+Before=network-pre.target
+DefaultDependencies=no
+Wants=local-fs.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/firewhal-health
+
+[Install]
+WantedBy=multi-user.target
