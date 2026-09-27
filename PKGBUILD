@@ -68,7 +68,14 @@ build() {
         echo "FATAL: source checkout $srcdir/$srcname not found" >&2
         exit 1
     }
-    cargo build --release --locked
+    # Clear the distro's C/C++/linker flags before building: makepkg exports
+    # CFLAGS/CXXFLAGS/LDFLAGS from /etc/makepkg.conf into the build env, and
+    # cc-rs (ring, zeromq-sys, … build scripts) honors them. CachyOS's
+    # CFLAGS carry -flto=auto, which turned ring's asm objects into LTO
+    # bitcode the non-LTO final link cannot resolve (observed: undefined
+    # ring_core_* symbols at the firewhal-discord-bot link). Rust flags come
+    # from the Cargo.toml profiles; the C build scripts want none of these.
+    CFLAGS= CXXFLAGS= LDFLAGS= cargo build --release --locked
 }
 
 package() {
