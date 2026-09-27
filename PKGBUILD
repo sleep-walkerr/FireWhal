@@ -19,7 +19,7 @@
 pkgname=firewhal
 pkgdesc="FireWhal — eBPF-based application + rule firewall (daemon, kernel loader, TUI, IPC router, config validator)"
 pkgver=0.1.0
-pkgrel=5
+pkgrel=6
 arch=(x86_64)
 url="https://github.com/sleep-walkerr/FireWhal"
 license=("MIT OR Apache-2.0")
@@ -146,6 +146,9 @@ EOF
 
     cat > "$pkgdir/etc/firewhal/interface_state.toml" <<'EOF'
 # FireWhal enforced interfaces (packaged template).
+# This is a pacman config file: your edits survive upgrades (a changed
+# template is offered as interface_state.toml.pacnew) and are saved as
+# interface_state.toml.pacsave if the package is removed.
 #
 # NOTE: this template names an interface that does not exist. C1 maps
 # that to the fail-closed DEFAULT: starting the stack attaches TC to ALL
