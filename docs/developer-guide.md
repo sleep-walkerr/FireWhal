@@ -26,10 +26,14 @@ fails loud if the two drift.
 
 **First-run note:** a fresh package install is deliberately fail-closed —
 no rules, empty allowlist, and `interface_state.toml` names `fw-none`
-(a nonexistent interface, so nothing is enforced). Configure
-`/etc/firewhal/*.toml` and create `/etc/firewhal/discord.env` before the
-stack does anything useful; `systemctl status firewhal-health` tells you
-what is degraded and why.
+(a nonexistent interface, which C1 maps to the fail-closed default: TC on
+**all** non-loopback interfaces, default-deny). The unit ships
+**disabled**, so a fresh install enforces nothing until you start it —
+but starting unconfigured blocks all traffic on every real interface
+(announced via alarm log + `wall` + TUI; `systemctl stop firewhal`
+recovers). Configure `/etc/firewhal/*.toml` (and create
+`/etc/firewhal/discord.env`) before the first `systemctl start firewhal`;
+`systemctl status firewhal-health` tells you what is degraded and why.
 
 ## 2. Toolchain contract (fail-loud by design)
 
@@ -94,11 +98,17 @@ in the safe posture and announces (alarm log + `wall` + TUI, and
 | `app_identity.toml` | missing | bootstrap an empty allowlist — **egress denied at the app gate** |
 | allowlist | **empty (even if valid)** | degraded by definition — all egress denied at the app gate |
 
-Consequence: **an empty `interface_state.toml` attaches to every
-non-loopback interface.** That is why the package ships the `fw-none`
-placeholder (a named-but-nonexistent interface fails to attach loudly and
-enforces nothing) instead of an empty list, and why a dev config that
-shouldn't enforce must *name* a dead interface, never be empty.
+Consequence: **an empty, missing, or malformed `interface_state.toml` —
+and one whose named interfaces no longer exist (`fw-none` included) — all
+attach TC to every non-loopback interface, default-deny.** There is
+deliberately no configuration that leaves the TC layer unattached or
+"enforcing nothing": a degraded firewall that protects nothing is exactly
+what fail-closed forbids (verified on the host: the shipped template
+blocked all DNS + web traffic on first start until the stack was
+stopped). The practical off switch is the unit itself — the package
+installs it disabled, and not starting it (or `systemctl stop firewhal`)
+is what keeps a machine unenforced. A true permissive/observe-only mode
+is #135.
 
 ### Clock skew
 Host is UTC-5, guest is UTC. Host timestamps in logs/artifacts are 5 h

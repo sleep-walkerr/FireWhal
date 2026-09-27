@@ -101,7 +101,9 @@ The package installs binaries to `/usr/bin`, the units to
 `/usr/lib/systemd/system`, and **config templates** to `/etc/firewhal`
 (pacman config files — your edits survive upgrades). A fresh install is
 deliberately fail-closed: no rules, empty allowlist, and a placeholder
-interface that enforces nothing until you configure `/etc/firewhal/`.
+interface that maps to the all-deny default the first time the stack is
+started — and the unit ships **disabled**, so nothing is enforced until
+you configure `/etc/firewhal/` and start it deliberately.
 
 The firewall runs as a systemd service (`firewhal.service`); start it with:
 
