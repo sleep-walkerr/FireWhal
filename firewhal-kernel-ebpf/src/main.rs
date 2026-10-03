@@ -360,6 +360,19 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
     // default verdict (#159). Block is the fail-closed default. ---
     if unsafe { DEFAULT_VERDICTS.get(0) } == Some(&1) {
         info!(ctx, "[Kernel] [ingress_tc] No ingress rule matched; default INCOMING = Allow. Allowing connection from {}:{}", Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
+        // Same state as the rule-allow path above: mark a TCP SYN in
+        // HANDSHAKE_ALLOWED so the local server's SYN-ACK can pass the
+        // egress handshake check. Without this the reply reaches the
+        // "Connection Not Found in Either Map" drop and the handshake dies
+        // (the ingress-side mirror of the egress default-allow insert, which
+        // exists for the same reason — the return path must find state).
+        if tuple.protocol == 6 {
+            if let Ok(tcp_header) = parse_tcp_header(ctx) {
+                if tcp_header.syn() == 1 {
+                    unsafe { HANDSHAKE_ALLOWED.insert(&tuple, &0, 0) };
+                }
+            }
+        }
         Ok(TC_ACT_OK)
     } else {
         info!(ctx, "[Kernel] [ingress_tc] No ingress rule matched; default INCOMING = Block. Blocking connection from {}:{}", Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
