@@ -9,6 +9,7 @@ pub mod interface_selection;
 pub mod main_menu;
 pub mod permissive_mode;
 pub mod rule_management;
+pub mod state_view;
 
 /// The top-level render function that orchestrates the UI layout.
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -43,8 +44,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
         AppScreen::AppManagement => app_management::render(f, app, content_area),
         AppScreen::PermissiveMode => permissive_mode::render(f, app, content_area),
         AppScreen::Debug => {
-            // The debug_print::render function now handles its own block
-            debug_print::render(f, app, content_area);
+            // #182: state introspection on top, IPC debug log below.
+            let chunks = Layout::vertical([
+                Constraint::Min(0),
+                Constraint::Length(8),
+            ]).split(content_area);
+            state_view::render(f, app, chunks[0]);
+            debug_print::render(f, app, chunks[1]);
         }
     }
 }

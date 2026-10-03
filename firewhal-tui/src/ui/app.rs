@@ -7,6 +7,7 @@ use crate::ui::{
     main_menu::MainMenuState,
     permissive_mode::{PermissiveListState, ProcessLineageTupleList, ToggledPaths},
     rule_management::RuleTableState,
+    state_view::StateViewState,
 };
 use firewhal_core::{AppIdentity, DefaultVerdict, FireWhalConfig, FireWhalMessage, Rule};
 use tokio::sync::mpsc;
@@ -70,6 +71,8 @@ pub struct App {
     pub apps_modified: bool,
     pub apps: HashMap<String, AppIdentity>,
     pub hash_states: HashMap<String, HashState>,
+    // #182: state introspection (in-kernel maps + attach state + C1 health)
+    pub state_view: StateViewState,
 
     // New UI state
     pub nav_index: usize,
@@ -105,6 +108,20 @@ impl App {
         self.focus_on_navigation = !self.focus_on_navigation;
         if !self.focus_on_navigation {
             self.screen = self.nav_items[self.nav_index]; // Ensure screen is set when focusing content
+        }
+    }
+
+    /// #182: asks the kernel for a point-in-time snapshot of its in-kernel
+    /// state (and the daemon for the C1 config-health view).
+    pub fn request_state(&mut self) {
+        if let Some(tx) = &self.to_zmq_tx {
+            if let Err(e) = tx.try_send(FireWhalMessage::StateRequest(firewhal_core::TUIStateRequest {
+                component: "TUI".to_string(),
+            })) {
+                self.debug_print.add_message(format!("[TUI] Failed to send StateRequest: {e}"));
+            }
+        } else {
+            self.debug_print.add_message("[TUI] StateRequest: found no zmq sender".to_string());
         }
     }
 
@@ -165,6 +182,7 @@ impl Default for App {
             apps_modified: false,
             apps: HashMap::new(),
             hash_states: HashMap::new(),
+            state_view: StateViewState::default(),
 
             // UI state
             nav_index: 0,

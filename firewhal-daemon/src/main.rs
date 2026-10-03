@@ -37,7 +37,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, ConfigLoadResult, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, DefaultVerdict, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, calculate_file_hash, config_path, ipc_client_connection, load_app_ids_config, load_interface_state_config, load_rules_config};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, ConfigFileHealth, ConfigHealthView, ConfigLoadResult, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, DefaultVerdict, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, calculate_file_hash, config_path, ipc_client_connection, load_app_ids_config, load_interface_state_config, load_rules_config};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -886,8 +886,38 @@ async fn supervisor_logic(root_pids_fd: i32) -> Result<(), Box<dyn std::error::E
                             }
                         }
                     }
+                    // #182: report the C1 config-health state (the same
+                    // state the alarm mechanism tracks) on demand.
+                    FireWhalMessage::StateRequest(message) => {
+                        if message.component == "TUI" {
+                            let st = config_health.clone().or_else(load_prev_health);
+                            let view = match st {
+                                Some(s) => ConfigHealthView {
+                                    source: "Daemon".to_string(),
+                                    all_healthy: s.all_healthy(),
+                                    files: vec![
+                                        ConfigFileHealth { file: "firewall_rules.toml".to_string(), healthy: s.rules.0 == FileHealth::Healthy, note: s.rules.1.clone() },
+                                        ConfigFileHealth { file: "app_identity.toml".to_string(), healthy: s.apps.0 == FileHealth::Healthy, note: s.apps.1.clone() },
+                                        ConfigFileHealth { file: "interface_state.toml".to_string(), healthy: s.interfaces.0 == FileHealth::Healthy, note: s.interfaces.1.clone() },
+                                    ],
+                                },
+                                None => ConfigHealthView {
+                                    source: "Daemon".to_string(),
+                                    all_healthy: false,
+                                    files: vec![ConfigFileHealth {
+                                        file: "n/a".to_string(),
+                                        healthy: false,
+                                        note: "no health state recorded yet (stack not fully started?)".to_string(),
+                                    }],
+                                },
+                            };
+                            if let Err(e) = to_zmq_tx.send(FireWhalMessage::ConfigHealthResponse(view)).await {
+                                eprintln!("[Supervisor] C1: failed to send config health view: {e}");
+                            }
+                        }
+                    }
                     FireWhalMessage::UpdateRules(message) => {
-                       println!("[Supervisor] Received UpdateRules command from TUI"); 
+                       println!("[Supervisor] Received UpdateRules command from TUI");
                        let path = config_path("firewall_rules.toml");
                        save_rules(&path, &message)?;
                        // C1: re-evaluate all config (the update may have healed a
