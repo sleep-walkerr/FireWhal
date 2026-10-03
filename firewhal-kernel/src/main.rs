@@ -546,6 +546,21 @@ async fn apply_ruleset(bpf: Arc<tokio::sync::Mutex<Ebpf>>, config: FireWhalConfi
         }
     }
 
+    // --- Per-direction default verdicts (#159): index 0 = incoming,
+    //     index 1 = outgoing; value 0 = Block, 1 = Allow. The loader is the
+    //     only writer and sets them on every push — including the fail-closed
+    //     empty-config push — so a degraded config can never leave a stale
+    //     Allow in place. ---
+    {
+        let mut default_verdicts =
+            AyaArray::<_, u32>::try_from(bpf.map_mut("DEFAULT_VERDICTS").unwrap())?;
+        let incoming_val = u32::from(config.default_incoming == firewhal_core::DefaultVerdict::Allow);
+        let outgoing_val = u32::from(config.default_outgoing == firewhal_core::DefaultVerdict::Allow);
+        default_verdicts.set(0, incoming_val, 0)?;
+        default_verdicts.set(1, outgoing_val, 0)?;
+        info!("[Kernel] [Rule] Default verdicts applied — incoming: {:?}, outgoing: {:?}", config.default_incoming, config.default_outgoing);
+    }
+
     info!("[Kernel] [Rule] Ruleset successfully applied.");
     Ok(())
 }

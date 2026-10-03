@@ -298,11 +298,31 @@ pub struct Rule {
     pub description: String,
 }
 
+/// The fallback verdict for traffic in a direction that matches no
+/// explicit rule (UFW's `ufw default` analogue, #159). `Block` is the
+/// serde default, so config files written before #159 keep the
+/// fail-closed posture.
+#[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum DefaultVerdict {
+    Allow,
+    Block,
+}
+
+/// Serde default for `FireWhalConfig::default_*` fields — fail-closed.
+pub fn default_verdict_default() -> DefaultVerdict {
+    DefaultVerdict::Block
+}
+
 // List of rules to be sent to firewall
 #[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
 pub struct FireWhalConfig {
     pub outgoing_rules: Vec<Rule>,
-    pub incoming_rules: Vec<Rule>
+    pub incoming_rules: Vec<Rule>,
+    #[serde(default = "default_verdict_default")]
+    pub default_incoming: DefaultVerdict,
+    #[serde(default = "default_verdict_default")]
+    pub default_outgoing: DefaultVerdict,
 }
 
 // Represents the value for an app id key in the app_id.toml file
@@ -569,5 +589,59 @@ pub fn load_interface_state_config(path: &Path) -> ConfigLoadResult<InterfaceSta
         },
         TomlRead::Missing => ConfigLoadResult::Missing,
         TomlRead::Unreadable(e) => ConfigLoadResult::Malformed { reason: format!("unreadable: {e}") },
+    }
+}
+
+#[cfg(test)]
+mod default_verdict_tests {
+    use super::*;
+
+    // #159: config files written before the default-verdict fields existed
+    // must keep parsing, and must keep the fail-closed posture.
+    #[test]
+    fn legacy_config_without_defaults_parses_fail_closed() {
+        let legacy = r#"
+            incoming_rules = []
+            [[outgoing_rules]]
+            action = "Deny"
+            description = "legacy rule"
+        "#;
+        let config: FireWhalConfig = toml::from_str(legacy).expect("legacy config must parse");
+        assert_eq!(config.default_incoming, DefaultVerdict::Block);
+        assert_eq!(config.default_outgoing, DefaultVerdict::Block);
+        assert_eq!(config.outgoing_rules.len(), 1);
+    }
+
+    #[test]
+    fn explicit_defaults_parse() {
+        let cfg = "outgoing_rules = []\nincoming_rules = []\ndefault_incoming = \"Allow\"\ndefault_outgoing = \"Allow\"\n";
+        let config: FireWhalConfig = toml::from_str(cfg).expect("defaults must parse");
+        assert_eq!(config.default_incoming, DefaultVerdict::Allow);
+        assert_eq!(config.default_outgoing, DefaultVerdict::Allow);
+    }
+
+    #[test]
+    fn defaults_round_trip() {
+        let config = FireWhalConfig {
+            outgoing_rules: vec![],
+            incoming_rules: vec![],
+            default_incoming: DefaultVerdict::Allow,
+            default_outgoing: DefaultVerdict::Block,
+        };
+        let toml_str = toml::to_string(&config).expect("serialize");
+        let back: FireWhalConfig = toml::from_str(&toml_str).expect("round-trip parse");
+        assert_eq!(back.default_incoming, DefaultVerdict::Allow);
+        assert_eq!(back.default_outgoing, DefaultVerdict::Block);
+    }
+
+    #[test]
+    fn malformed_default_value_rejected() {
+        // Valid shape, invalid enum value — must fail on the value itself.
+        let cfg = "outgoing_rules = []\nincoming_rules = []\ndefault_outgoing = \"Maybe\"\n";
+        let err = toml::from_str::<FireWhalConfig>(cfg).expect_err("must be rejected");
+        assert!(
+            err.to_string().contains("Maybe"),
+            "expected the unknown variant to be named in the error, got: {err}"
+        );
     }
 }

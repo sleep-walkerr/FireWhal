@@ -37,7 +37,7 @@ use std::os::unix::process::CommandExt;
 
 
 // Workspace imports
-use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, ConfigLoadResult, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, calculate_file_hash, config_path, ipc_client_connection, load_app_ids_config, load_interface_state_config, load_rules_config};
+use firewhal_core::{AppIdentity, ApplicationAllowlistConfig, ConfigLoadResult, DaemonHashResponse, DebugMessage, DEFAULT_IPC_ENDPOINT, DefaultVerdict, FireWhalConfig, FireWhalMessage, InterfaceStateConfig, NetInterfaceResponse, StatusPong, StatusUpdate, UpdatedHashResponse, calculate_file_hash, config_path, ipc_client_connection, load_app_ids_config, load_interface_state_config, load_rules_config};
 
 // A type alias for clarity. Maps a component name (String) to its PID (i32).
 type ChildProcesses = Arc<Mutex<HashMap<String, i32>>>;
@@ -428,12 +428,14 @@ async fn evaluate_config(
             String::new(),
         ),
         ConfigLoadResult::Missing => (
-            FireWhalConfig { outgoing_rules: vec![], incoming_rules: vec![] },
+            // Fail-closed: empty rule set AND Block defaults — a missing or
+            // malformed rules file changes nothing about the default posture.
+            FireWhalConfig { outgoing_rules: vec![], incoming_rules: vec![], default_incoming: DefaultVerdict::Block, default_outgoing: DefaultVerdict::Block },
             FileHealth::Degraded,
             "missing — NO RULES loaded; all traffic is blocked (fail-closed default). Restore the file, then reload from the TUI (or restart the stack).".to_string(),
         ),
         ConfigLoadResult::Malformed { reason } => (
-            FireWhalConfig { outgoing_rules: vec![], incoming_rules: vec![] },
+            FireWhalConfig { outgoing_rules: vec![], incoming_rules: vec![], default_incoming: DefaultVerdict::Block, default_outgoing: DefaultVerdict::Block },
             FileHealth::Degraded,
             format!("malformed ({reason}) — NO RULES loaded; all traffic is blocked (fail-closed default). Fix the file, then reload from the TUI (or restart the stack)."),
         ),
