@@ -808,14 +808,18 @@ async fn main() -> Result<(), anyhow::Error> {
     //
     // aya-log 0.3 is pull-based (0.2's init spawned its own per-CPU reader
     // task), so drain the ring on an interval — this is what delivers the
-    // aya_log_ebpf verdict lines to the log crate.
+    // aya_log_ebpf verdict lines to the log crate. 10 ms: the AYA_LOGS
+    // ringbuf is 128 KiB (hard-coded upstream) and a single SSH handshake
+    // produces a burst of cgroup-relay log lines — at the old 50 ms cadence
+    // the ring could fill between drains and drop verdict lines (the e2e
+    // verdict-line checks lost lines this way, 2026-10-03).
     match EbpfLogger::init(&mut bpf) {
         Ok(logger) => {
             tokio::spawn(async move {
                 let mut logger = logger;
                 loop {
                     logger.flush();
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             });
         }
