@@ -324,20 +324,50 @@ EOF
       #     is therefore: the guest never replies — no frame with the ACK flag
       #     (no SYN-ACK, no data) may be present, even though the blocked SYNs
       #     are.
+      #
+      #     TIME GATE (2026-10-03, gate forensics): the capture is armed BEFORE
+      #     the config swap on purpose (so a swap-window leak is catchable), so
+      #     its first seconds belong to the PREVIOUS config, where incoming :22
+      #     was allowed — and they can contain stragglers (e.g. a slirp-relayed
+      #     probe from the previous phase whose guest-side connection only
+      #     completes once the path is open again). The oracle therefore
+      #     applies from the 'block active' moment (stack re-attach done, per
+      #     the timeline) onward; earlier frames are outside the block window
+      #     by construction and are not evidence either way.
       cap="$STATE/s1-block.pcap"
       if [ ! -s "$cap" ]; then
           say "FAIL: verify: block capture missing (it was never stopped cleanly)"
           FAIL=$((FAIL + 1))
       else
-          syns=$(sudo tshark -r "$cap" -Y 'tcp and tcp.dstport==22' 2>/dev/null | wc -l)
-          n=$(sudo tshark -r "$cap" -Y 'tcp and tcp.dstport==22 and tcp.ack==1' 2>/dev/null | wc -l)
+          # Block-window start: the 'block active' timeline stamp as an
+          # absolute UTC epoch (frame.time_epoch is a UTC epoch too, so no
+          # timezone is involved). Second-resolution: the stamp is written
+          # AFTER the re-attach completes, so frames strictly after that
+          # wall-clock second are unambiguously in the block window.
+          eff="$(grep -a 'block active' "$TIMELINE" 2>/dev/null | tail -1 | sed -E 's/^.*\[([0-9]{2}:[0-9]{2}:[0-9]{2})\].*/\1/')"
+          boundary=""
+          if [ -n "$eff" ]; then
+              boundary="$(date -u -d "$(date -u +%F) $eff" +%s 2>/dev/null || true)"
+          fi
+          # $1 = tshark display filter; count frames strictly after the
+          # boundary (whole capture if the stamp is missing).
+          count_after() {
+              if [ -z "$boundary" ]; then
+                  sudo tshark -r "$cap" -Y "$1" 2>/dev/null | wc -l
+              else
+                  sudo tshark -r "$cap" -Y "$1" -T fields -e frame.time_epoch 2>/dev/null \
+                      | awk -v b="$boundary" '$1+0 > b+0' | wc -l
+              fi
+          }
+          syns=$(count_after 'tcp and tcp.dstport==22')
+          n=$(count_after 'tcp and tcp.dstport==22 and tcp.ack==1')
           if [ "$n" -eq 0 ]; then
-              say "PASS: verify: no guest reply in the block capture (0 ACK frames for :22; ${syns} blocked SYNs visible at the tap — cut at the rule layer)"
+              say "PASS: verify: no guest reply in the block window (0 ACK frames for :22 after 'block active' at ${eff:-unknown}; ${syns} frames in the window — the blocked SYNs, cut at the rule layer)"
               PASS=$((PASS + 1))
           else
-              say "FAIL: verify: $n ACK frames for :22 in the block capture — the block did not hold at the wire"
+              say "FAIL: verify: $n ACK frames for :22 in the block window (after 'block active' at ${eff:-unknown}) — the block did not hold at the wire"
               sudo tshark -r "$cap" -Y 'tcp and tcp.dstport==22 and tcp.ack==1' \
-                  -T fields -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags 2>/dev/null \
+                  -T fields -e frame.time_relative -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport -e tcp.flags 2>/dev/null \
                   | head -n 10 | sed 's/^/       | /'
               FAIL=$((FAIL + 1))
           fi
