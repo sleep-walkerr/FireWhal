@@ -62,12 +62,13 @@ check() { # $1=name  $2=haystack  $3=ERE pattern
 }
 
 # Per-leg defaults. ZERO rules in every leg — the default IS the policy.
+# Return format: "out|in" (outgoing first).
 cfg_for() { # leg -> "out|in"
     case "$1" in
         egress-allow)   echo 'Allow|Block' ;;
         egress-block)   echo 'Block|Block' ;;
         incoming-allow) echo 'Allow|Allow' ;;
-        incoming-block) echo 'Block|Allow' ;;
+        incoming-block) echo 'Allow|Block' ;;
         *) say "FATAL: unknown leg '$1' (expected egress-allow|egress-block|incoming-allow|incoming-block)"; exit 2 ;;
     esac
 }
@@ -131,9 +132,20 @@ wait_ready() {
 start_capture() {
     # sudo rm: the previous leg's capture is tcpdump-owned in the sticky
     # /tmp, a plain rm -f gets "Operation not permitted" (same trap as D1)
-    sudo rm -f "$CAP" "${CAP}.err"
-    sudo tcpdump -i "$IFACE" -w "$CAP" 2>"$CAP.err" &
+    #
+    # stdout MUST be redirected (S1's .out pattern): a backgrounded tcpdump
+    # that inherits the ssh session's stdout holds the pipe open and hangs
+    # the caller — the first DV run hung the gate on the incoming-allow arm
+    # exactly this way (guest side finished, the arm call never returned).
+    #
+    # The pid is saved to a file: stop-capture runs in a SEPARATE ssh call
+    # for the incoming legs (S1-style), where $TCPPID is not inherited —
+    # the first DV run's no-op cross-call kill let tcpdumps accumulate
+    # (3+ survivors per leg, one since the hung run).
+    sudo rm -f "$CAP" "${CAP}.err" "${CAP}.out" "${CAP}.pid"
+    sudo tcpdump -i "$IFACE" -w "$CAP" >"$CAP.out" 2>"$CAP.err" &
     TCPPID=$!
+    echo "$TCPPID" > "$CAP.pid"
     local i
     for i in $(seq 1 25); do
         if grep -q "listening on" "$CAP.err" 2>/dev/null; then return 0; fi
@@ -145,9 +157,26 @@ start_capture() {
 }
 
 stop_capture() {
+    # $TCPPID is only set when start_capture ran in THIS shell (the egress
+    # `run` legs); the incoming legs arm in a separate ssh call, so fall
+    # back to the pid file. The kill must be real: a SIGTERM'd tcpdump
+    # exits cleanly and flushes its stdio-buffered pcap (libpcap fully
+    # buffers file output — a small capture sits in the 4KB buffer and the
+    # file looks empty until a flush, which a dead-but-unflushed tcpdump
+    # never does).
+    local pid="${TCPPID:-}" i
+    if [ -z "$pid" ] && [ -f "$CAP.pid" ]; then
+        pid=$(cat "$CAP.pid" 2>/dev/null || true)
+    fi
     sleep 1
-    kill "$TCPPID" 2>/dev/null
-    wait "$TCPPID" 2>/dev/null
+    if [ -n "$pid" ]; then
+        sudo kill "$pid" 2>/dev/null || true
+        for i in $(seq 1 10); do
+            sudo kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+        done
+    fi
+    rm -f "$CAP.pid"
     if [ ! -s "$CAP" ]; then
         say "FATAL: capture file missing/empty (tcpdump did not run)"
         sed 's/^/       | /' "${CAP}.err" 2>/dev/null || true
@@ -229,8 +258,11 @@ case "$CMD" in
   verify)
       case "$LEG" in incoming-allow|incoming-block) ;; *) say "FATAL: verify takes an incoming leg"; exit 2 ;; esac
       # fresh log: the arm's teardown removed it, the daemon truncated it on
-      # start — everything in the file is from the leg's window
-      hay=$(tail -n 500 "$LOG_ERR" 2>/dev/null || true)
+      # start — everything in the file is from the leg's window, so read the
+      # WHOLE file (a tail window misses the SYN verdict once the post-
+      # handshake cgroup relay noise from the probes outgrows it — the first
+      # post-fix run lost the line this way, 3 full SSH sessions of noise)
+      hay=$(cat "$LOG_ERR" 2>/dev/null || true)
       if [ ! -s "$CAP" ]; then
           say "FAIL: verify: capture missing for $LEG (stop-capture never ran cleanly)"
           FAIL=$((FAIL + 1))
