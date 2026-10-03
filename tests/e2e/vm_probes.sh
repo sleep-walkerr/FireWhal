@@ -5,7 +5,8 @@
 # isolated slirp network with nothing listening, so the HTTP probes never
 # complete on the wire. The firewhal-kernel verdict lines are the truth:
 #   allow:      "Rule N ALLOWED connection to <ip>:<port>"
-#   rule block: "No rule matched. Blocking connection to <ip>:<port>"
+#   rule block: "No rule matched; default OUTGOING = Block. Blocking connection to <ip>:<port>"
+#               (zero-rule fallback; the rig default is the fail-closed Block)
 #   app block:  "Inserted trust for PID N: Deny"
 #               "Pending Connection Blocked (PID Denied) N"
 # Egress is forced through the test NIC with SO_BINDTODEVICE (both slirp NICs
@@ -57,8 +58,8 @@ check "allow: trusted curl -> 10.0.3.2:80 permitted by the rules" \
 off=$(wc -l < "$LOG")
 curl --interface "$IFACE" --max-time 5 -s -o /dev/null http://10.0.3.2:8080 || true
 sleep 2
-check "rule-block: trusted curl -> 10.0.3.2:8080 blocked (no matching rule)" \
-    "$(newlog_since "$off")" "No rule matched. Blocking connection to 10.0.3.2:8080"
+check "rule-block: trusted curl -> 10.0.3.2:8080 blocked (no matching rule, default Block)" \
+    "$(newlog_since "$off")" "No rule matched; default OUTGOING = Block. Blocking connection to 10.0.3.2:8080"
 
 # --- P3 app block: untrusted python3 (not in the allowlist) -> allowed port :443
 # Run OUTSIDE the ssh session's process tree: with sshd in the allowlist,

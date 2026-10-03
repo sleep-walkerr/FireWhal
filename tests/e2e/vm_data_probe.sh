@@ -19,7 +19,8 @@
 #             probe frames present on the wire, "Rule N ALLOWED ..." verdict
 #   block     stack UP, no rule for :8080 — connect fails, NO probe frames on
 #             the wire (cut at the boundary, not lost downstream), "No rule
-#             matched. Blocking ..." verdict
+#             matched; default OUTGOING = Block. Blocking ..." verdict (#159:
+#             the rig config's fail-closed default is what does the cutting)
 set -uo pipefail
 
 LEG="${1:?usage: vm_data_probe.sh baseline|allow|block}"
@@ -158,8 +159,8 @@ else
         say "FAIL: block: $n probe frames found on the wire — the block did not hold"
         FAIL=$((FAIL + 1))
     fi
-    check "block: no rule matched (verdict line)" \
-        "$hay" "No rule matched. Blocking connection to ${PEER}:${PORT}"
+    check "block: no rule matched, default cut it (verdict line)" \
+        "$hay" "No rule matched; default OUTGOING = Block. Blocking connection to ${PEER}:${PORT}"
 fi
 
 say "results: $PASS passed, $FAIL failed"
