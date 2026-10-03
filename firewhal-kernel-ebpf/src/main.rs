@@ -47,6 +47,12 @@ static mut SOCKET_COOKIE_TRUST: HashMap<u64, u32> = HashMap::with_max_entries(40
 #[map]
 static mut PERMISSIVE_MODE_ENABLED: Array<u32> = Array::with_max_entries(1, 0);
 
+// #159: per-direction default verdict, the fallback when the rule engine
+// finds no match. Set by the loader on every rules push. Index 0 =
+// incoming, index 1 = outgoing; value 0 = Block, 1 = Allow.
+#[map]
+static mut DEFAULT_VERDICTS: Array<u32> = Array::with_max_entries(2, 0);
+
 #[map] 
 static PENDING_LISTENING_PORTS: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 
@@ -245,10 +251,21 @@ fn rule_matching(ctx: &TcContext, tuple: ConnectionTuple, info: ConnectionInfo) 
         };
     }
 
-    // --- 5. Default Action: No rule matched ---
-    // If we reach here, no rule matched. Your previous logic defaulted to block.
-    info!(ctx, "[Kernel] [egress_tc] No rule matched. Blocking connection to {}:{}", Ipv4Addr::from(u32::from_be(tuple.daddr)), tuple.dport);
-    Ok(TC_ACT_SHOT)
+    // --- 5. Default Action: No rule matched — apply the per-direction
+    // default verdict (#159). Block is the fail-closed default. ---
+    if unsafe { DEFAULT_VERDICTS.get(1) } == Some(&1) {
+        info!(ctx, "[Kernel] [egress_tc] No rule matched; default OUTGOING = Allow. Allowing connection to {}:{}", Ipv4Addr::from(u32::from_be(tuple.daddr)), tuple.dport);
+        // Add to the stateful map for return traffic (same as rule Allow):
+        // otherwise the reply path would miss the tracked tuple on ingress.
+        if unsafe { CONNECTION_MAP.insert(&tuple, &info, 0) }.is_err() {
+            info!(ctx, "[Egress] FAILED to insert tuple into map!");
+            return Ok(TC_ACT_SHOT);
+        }
+        Ok(TC_ACT_OK)
+    } else {
+        info!(ctx, "[Kernel] [egress_tc] No rule matched; default OUTGOING = Block. Blocking connection to {}:{}", Ipv4Addr::from(u32::from_be(tuple.daddr)), tuple.dport);
+        Ok(TC_ACT_SHOT)
+    }
 }
 
 #[inline(always)]
@@ -339,9 +356,15 @@ fn ingress_rule_matching(ctx: &TcContext, tuple: ConnectionTuple) -> Result<i32,
         };
     }
 
-    // --- 5. Default Action: No rule matched ---
-    info!(ctx, "[Kernel] [ingress_tc] No ingress rule matched. Blocking connection from {}:{}", Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
-    Ok(TC_ACT_SHOT)
+    // --- 5. Default Action: No rule matched — apply the per-direction
+    // default verdict (#159). Block is the fail-closed default. ---
+    if unsafe { DEFAULT_VERDICTS.get(0) } == Some(&1) {
+        info!(ctx, "[Kernel] [ingress_tc] No ingress rule matched; default INCOMING = Allow. Allowing connection from {}:{}", Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
+        Ok(TC_ACT_OK)
+    } else {
+        info!(ctx, "[Kernel] [ingress_tc] No ingress rule matched; default INCOMING = Block. Blocking connection from {}:{}", Ipv4Addr::from(u32::from_be(tuple.saddr)), tuple.sport);
+        Ok(TC_ACT_SHOT)
+    }
 }
 
 // INGRESS PROGRAMS

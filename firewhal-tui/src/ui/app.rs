@@ -8,7 +8,7 @@ use crate::ui::{
     permissive_mode::{PermissiveListState, ProcessLineageTupleList, ToggledPaths},
     rule_management::RuleTableState,
 };
-use firewhal_core::{AppIdentity, FireWhalConfig, FireWhalMessage, Rule};
+use firewhal_core::{AppIdentity, DefaultVerdict, FireWhalConfig, FireWhalMessage, Rule};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +62,10 @@ pub struct App {
     pub rules_modified: bool,
     pub rules: Vec<Rule>, // Outgoing rules
     pub incoming_rules: Vec<Rule>,
+    // #159: per-direction default verdicts (UI controls land in PR 2; for
+    // now these round-trip from RulesResponse into UpdateRules).
+    pub default_incoming: DefaultVerdict,
+    pub default_outgoing: DefaultVerdict,
     pub app_list_state: AppListState,
     pub apps_modified: bool,
     pub apps: HashMap<String, AppIdentity>,
@@ -109,6 +113,8 @@ impl App {
         let config = FireWhalConfig {
             outgoing_rules: self.rules.clone(),
             incoming_rules: self.incoming_rules.clone(),
+            default_incoming: self.default_incoming,
+            default_outgoing: self.default_outgoing,
         };
         if let Some(tx) = &self.to_zmq_tx {
             if let Err(e) = tx.try_send(FireWhalMessage::UpdateRules(config)) {
@@ -153,6 +159,8 @@ impl Default for App {
             rules_modified: false,
             rules: Vec::new(),
             incoming_rules: Vec::new(),
+            default_incoming: DefaultVerdict::Block,
+            default_outgoing: DefaultVerdict::Block,
             app_list_state: AppListState::default(),
             apps_modified: false,
             apps: HashMap::new(),

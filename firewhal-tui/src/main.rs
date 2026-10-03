@@ -182,6 +182,8 @@ async fn main() -> Result<(), io::Error> {
                     // For now, we only show outgoing rules. This can be expanded later.
                     app_guard.rules.extend(rules_message.outgoing_rules);
                     app_guard.incoming_rules.extend(rules_message.incoming_rules);
+                    app_guard.default_incoming = rules_message.default_incoming;
+                    app_guard.default_outgoing = rules_message.default_outgoing;
 
                     // Select the first item if nothing is selected
                     if app_guard.outgoing_rule_state.table_state.selected().is_none() {
