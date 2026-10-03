@@ -59,8 +59,9 @@ enforced_interfaces = [
 EOF
 
 sudo tee /etc/firewhal/firewall_rules.toml >/dev/null <<EOF
-# Pre-v1: the default_* fields are REQUIRED (#159 enforcement) — the
-# rig config must carry them or the stack starts degraded (loud, by design).
+# Pre-v1 (#159): the default_* keys are emitted explicitly (AGENTS.md —
+# generators write every key; the serde default (Block) is a backstop, not
+# a substitute for complete on-disk state).
 default_incoming = "Block"
 default_outgoing = "Block"
 

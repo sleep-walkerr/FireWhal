@@ -308,7 +308,7 @@ EOF
       SRC=""
       [ -s "$SNAP" ] && SRC="$SNAP"
       [ -n "$SRC" ] || SRC="$LOG"
-      if [ -s "$SRC" ] && sudo grep -qE 'No ingress rule matched\. Blocking connection from 10\.0\.3\.2:[0-9]+' "$SRC"; then
+      if [ -s "$SRC" ] && sudo grep -qE 'No ingress rule matched; default INCOMING = Block\. Blocking connection from 10\.0\.3\.2:[0-9]+' "$SRC"; then
           say "PASS: verify: block verdict logged (ingress :22 cut at the rule layer)"
           PASS=$((PASS + 1))
       else

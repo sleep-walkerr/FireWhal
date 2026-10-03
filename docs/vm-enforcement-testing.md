@@ -38,10 +38,35 @@ run, so a broken allow path and a broken block path are told apart:
    `Rule N ALLOWED connection to 10.0.3.2:9999`.
 3. **block** — `curl` → `10.0.3.2:8080` (no rule matches). Connect fails and
    **no** probe frames appear on the wire — cut at the boundary, not lost
-   downstream — with verdict `No rule matched. Blocking connection to
-   10.0.3.2:8080`.
+   downstream — with verdict `No rule matched; default OUTGOING = Block.
+   Blocking connection to 10.0.3.2:8080` (post-#159: the rig config's
+   fail-closed default is what does the cutting).
 
-## S1 SSH-block phase (gate phase 7, since 2026-09-27)
+## DV default-verdict legs (gate phase 7, since 2026-10-03)
+
+Phase 7 is the first phase that exercises the per-direction **default
+verdicts** (ticket #159, the `ufw default` analogue) as the policy itself:
+every leg runs with **zero** explicit rules, so whatever crosses or is cut
+is the configured default, not a rule. The leg matrix (`vm_dv.sh` writes
+each leg's config; the stack restarts per leg under the full readiness
+gate):
+
+| Leg | Defaults (in/out) | Assertion |
+|---|---|---|
+| egress-allow | Block / Allow | guest `curl` POST → `10.0.3.2:9999`: frames on the wire + the host listener receives the payload (byte-level) + `No rule matched; default OUTGOING = Allow. Allowing connection to 10.0.3.2:9999` |
+| egress-block | Block / Block | guest `curl` → `10.0.3.2:8080`: 0 frames (cut at the boundary — the egress tap is downstream) + `No rule matched; default OUTGOING = Block. Blocking connection to 10.0.3.2:8080` |
+| incoming-allow | Allow / Allow | host `ssh -p 2223` up 3/3; capture: the guest replies (ACK frames for `:22`); `No ingress rule matched; default INCOMING = Allow. Allowing connection from 10.0.3.2:<port>` |
+| incoming-block | Block / Allow | host `ssh -p 2223` down 3/3; capture: no guest reply (0 ACK frames for `:22`; blocked SYNs visible at the tap — S1 finding); **M1:** mgmt 2222 up 3/3; `No ingress rule matched; default INCOMING = Block. Blocking connection from 10.0.3.2:<port>` |
+
+Design notes: the outgoing default is `Allow` on the incoming legs because
+the sshd's replies are egress and must cross for the handshake to complete
+(incoming-allow) or never happen (incoming-block), so INCOMING is the only
+variable. The phase needs no self-expiry sleeper (unlike S1): the worst leg
+only blocks the OOB 2223 path and the unenforced mgmt 2222 stays up, so the
+gate always keeps control; it ends with a full redeploy of the standard
+rig config, which S1 and C1 depend on.
+
+## S1 SSH-block phase (gate phase 8, since 2026-09-27)
 
 Phase 7 is the **deliberate SSH block** (ticket #106, design doc
 `docs/comprehensive-test-design.md` §2.2) — a feature test, not a bug hunt:
@@ -67,8 +92,10 @@ the whole window.
 3. **Window** — from the host: `ssh -p 2223` must fail 100 % (the rule cut
    SSH, as configured); the mgmt ping must stay 100 % healthy (M1 — no
    collateral lockout). Wire-verified in-guest: the block log carries the
-   verdict `No ingress rule matched. Blocking connection from
-   10.0.3.2:<port>`, and the capture shows **no guest reply** (no frame with
+   verdict `No ingress rule matched; default INCOMING = Block. Blocking
+   connection from 10.0.3.2:<port>` (post-#159: dropping the `:22` rule
+   leaves no match, so the fail-closed default does the cutting), and the
+   capture shows **no guest reply** (no frame with
    the ACK flag for `:22`) — see the capture-semantics finding below.
 4. **Self-expiry & recovery** — the sleeper fires, the config is restored
    byte-for-byte, the stack restarts, and `2223` comes back with no outside
@@ -151,9 +178,9 @@ stays up and the "must be down" checks fail; if the self-expiry fails,
   determined, so the check now greps the snapshot file directly (no
   `$(cat)`-into-variable, no pipe), which removes the mechanism class.
 
-## C1 config-path phase (gate phase 8, since 2026-09-27)
+## C1 config-path phase (gate phase 9, since 2026-09-27)
 
-Phase 8 is the **config-path regression** (ticket #106, design doc
+Phase 9 is the **config-path regression** (ticket #106, design doc
 `docs/comprehensive-test-design.md` §2.4): deploy with a toml missing or
 malformed must leave the stack **up in the fail-closed default** (a dead
 firewall detaches every eBPF hook — fail-open) and **announced on every
@@ -350,9 +377,12 @@ no raw sockets needed).
 - [x] Design the comprehensive test mechanism (ticket #106; design doc
       `docs/comprehensive-test-design.md`); D1 data-level phase landed as
       gate phase 6 on 2026-09-26.
-- [x] S1 SSH-block + M1 mgmt collateral guard (gate phase 7, 2026-09-27;
+- [x] S1 SSH-block + M1 mgmt collateral guard (gate phase 8, 2026-09-27;
       see the S1 section above for the inverted mechanism + first-run
       findings).
+- [x] DV default-verdict legs (gate phase 7, 2026-10-03; ticket #159 —
+      the per-direction defaults exercised with zero rules; see the DV
+      section above).
 - [ ] Remaining #106 sequence: C1 config-path fail-loud, R resilience
       (ticket #114), CI on a KVM runner. Host-side TAP/netns wire visibility:
       ticket #115.
