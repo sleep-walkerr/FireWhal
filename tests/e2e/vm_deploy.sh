@@ -59,6 +59,11 @@ enforced_interfaces = [
 EOF
 
 sudo tee /etc/firewhal/firewall_rules.toml >/dev/null <<EOF
+# Pre-v1: the default_* fields are REQUIRED (#159 enforcement) — the
+# rig config must carry them or the stack starts degraded (loud, by design).
+default_incoming = "Block"
+default_outgoing = "Block"
+
 [[incoming_rules]]
 action = "Allow"
 protocol = "Tcp"
