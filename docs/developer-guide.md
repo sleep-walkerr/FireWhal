@@ -42,10 +42,14 @@ recovers). Configure `/etc/firewhal/*.toml` (and create
   the pin by switching to a floating nightly — the bpf-linker pairing
   depends on it.
 - **`bpf-linker` 0.11.1** is a source build in `~/.local/bin`, built with
-  `--features llvm-22` to pair with the host's libLLVM 22. The PKGBUILD
+  the default `llvm-23` feature to pair with the host's libLLVM 23
+  (rebuilt 2026-10-03 when the distro rolled LLVM 22 → 23; the old
+  `llvm-22` build broke silently — `bpf-linker --version` printed
+  nothing — until the PKGBUILD's fail-loud check caught it). The PKGBUILD
   checks this fail-loud (missing or wrong version = build fails, not a
-  corrupt BPF object). When the distro ships LLVM 23: rebuild with the
-  default `llvm-23` feature (see the follow-up ticket for packaging it).
+  corrupt BPF object). When the distro ships a newer LLVM again: rebuild
+  with the matching `llvm-NN` feature (see the follow-up ticket for
+  packaging it).
 - Build order that works: `cargo build --release --locked` at the workspace
   root. `firewhal-kernel-ebpf` is deliberately **not** a default member —
   it is compiled by `aya-build` inside `firewhal-kernel`'s `build.rs`.
