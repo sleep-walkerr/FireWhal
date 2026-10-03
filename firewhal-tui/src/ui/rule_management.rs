@@ -1,6 +1,6 @@
 use ratatui::{prelude::*, widgets::*};
 use crossterm::event::{KeyCode, KeyEvent};
-use firewhal_core::{FireWhalConfig, FireWhalMessage, Rule, Action, Protocol};
+use firewhal_core::{DefaultVerdict, FireWhalConfig, FireWhalMessage, Rule, Action, Protocol};
 use crate::ui::app::App;
 use crate::ui::centered_rect;
 use crate::AppScreen;
@@ -63,8 +63,8 @@ pub fn handle_key_event(
     app: &mut App,
 ) {
     match app.screen {
-        AppScreen::OutgoingRules => handle_key_event_for_table(key_code, &mut app.outgoing_rule_state, &mut app.rules, &mut app.rules_modified),
-        AppScreen::IncomingRules => handle_key_event_for_table(key_code, &mut app.incoming_rule_state, &mut app.incoming_rules, &mut app.rules_modified),
+        AppScreen::OutgoingRules => handle_key_event_for_table(key_code, &mut app.outgoing_rule_state, &mut app.rules, &mut app.default_outgoing, &mut app.rules_modified),
+        AppScreen::IncomingRules => handle_key_event_for_table(key_code, &mut app.incoming_rule_state, &mut app.incoming_rules, &mut app.default_incoming, &mut app.rules_modified),
         _ => {} // Should not happen
     }
 }
@@ -74,16 +74,19 @@ fn handle_key_event_for_table(
     key_code: KeyCode,
     rule_table_state: &mut RuleTableState,
     rules: &mut Vec<Rule>,
+    default_verdict: &mut DefaultVerdict,
     rules_modified: &mut bool,
 ) {
     match rule_table_state.mode {
-        RuleManagementMode::Viewing => handle_viewing_keys(key_code, rule_table_state, rules),
+        // `v` (default verdict) is only handled in Viewing mode — in the
+        // edit form, plain chars belong to the input buffer.
+        RuleManagementMode::Viewing => handle_viewing_keys(key_code, rule_table_state, rules, default_verdict, rules_modified),
         RuleManagementMode::Editing(_) => handle_editing_keys(key_code, rule_table_state, rules, rules_modified),
         RuleManagementMode::ConfirmingDelete { .. } => handle_confirm_delete_keys(key_code, rule_table_state, rules, rules_modified),
     }
 }
 
-fn handle_viewing_keys(key_code: KeyCode, state: &mut RuleTableState, rules: &mut Vec<Rule>) {
+fn handle_viewing_keys(key_code: KeyCode, state: &mut RuleTableState, rules: &mut Vec<Rule>, default_verdict: &mut DefaultVerdict, rules_modified: &mut bool) {
     match key_code {
         KeyCode::Down => {
             if !rules.is_empty() {
@@ -140,6 +143,15 @@ fn handle_viewing_keys(key_code: KeyCode, state: &mut RuleTableState, rules: &mu
                     selected_yes: false, // Default to "No"
                 };
             }
+        }
+        KeyCode::Char('v') => {
+            // Toggle the default verdict for this direction (#159, PR 2).
+            // Marking the config modified makes the global `p` apply it.
+            *default_verdict = match *default_verdict {
+                DefaultVerdict::Allow => DefaultVerdict::Block,
+                DefaultVerdict::Block => DefaultVerdict::Allow,
+            };
+            *rules_modified = true;
         }
         _ => {}
     }
@@ -296,13 +308,13 @@ fn handle_confirm_delete_keys(
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     // This function is now a dispatcher based on the current screen.
     match app.screen {
-        AppScreen::OutgoingRules => render_rule_screen(f, "Outgoing Rules", &mut app.outgoing_rule_state, &app.rules, app.rules_modified, !app.focus_on_navigation, area),
-        AppScreen::IncomingRules => render_rule_screen(f, "Incoming Rules", &mut app.incoming_rule_state, &app.incoming_rules, app.rules_modified, !app.focus_on_navigation, area),
+        AppScreen::OutgoingRules => render_rule_screen(f, "Outgoing Rules", &mut app.outgoing_rule_state, &app.rules, app.rules_modified, !app.focus_on_navigation, &mut app.default_outgoing, area),
+        AppScreen::IncomingRules => render_rule_screen(f, "Incoming Rules", &mut app.incoming_rule_state, &app.incoming_rules, app.rules_modified, !app.focus_on_navigation, &mut app.default_incoming, area),
         _ => {} // Should not happen if called correctly
     }
 }
-pub fn render_rule_screen(f: &mut Frame, title: &str, state: &mut RuleTableState, rules: &[Rule], rules_modified: bool, is_focused: bool, area: Rect) {
-    render_rules_table(f, title, state, rules, rules_modified, is_focused, area);
+pub fn render_rule_screen(f: &mut Frame, title: &str, state: &mut RuleTableState, rules: &[Rule], rules_modified: bool, is_focused: bool, default_verdict: &DefaultVerdict, area: Rect) {
+    render_rules_table(f, title, state, rules, rules_modified, is_focused, default_verdict, area);
     match &state.mode {
         RuleManagementMode::Editing(state) => {
             let popup_area = centered_rect(80, 70, area);
@@ -417,7 +429,7 @@ fn render_form_field(f: &mut Frame, area: Rect, title: &str, value: &str, is_foc
     }
 }
 
-fn render_rules_table(f: &mut Frame, title_str: &str, state: &mut RuleTableState, rules: &[Rule], rules_modified: bool, is_focused: bool, area: Rect) {
+fn render_rules_table(f: &mut Frame, title_str: &str, state: &mut RuleTableState, rules: &[Rule], rules_modified: bool, is_focused: bool, default_verdict: &DefaultVerdict, area: Rect) {
     let modified_indicator = if rules_modified { "*" } else { "" };
     let title = Line::from(vec![
         Span::styled(title_str, Style::default().fg(Color::LightCyan)),
@@ -474,9 +486,48 @@ fn render_rules_table(f: &mut Frame, title_str: &str, state: &mut RuleTableState
         Constraint::Length(1), // Separator line
         Constraint::Length(1), // Header text
         Constraint::Length(1), // Separator line
+        Constraint::Length(1), // Default-verdict control line
+        Constraint::Length(1), // Default-verdict notice line
         Constraint::Min(0),    // Table
         Constraint::Length(1), // Bottom spacing
     ]).split(content_area);
+
+    // --- Default-verdict control (#159, PR 2): the fallback verdict for
+    //     traffic in this direction that matches no explicit rule. `v`
+    //     toggles it; `p` applies (rules_modified is set on toggle). ---
+    let highlight = |fg: Color| Style::default().bg(fg).fg(Color::Black).bold();
+    let allow_span = if *default_verdict == DefaultVerdict::Allow {
+        Span::styled(" Allow ", highlight(Color::Green))
+    } else {
+        Span::styled(" Allow ", Style::default().fg(Color::LightCyan))
+    };
+    let block_span = if *default_verdict == DefaultVerdict::Block {
+        Span::styled(" Block ", highlight(Color::Red))
+    } else {
+        Span::styled(" Block ", Style::default().fg(Color::LightCyan))
+    };
+    let control_line = Paragraph::new(Line::from(vec![
+        Span::styled("Default (no rule match): ", Style::default().fg(Color::LightCyan).bold()),
+        allow_span,
+        Span::raw(" | "),
+        block_span,
+        Span::styled("   v: toggle, p: apply", Style::default().fg(Color::DarkGray)),
+    ]));
+    f.render_widget(control_line, layout[4]);
+
+    // Safety notice: Allow is a real posture change and must say so.
+    let notice = if *default_verdict == DefaultVerdict::Allow {
+        Paragraph::new(Line::styled(
+            "Allow: traffic matching no rule PASSES this layer — explicit rules and the app gate (egress) still apply.",
+            Style::default().fg(Color::Red).bold(),
+        ))
+    } else {
+        Paragraph::new(Line::styled(
+            "Block (fail-closed): traffic matching no rule is dropped.",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    f.render_widget(notice, layout[5]);
 
     let header_cells = ["Action", "Protocol", "Src IP", "Src Port", "Dest IP", "Dest Port", "Description"]
         .iter()
@@ -510,5 +561,5 @@ fn render_rules_table(f: &mut Frame, title_str: &str, state: &mut RuleTableState
     f.render_widget(top_separator, layout[1]);
     f.render_widget(header_table, layout[2]);
     f.render_widget(bottom_separator, layout[3]);
-    f.render_stateful_widget(table, layout[4], &mut state.table_state);
+    f.render_stateful_widget(table, layout[6], &mut state.table_state);
 }
