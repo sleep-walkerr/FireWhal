@@ -1,3 +1,6 @@
+default_incoming = "Block"
+default_outgoing = "Block"
+
 [[incoming_rules]]
 action = "Allow"
 dest_port = 22

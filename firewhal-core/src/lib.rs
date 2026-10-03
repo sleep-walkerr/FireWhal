@@ -299,9 +299,12 @@ pub struct Rule {
 }
 
 /// The fallback verdict for traffic in a direction that matches no
-/// explicit rule (UFW's `ufw default` analogue, #159). `Block` is the
-/// serde default, so config files written before #159 keep the
-/// fail-closed posture.
+/// explicit rule (UFW's `ufw default` analogue, #159). Both fields on
+/// `FireWhalConfig` are **required** — pre-v1, we don't carry
+/// backward-compatibility shims (AGENTS.md): a file written before #159
+/// is malformed and goes through the C1 degraded path loudly (fail-closed
+/// + alarm). All file generators (packaged template, e2e rig) emit the
+/// keys explicitly.
 #[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum DefaultVerdict {
@@ -309,19 +312,12 @@ pub enum DefaultVerdict {
     Block,
 }
 
-/// Serde default for `FireWhalConfig::default_*` fields — fail-closed.
-pub fn default_verdict_default() -> DefaultVerdict {
-    DefaultVerdict::Block
-}
-
 // List of rules to be sent to firewall
 #[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
 pub struct FireWhalConfig {
     pub outgoing_rules: Vec<Rule>,
     pub incoming_rules: Vec<Rule>,
-    #[serde(default = "default_verdict_default")]
     pub default_incoming: DefaultVerdict,
-    #[serde(default = "default_verdict_default")]
     pub default_outgoing: DefaultVerdict,
 }
 
@@ -596,20 +592,22 @@ pub fn load_interface_state_config(path: &Path) -> ConfigLoadResult<InterfaceSta
 mod default_verdict_tests {
     use super::*;
 
-    // #159: config files written before the default-verdict fields existed
-    // must keep parsing, and must keep the fail-closed posture.
+    // Pre-v1 (AGENTS.md): a file written before #159 lacks the required
+    // default_* fields and must be REJECTED — the C1 degraded path
+    // (malformed -> fail-closed + alarm) is the loud, correct handling.
     #[test]
-    fn legacy_config_without_defaults_parses_fail_closed() {
+    fn old_shape_without_defaults_is_rejected() {
         let legacy = r#"
             incoming_rules = []
             [[outgoing_rules]]
             action = "Deny"
             description = "legacy rule"
         "#;
-        let config: FireWhalConfig = toml::from_str(legacy).expect("legacy config must parse");
-        assert_eq!(config.default_incoming, DefaultVerdict::Block);
-        assert_eq!(config.default_outgoing, DefaultVerdict::Block);
-        assert_eq!(config.outgoing_rules.len(), 1);
+        let err = toml::from_str::<FireWhalConfig>(legacy).expect_err("old shape must be rejected");
+        assert!(
+            err.to_string().contains("default_incoming"),
+            "expected the missing required field to be named in the error, got: {err}"
+        );
     }
 
     #[test]

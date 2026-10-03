@@ -139,6 +139,12 @@ package() {
 
     cat > "$pkgdir/etc/firewhal/firewall_rules.toml" <<'EOF'
 # FireWhal rules (packaged template — no rules = default-deny everything).
+#
+# The default_* fields are REQUIRED (#159): the fallback verdict for
+# traffic matching no explicit rule. Block (fail-closed) is the safe
+# value; Allow must be a deliberate, operator-made change.
+default_incoming = "Block"
+default_outgoing = "Block"
 # Add rules, then reload from the TUI (or restart the stack).
 #
 # [[outgoing_rules]]
