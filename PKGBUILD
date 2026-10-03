@@ -4,7 +4,8 @@
 #
 # Toolchain prerequisites (checked fail-loud in build(), #136):
 #   - bpf-linker 0.11.1 on PATH (source build paired with the host's
-#     libLLVM 22; no suitable distro package yet — see the follow-up ticket
+#     libLLVM 23 — rebuilt 2026-10-03 after the distro rolled 22 → 23;
+#     no suitable distro package yet — see the follow-up ticket
 #     for making it a proper package)
 #   - rustup toolchain nightly-2026-07-15 — the pinned eBPF toolchain
 #     (firewhal-kernel/build.rs); installed by prepare() if absent
@@ -19,7 +20,7 @@
 pkgname=firewhal
 pkgdesc="FireWhal — eBPF-based application + rule firewall (daemon, kernel loader, TUI, IPC router, config validator)"
 pkgver=0.1.0
-pkgrel=8
+pkgrel=9
 arch=(x86_64)
 url="https://github.com/sleep-walkerr/FireWhal"
 license=("MIT OR Apache-2.0")

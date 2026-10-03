@@ -51,10 +51,12 @@ fw-test.pid / fw-test-serial.log / *.sock / console*.py   local runtime artifact
    name; that hack is no longer needed.)
 3. **When the distro ships a newer LLVM (e.g. 23 on rolling-release):**
    `sudo pacman -Suu` → rebuild bpf-linker with the matching feature
-   (default `llvm-23`) → update the pin in `build.rs` to a dated nightly
-   whose bitcode the new libLLVM parses → re-run the e2e gate. As of
-   2026-09-26 the working pair on this host is LLVM 22 +
-   `nightly-2026-07-15` (newer nightlies emit LLVM-23 bitcode).
+   (default `llvm-23`) → re-pin `build.rs` to a dated nightly *only if*
+   the new libLLVM cannot read the pinned nightly's bitcode → re-run the
+   e2e gate. As of 2026-10-03 the working pair on this host is LLVM 23
+   (23.1.1) + `nightly-2026-07-15`: the pinned nightly emits LLVM-22
+   bitcode, which libLLVM 23 still reads, so no re-pin was needed (newer
+   *nightlies* emit LLVM-23 bitcode).
 
 ## Building the rig from scratch
 
