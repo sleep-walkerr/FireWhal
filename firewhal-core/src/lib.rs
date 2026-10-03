@@ -299,12 +299,16 @@ pub struct Rule {
 }
 
 /// The fallback verdict for traffic in a direction that matches no
-/// explicit rule (UFW's `ufw default` analogue, #159). Both fields on
-/// `FireWhalConfig` are **required** — pre-v1, we don't carry
-/// backward-compatibility shims (AGENTS.md): a file written before #159
-/// is malformed and goes through the C1 degraded path loudly (fail-closed
-/// + alarm). All file generators (packaged template, e2e rig) emit the
-/// keys explicitly.
+/// explicit rule (UFW's `ufw default` analogue, #159).
+///
+/// `Block` is the serde default: if the key is absent from the file — a
+/// generator bug that emitted the file without it, or an operator who
+/// deleted the line by accident — the parse still succeeds and lands on
+/// the fail-closed verdict, instead of rejecting the whole file or,
+/// worse, failing open. This is safe-default enforcement, not backward
+/// compatibility (AGENTS.md): every file generator (packaged template,
+/// e2e rig) still emits the keys explicitly, so the on-disk state is
+/// always complete and the default is a backstop, not a substitute.
 #[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum DefaultVerdict {
@@ -312,12 +316,20 @@ pub enum DefaultVerdict {
     Block,
 }
 
+impl Default for DefaultVerdict {
+    fn default() -> Self {
+        DefaultVerdict::Block
+    }
+}
+
 // List of rules to be sent to firewall
 #[derive(Encode, Decode, Debug, Deserialize, Serialize, Clone)]
 pub struct FireWhalConfig {
     pub outgoing_rules: Vec<Rule>,
     pub incoming_rules: Vec<Rule>,
+    #[serde(default)]
     pub default_incoming: DefaultVerdict,
+    #[serde(default)]
     pub default_outgoing: DefaultVerdict,
 }
 
@@ -592,22 +604,44 @@ pub fn load_interface_state_config(path: &Path) -> ConfigLoadResult<InterfaceSta
 mod default_verdict_tests {
     use super::*;
 
-    // Pre-v1 (AGENTS.md): a file written before #159 lacks the required
-    // default_* fields and must be REJECTED — the C1 degraded path
-    // (malformed -> fail-closed + alarm) is the loud, correct handling.
+    // Safe-default backstop (AGENTS.md): if the default_* keys are
+    // missing — a generator bug or a user-deleted line — the parse
+    // succeeds and lands on Block (fail-closed). Never rejected, never
+    // Allow, and the rest of the file still loads.
     #[test]
-    fn old_shape_without_defaults_is_rejected() {
+    fn missing_defaults_land_on_block() {
         let legacy = r#"
             incoming_rules = []
             [[outgoing_rules]]
             action = "Deny"
             description = "legacy rule"
         "#;
-        let err = toml::from_str::<FireWhalConfig>(legacy).expect_err("old shape must be rejected");
-        assert!(
-            err.to_string().contains("default_incoming"),
-            "expected the missing required field to be named in the error, got: {err}"
-        );
+        let config: FireWhalConfig = toml::from_str(legacy).expect("missing keys must default, not reject");
+        assert_eq!(config.default_incoming, DefaultVerdict::Block);
+        assert_eq!(config.default_outgoing, DefaultVerdict::Block);
+        assert_eq!(config.outgoing_rules.len(), 1, "the rest of the file must still load");
+    }
+
+    // The same property pinned at the real load seam (`load_rules_config`),
+    // not just `toml::from_str`: a file missing the keys loads cleanly,
+    // fail-closed.
+    #[test]
+    fn load_path_defaults_missing_to_block() {
+        let path = std::env::temp_dir().join(format!("fw-default-verdict-load-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "incoming_rules = []\n[[outgoing_rules]]\naction = \"Deny\"\ndescription = \"legacy rule\"\n",
+        )
+        .expect("write test file");
+        let result = load_rules_config(&path);
+        let _ = std::fs::remove_file(&path);
+        match result {
+            ConfigLoadResult::Loaded(config) => {
+                assert_eq!(config.default_incoming, DefaultVerdict::Block);
+                assert_eq!(config.default_outgoing, DefaultVerdict::Block);
+            }
+            other => panic!("expected the missing-keys file to load fail-closed, got: {other:?}"),
+        }
     }
 
     #[test]
