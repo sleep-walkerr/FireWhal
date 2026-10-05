@@ -350,6 +350,98 @@ pub struct InterfaceStateConfig {
     pub enforced_interfaces: HashSet<String>, // Key is the app_id
 }
 
+// ---------------------------------------------------------------------------
+// State introspection (#182): on-demand snapshot of the firewall's live
+// in-kernel state. The kernel loader owns the map handles and performs the
+// dump (same iteration `bpftool map dump` uses); the daemon contributes the
+// C1 config-health view. The TUI renders both; dumps run only on request.
+// ---------------------------------------------------------------------------
+
+/// TUI -> (Firewall + Daemon): "give me the current state view".
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct TUIStateRequest {
+    pub component: String,
+}
+
+/// One tracked/pending/handshake connection (a 5-tuple + owning TGID,
+/// resolved to a process name by the loader).
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct ConnStateEntry {
+    pub src: String,     // "ip:port"
+    pub dst: String,     // "ip:port"
+    pub protocol: String,
+    pub tgid: u32,
+    pub process: String,
+}
+
+/// One TRUSTED_PIDS entry (TGID + verdict + resolved name).
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct TrustedPidEntry {
+    pub tgid: u32,
+    pub action: Action,
+    pub process: String,
+}
+
+/// One pending/trusted listening port (port + owner TGID + resolved name).
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct ListenerEntry {
+    pub port: u16,
+    pub tgid: u32,
+    pub process: String,
+}
+
+/// Per-interface TC attach state (the #181 enforcement signal).
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct AttachEntry {
+    pub interface: String,
+    pub ingress: String, // aya link id (debug format)
+    pub egress: String,  // aya link id (debug format)
+}
+
+/// Point-in-time dump of all display maps + loader attach state, sent by
+/// the kernel in response to a StateRequest. Rules are decoded from the
+/// in-kernel maps so the TUI can flag kernel-vs-on-disk divergence.
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct StateSnapshot {
+    pub source: String,
+    pub captured_at_ms: u64,
+    // Stateful (CONNECTION_MAP — an LRU, so a *window*, not history)
+    pub connections: Vec<ConnStateEntry>,
+    pub pending_connections: Vec<ConnStateEntry>,
+    pub trusted_connections: Vec<ConnStateEntry>,
+    pub handshake_allowed: Vec<ConnStateEntry>,
+    // Trust tables
+    pub trusted_pids: Vec<TrustedPidEntry>,
+    pub pending_listeners: Vec<ListenerEntry>,
+    pub trusted_listeners: Vec<ListenerEntry>,
+    pub trusted_cookies_count: u32,
+    pub socket_cookie_trust_count: u32,
+    // Rules actually loaded in the kernel (for the divergence check)
+    pub outgoing_rules: Vec<Rule>,
+    pub incoming_rules: Vec<Rule>,
+    pub default_outgoing: DefaultVerdict,
+    pub default_incoming: DefaultVerdict,
+    pub permissive_mode: bool,
+    // Loader-owned attach state
+    pub attach: Vec<AttachEntry>,
+}
+
+/// Per-config-file C1 health, sent by the daemon in response to a
+/// StateRequest (the same state the C1 alarm mechanism tracks).
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct ConfigFileHealth {
+    pub file: String,
+    pub healthy: bool,
+    pub note: String,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct ConfigHealthView {
+    pub source: String,
+    pub all_healthy: bool,
+    pub files: Vec<ConfigFileHealth>,
+}
+
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum FireWhalMessage {
     CommandShutdown(ShutdownCommand),
@@ -379,6 +471,9 @@ pub enum FireWhalMessage {
     HashResponse(DaemonHashResponse),
     HashUpdateRequest(RequestToUpdateHash),
     HashUpdateResponse(UpdatedHashResponse),
+    StateRequest(TUIStateRequest),
+    StateResponse(StateSnapshot),
+    ConfigHealthResponse(ConfigHealthView),
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -675,5 +770,127 @@ mod default_verdict_tests {
             err.to_string().contains("Maybe"),
             "expected the unknown variant to be named in the error, got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod state_introspection_tests {
+    use super::*;
+
+    fn sample_snapshot() -> StateSnapshot {
+        StateSnapshot {
+            source: "Firewall".to_string(),
+            captured_at_ms: 1_791_055_000_000,
+            connections: vec![ConnStateEntry {
+                src: "10.0.0.1:51234".to_string(),
+                dst: "1.1.1.1:443".to_string(),
+                protocol: "Tcp".to_string(),
+                tgid: 4242,
+                process: "curl".to_string(),
+            }],
+            pending_connections: vec![],
+            trusted_connections: vec![],
+            handshake_allowed: vec![],
+            trusted_pids: vec![TrustedPidEntry {
+                tgid: 4242,
+                action: Action::Allow,
+                process: "curl".to_string(),
+            }],
+            pending_listeners: vec![ListenerEntry {
+                port: 22,
+                tgid: 1,
+                process: "sshd".to_string(),
+            }],
+            trusted_listeners: vec![],
+            trusted_cookies_count: 3,
+            socket_cookie_trust_count: 2,
+            outgoing_rules: vec![Rule {
+                action: Action::Allow,
+                protocol: Some(Protocol::Tcp),
+                source_ip: None,
+                source_port: None,
+                dest_ip: Some(IpAddr::V4("1.1.1.1".parse().unwrap())),
+                dest_port: Some(443),
+                app_id: None,
+                description: String::new(),
+            }],
+            incoming_rules: vec![],
+            default_outgoing: DefaultVerdict::Block,
+            default_incoming: DefaultVerdict::Block,
+            permissive_mode: false,
+            attach: vec![AttachEntry {
+                interface: "wlp5s0".to_string(),
+                ingress: "FdLinkId(1)".to_string(),
+                egress: "FdLinkId(2)".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn state_snapshot_bincode_round_trip() {
+        let snapshot = sample_snapshot();
+        let bytes = bincode::encode_to_vec(&snapshot, bincode::config::standard().with_big_endian())
+            .expect("encode StateSnapshot");
+        let back: StateSnapshot =
+            bincode::decode_from_slice(&bytes, bincode::config::standard().with_big_endian())
+                .expect("decode StateSnapshot")
+                .0;
+        assert_eq!(back.captured_at_ms, snapshot.captured_at_ms);
+        assert_eq!(back.connections.len(), 1);
+        assert_eq!(back.connections[0].process, "curl");
+        assert_eq!(back.trusted_pids[0].action, Action::Allow);
+        assert_eq!(back.outgoing_rules[0].dest_port, Some(443));
+        assert_eq!(back.default_outgoing, DefaultVerdict::Block);
+        assert_eq!(back.attach.len(), 1);
+    }
+
+    #[test]
+    fn config_health_view_bincode_round_trip() {
+        let view = ConfigHealthView {
+            source: "Daemon".to_string(),
+            all_healthy: false,
+            files: vec![ConfigFileHealth {
+                file: "firewall_rules.toml".to_string(),
+                healthy: false,
+                note: "missing — empty rule set (default-deny)".to_string(),
+            }],
+        };
+        let bytes = bincode::encode_to_vec(&view, bincode::config::standard().with_big_endian())
+            .expect("encode ConfigHealthView");
+        let back: ConfigHealthView =
+            bincode::decode_from_slice(&bytes, bincode::config::standard().with_big_endian())
+                .expect("decode ConfigHealthView")
+                .0;
+        assert!(!back.all_healthy);
+        assert_eq!(back.files[0].file, "firewall_rules.toml");
+    }
+
+    #[test]
+    fn message_variants_round_trip() {
+        let req = FireWhalMessage::StateRequest(TUIStateRequest {
+            component: "TUI".to_string(),
+        });
+        let resp = FireWhalMessage::StateResponse(sample_snapshot());
+        for msg in [req, resp, FireWhalMessage::ConfigHealthResponse(ConfigHealthView {
+            source: "Daemon".to_string(),
+            all_healthy: true,
+            files: vec![],
+        })] {
+            let bytes =
+                bincode::encode_to_vec(&msg, bincode::config::standard().with_big_endian())
+                    .expect("encode FireWhalMessage");
+            let back: FireWhalMessage = bincode::decode_from_slice(
+                &bytes,
+                bincode::config::standard().with_big_endian(),
+            )
+            .expect("decode FireWhalMessage")
+            .0;
+            match back {
+                FireWhalMessage::StateRequest(r) => assert_eq!(r.component, "TUI"),
+                FireWhalMessage::StateResponse(s) => assert_eq!(s.connections.len(), 1),
+                FireWhalMessage::ConfigHealthResponse(v) => assert!(v.all_healthy),
+                _ => panic!("unexpected variant on round trip"),
+            }
+        }
     }
 }

@@ -207,6 +207,22 @@ async fn route_message(
         FireWhalMessage::AppsResponse(_) => {
             deliver(router, clients, pending, "TUI", payload.to_vec()).await;
         }
+
+        // --- State introspection (#182): TUI asks, the kernel dumps the maps
+        //     (it owns the handles) and the daemon reports C1 config health —
+        //     both responses route back to the TUI. ---
+        FireWhalMessage::StateRequest(msg) => {
+            if msg.component == "TUI" {
+                deliver(router, clients, pending, "Firewall", payload.to_vec()).await;
+                deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
+            }
+        }
+        FireWhalMessage::StateResponse(_) => {
+            deliver(router, clients, pending, "TUI", payload.to_vec()).await;
+        }
+        FireWhalMessage::ConfigHealthResponse(_) => {
+            deliver(router, clients, pending, "TUI", payload.to_vec()).await;
+        }
         FireWhalMessage::UpdateAppIds(_) => {
             deliver(router, clients, pending, "Daemon", payload.to_vec()).await;
         }

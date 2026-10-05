@@ -46,9 +46,14 @@ use firewhal_core::{
     PermissiveModeDisable,
     calculate_file_hash,
     ProcessLineageTuple,
-    ProcessInfo
+    ProcessInfo,
+    StateSnapshot,
+    ConnStateEntry,
+    TrustedPidEntry,
+    ListenerEntry,
+    AttachEntry
 };
-use firewhal_kernel_common::{Action, BlockEvent, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey, ConnectionKey};
+use firewhal_kernel_common::{Action, BlockEvent, ConnectionInfo, ConnectionKey, ConnectionTuple, EventType, KernelEvent, PidTrustInfo, RuleAction, RuleKey};
 
 use pnet::{datalink, packet::ip::IpNextHeaderProtocols::Fire};
 
@@ -119,6 +124,287 @@ fn get_process_info(pid: u32) -> Option<(u32, String, String)> {
     let final_name = exe_full_path.clone().unwrap_or_else(|| name.unwrap_or_else(|| format!("Unknown ({})", pid)));
 
     ppid.map(|p| (p, final_name, exe_full_path.unwrap_or_default().to_string())) // Return PPID, preferred_name, and full path
+}
+
+// ---------------------------------------------------------------------------
+// State introspection (#182)
+//
+// On-demand dump of the firewall's live in-kernel state. The same map
+// iteration `bpftool map dump` uses — but only on request (TUI state
+// screen), so zero steady-state cost and nothing on the packet path.
+// TGIDs are resolved to process names: verification cache first, then a
+// single /proc/<tgid>/comm read as fallback.
+// ---------------------------------------------------------------------------
+
+fn fmt_addr(ip: u32, port: u16) -> String {
+    // Same decode the kernel logs use: stored key is the network-order
+    // bytes read as little-endian, so from_be() restores the address.
+    format!("{}:{}", Ipv4Addr::from(u32::from_be(ip)), u16::from_be(port))
+}
+
+fn proto_name(p: u8) -> String {
+    match p {
+        6 => "Tcp".to_string(),
+        17 => "Udp".to_string(),
+        1 => "Icmp".to_string(),
+        _ => format!("proto{p}"),
+    }
+}
+
+fn resolve_process_name(tgid: u32, cache: &HashMap<u32, ProcessInfo>) -> String {
+    if tgid == 0 {
+        return "-".to_string();
+    }
+    if let Some(info) = cache.get(&tgid) {
+        if let Some(name) = info.path.file_name().and_then(|n| n.to_str()) {
+            return name.to_string();
+        }
+        return info.path.to_string_lossy().into_owned();
+    }
+    // Not in the verification cache — live /proc fallback (one small read).
+    std::fs::read_to_string(format!("/proc/{tgid}/comm"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("pid{tgid}"))
+}
+
+/// Decode an in-kernel rule key the same way `apply_ruleset` encodes it
+/// (inverse of the u32::from_le_bytes insert), so the TUI's divergence
+/// check compares like-for-like against the on-disk config.
+fn rule_from_kernel_key(key: &RuleKey, action: firewhal_kernel_common::Action) -> firewhal_core::Rule {
+    let protocol = match key.protocol {
+        0 => None, // Wildcard is stored as 0 (insert uses unwrap_or(Wildcard))
+        6 => Some(firewhal_core::Protocol::Tcp),
+        17 => Some(firewhal_core::Protocol::Udp),
+        1 => Some(firewhal_core::Protocol::Icmp),
+        _ => Some(firewhal_core::Protocol::Wildcard),
+    };
+    let src_ip = if key.source_ip != 0 { Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(key.source_ip)))) } else { None };
+    let dest_ip = if key.dest_ip != 0 { Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(key.dest_ip)))) } else { None };
+    firewhal_core::Rule {
+        action: match action {
+            firewhal_kernel_common::Action::Allow => firewhal_core::Action::Allow,
+            _ => firewhal_core::Action::Deny,
+        },
+        protocol,
+        source_ip: src_ip,
+        source_port: if key.source_port != 0 { Some(key.source_port) } else { None },
+        dest_ip: dest_ip,
+        dest_port: if key.dest_port != 0 { Some(key.dest_port) } else { None },
+        app_id: None, // not stored in the kernel key
+        description: "(kernel map)".to_string(),
+    }
+}
+
+async fn build_state_snapshot(
+    bpf: Arc<tokio::sync::Mutex<Ebpf>>,
+    active_tc_interfaces: Arc<Mutex<ActiveTcInterfaces>>,
+    process_cache: Arc<Mutex<HashMap<u32, ProcessInfo>>>,
+) -> StateSnapshot {
+    let mut bpf = bpf.lock().await;
+    let tc = active_tc_interfaces.lock().await;
+    let cache = process_cache.lock().await;
+
+    let mut snapshot = StateSnapshot {
+        source: "Firewall".to_string(),
+        captured_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        connections: Vec::new(),
+        pending_connections: Vec::new(),
+        trusted_connections: Vec::new(),
+        handshake_allowed: Vec::new(),
+        trusted_pids: Vec::new(),
+        pending_listeners: Vec::new(),
+        trusted_listeners: Vec::new(),
+        trusted_cookies_count: 0,
+        socket_cookie_trust_count: 0,
+        outgoing_rules: Vec::new(),
+        incoming_rules: Vec::new(),
+        default_outgoing: firewhal_core::DefaultVerdict::Block,
+        default_incoming: firewhal_core::DefaultVerdict::Block,
+        permissive_mode: false,
+        attach: Vec::new(),
+    };
+
+    // --- Stateful (CONNECTION_MAP is an LRU: a window of what's tracked
+    //     now, not history) ---
+    // aya 0.14: AyaHashMap accepts both BPF_MAP_TYPE_HASH and
+    // BPF_MAP_TYPE_LRU_HASH (CONNECTION_MAP is the LRU one — a window, not history).
+    if let Some(m) = bpf.map_mut("CONNECTION_MAP") {
+        if let Ok(map) = AyaHashMap::<_, ConnectionTuple, ConnectionInfo>::try_from(m) {
+            for entry in map.iter().flatten() {
+                let (k, v) = entry;
+                snapshot.connections.push(ConnStateEntry {
+                    src: fmt_addr(k.saddr, k.sport),
+                    dst: fmt_addr(k.daddr, k.dport),
+                    protocol: proto_name(k.protocol),
+                    tgid: v.pid,
+                    process: resolve_process_name(v.pid, &cache),
+                });
+            }
+        }
+    }
+
+    // --- Pending / trusted / handshake (key + owning TGID) ---
+    for (map_name, dest) in [
+        ("PENDING_CONNECTIONS_MAP", &mut snapshot.pending_connections),
+        ("TRUSTED_CONNECTIONS_MAP", &mut snapshot.trusted_connections),
+    ] {
+        if let Some(m) = bpf.map_mut(map_name) {
+            if let Ok(map) = AyaHashMap::<_, ConnectionKey, u32>::try_from(m) {
+                for entry in map.iter().flatten() {
+                    let (k, tgid) = entry;
+                    dest.push(ConnStateEntry {
+                        src: fmt_addr(k.saddr, k.sport),
+                        dst: fmt_addr(k.daddr, k.dport),
+                        protocol: proto_name(k.protocol),
+                        tgid,
+                        process: resolve_process_name(tgid, &cache),
+                    });
+                }
+            }
+        }
+    }
+    // HANDSHAKE_ALLOWED: in-flight TCP SYNs (#180 invariant, made visible).
+    // Value is a ktime stamp — display the keys only.
+    if let Some(m) = bpf.map_mut("HANDSHAKE_ALLOWED") {
+        if let Ok(map) = AyaHashMap::<_, ConnectionTuple, u64>::try_from(m) {
+            for entry in map.iter().flatten() {
+                let (k, _stamp) = entry;
+                snapshot.handshake_allowed.push(ConnStateEntry {
+                    src: fmt_addr(k.saddr, k.sport),
+                    dst: fmt_addr(k.daddr, k.dport),
+                    protocol: proto_name(k.protocol),
+                    tgid: 0,
+                    process: "-".to_string(),
+                });
+            }
+        }
+    }
+
+    // --- Trust tables ---
+    if let Some(m) = bpf.map_mut("TRUSTED_PIDS") {
+        if let Ok(map) = AyaHashMap::<_, u32, PidTrustInfo>::try_from(m) {
+            for entry in map.iter().flatten() {
+                let (tgid, info) = entry;
+                snapshot.trusted_pids.push(TrustedPidEntry {
+                    tgid,
+                    action: match info.action {
+                        firewhal_kernel_common::Action::Allow => firewhal_core::Action::Allow,
+                        _ => firewhal_core::Action::Deny,
+                    },
+                    process: resolve_process_name(tgid, &cache),
+                });
+            }
+        }
+    }
+    for (map_name, dest) in [
+        ("PENDING_LISTENING_PORTS", &mut snapshot.pending_listeners),
+        ("TRUSTED_LISTENING_PORTS", &mut snapshot.trusted_listeners),
+    ] {
+        if let Some(m) = bpf.map_mut(map_name) {
+            if let Ok(map) = AyaHashMap::<_, u32, u32>::try_from(m) {
+                for entry in map.iter().flatten() {
+                    let (port, tgid) = entry;
+                    dest.push(ListenerEntry {
+                        port: u16::try_from(port).unwrap_or(u16::MAX),
+                        tgid,
+                        process: resolve_process_name(tgid, &cache),
+                    });
+                }
+            }
+        }
+    }
+    // Cookie maps can be large (10k) — counts only in v1.
+    for (map_name, dest) in [
+        ("TRUSTED_COOKIES", &mut snapshot.trusted_cookies_count),
+        ("SOCKET_COOKIE_TRUST", &mut snapshot.socket_cookie_trust_count),
+    ] {
+        if let Some(m) = bpf.map_mut(map_name) {
+            match (map_name, m) {
+                ("TRUSTED_COOKIES", m) => {
+                    if let Ok(map) = AyaHashMap::<_, u64, u8>::try_from(m) {
+                        *dest = map.iter().count() as u32;
+                    }
+                }
+                ("SOCKET_COOKIE_TRUST", m) => {
+                    if let Ok(map) = AyaHashMap::<_, u64, u32>::try_from(m) {
+                        *dest = map.iter().count() as u32;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // --- Rules actually loaded in the kernel (divergence-check source) ---
+    if let Some(m) = bpf.map_mut("RULES") {
+        if let Ok(map) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(m) {
+            for entry in map.iter().flatten() {
+                let (key, action) = entry;
+                snapshot.outgoing_rules.push(rule_from_kernel_key(&key, action.action));
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("INCOMING_RULES") {
+        if let Ok(map) = AyaHashMap::<_, RuleKey, RuleAction>::try_from(m) {
+            for entry in map.iter().flatten() {
+                let (key, action) = entry;
+                snapshot.incoming_rules.push(rule_from_kernel_key(&key, action.action));
+            }
+        }
+    }
+
+    // --- Arrays: default verdicts (0=incoming, 1=outgoing) + permissive ---
+    if let Some(m) = bpf.map_mut("DEFAULT_VERDICTS") {
+        if let Ok(arr) = AyaArray::<_, u32>::try_from(m) {
+            let to_verdict = |v: u32| -> firewhal_core::DefaultVerdict {
+                if v == 1 { firewhal_core::DefaultVerdict::Allow } else { firewhal_core::DefaultVerdict::Block }
+            };
+            if let Ok(v) = arr.get(&0, 0) {
+                snapshot.default_incoming = to_verdict(v);
+            }
+            if let Ok(v) = arr.get(&1, 0) {
+                snapshot.default_outgoing = to_verdict(v);
+            }
+        }
+    }
+    if let Some(m) = bpf.map_mut("PERMISSIVE_MODE_ENABLED") {
+        if let Ok(arr) = AyaArray::<_, u32>::try_from(m) {
+            if let Ok(v) = arr.get(&0, 0) {
+                snapshot.permissive_mode = v == 1;
+            }
+        }
+    }
+
+    // --- Loader-owned attach state (the #181 enforcement signal) ---
+    for (iface, (ingress_id, egress_id)) in tc.active_links.iter() {
+        snapshot.attach.push(AttachEntry {
+            interface: iface.clone(),
+            ingress: format!("{ingress_id:?}"),
+            egress: format!("{egress_id:?}"),
+        });
+    }
+
+    drop(tc);
+    drop(cache);
+    drop(bpf);
+
+    info!(
+        "[Kernel] [State] Snapshot: {} conn, {} pending, {} trusted-conn, {} handshake, {} trusted-pids, {} out-rules, {} in-rules, {} attached",
+        snapshot.connections.len(),
+        snapshot.pending_connections.len(),
+        snapshot.trusted_connections.len(),
+        snapshot.handshake_allowed.len(),
+        snapshot.trusted_pids.len(),
+        snapshot.outgoing_rules.len(),
+        snapshot.incoming_rules.len(),
+        snapshot.attach.len()
+    );
+    snapshot
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,6 +1518,20 @@ async fn main() -> Result<(), anyhow::Error> {
                         // attach_xdp_programs(Arc::clone(&bpf), interfaces.clone(), active_xdp_interfaces.clone()).await?; 
                         attach_tc_programs(Arc::clone(&bpf), interfaces, active_tc_interfaces.clone()).await?;
                         //}
+                    },
+                    // #182: on-demand in-kernel state dump (maps + attach
+                    // state). Pull-based — zero cost unless the TUI asks.
+                    FireWhalMessage::StateRequest(msg) => {
+                        if msg.component == "TUI" {
+                            let snapshot = build_state_snapshot(
+                                Arc::clone(&bpf),
+                                Arc::clone(&active_tc_interfaces),
+                                Arc::clone(&active_process_cache),
+                            ).await;
+                            if let Err(e) = to_zmq_tx.send(FireWhalMessage::StateResponse(snapshot)).await {
+                                warn!("[Kernel] Failed to send state snapshot: {}", e);
+                            }
+                        }
                     },
                     FireWhalMessage::Ping(ping) => {
                         if ping.source == "TUI" {

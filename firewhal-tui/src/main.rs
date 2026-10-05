@@ -252,6 +252,19 @@ async fn main() -> Result<(), io::Error> {
                     // Since the hash is now up-to-date, we can mark it as Valid.
                     app_guard.hash_states.insert(app_name, HashState::Valid);
                 }
+                // #182: kernel's point-in-time in-kernel state dump.
+                FireWhalMessage::StateResponse(snapshot) => {
+                    app_guard.debug_print.add_message(format!(
+                        "[TUI]: StateResponse received ({} connections, {} rules).",
+                        snapshot.connections.len(),
+                        snapshot.outgoing_rules.len() + snapshot.incoming_rules.len()
+                    ));
+                    app_guard.state_view.apply_snapshot(snapshot);
+                }
+                // #182: daemon's C1 config-health view.
+                FireWhalMessage::ConfigHealthResponse(view) => {
+                    app_guard.state_view.apply_health(view);
+                }
                 _ => {}
             }
         }
@@ -311,7 +324,7 @@ async fn main() -> Result<(), io::Error> {
                                     // Main menu might have its own key events later, but for now, none.
                                 },
                                 AppScreen::Debug => {
-                                    // Debug screen might have its own key events later, but for now, none.
+                                    ui::state_view::handle_key_event(key.code, &mut app_guard);
                                 }
                             }
 
@@ -328,6 +341,19 @@ async fn main() -> Result<(), io::Error> {
             // Delegate updates to the active screen's state
             // Other screens might have their own updates here
             last_tick = Instant::now();
+
+            // #182: optional 1 Hz auto-refresh while the state screen is
+            // open (off by default; `a` toggles it). Pull-based only —
+            // nothing is polled while the screen is closed.
+            if app_guard.screen == AppScreen::Debug && app_guard.state_view.auto_refresh {
+                let due = match app_guard.state_view.last_refresh {
+                    Some(t) => t.elapsed() >= Duration::from_secs(1),
+                    None => true,
+                };
+                if due {
+                    app_guard.request_state();
+                }
+            }
         }
     }
 
@@ -394,6 +420,14 @@ fn handle_screen_enter(app: &mut App) {
                     _ = &app.debug_print.add_message(format!("Failed to send RuleRequest message: {}", e));
                 }
             } else { _ = &app.debug_print.add_message("Found no zmq sender".to_string()); }
+        }
+        AppScreen::Debug => {
+            // #182: pull the state snapshot on demand (kernel), plus a fresh
+            // on-disk rules copy so the divergence check has both sides.
+            app.request_state();
+            if let Some(zmq_sender) = &app.to_zmq_tx {
+                _ = zmq_sender.try_send(FireWhalMessage::RulesRequest(firewhal_core::TUIRulesRequest { component: "TUI".to_string() }));
+            }
         }
         _ => {}
     }
